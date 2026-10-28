@@ -6,9 +6,10 @@
 # uses lib.sh's _lg_init / _lg_die / _lg_usage / _lg_emit / _lg_cfg /
 # _lg_doc_index / _lg_out_file, adapters.sh's _lg_remote_cache, index.sh's
 # _lg_index / _lg_ix_shallow / _lg_ix_trace / _lg_ix_pr_note, relations.sh's
-# _lg_trailers / _lg_msg_claims / _LG_AWK_TRAILER, glob.sh's _LG_AWK_GLOB,
-# parse.sh's _lg_scratch_name / _lg_awkv, query.sh's _lg_pr_data_into and
-# doc-tools.sh's _hash_one.
+# _lg_trailers / _lg_msg_claims / _LG_AWK_TRAILER / _LG_AWK_RW, glob.sh's
+# _LG_AWK_GLOB, frontmatter.awk (mode=lib), parse.sh's _lg_scratch_name /
+# _lg_awkv / _LG_BOM, query.sh's _lg_pr_data_into and doc-tools.sh's
+# _hash_one.
 #
 # Range semantics (controller ruling R2 — the principle of spec-claims
 # 3.2.0's `claims gate`: trunk merged into a branch is never the branch's
@@ -53,8 +54,8 @@
 #       against this base ("M" merged, "U" no common history), and the
 #       tip's committer date
 #   branch/f-<tip>-<merge-base>-<sig>.tsv   the branch's facts, forever (a fact
-#       about the two commits): its net diff, its trailer lines, the key-
-#       shaped words of the plans it modifies; <sig> (and line 1) is the
+#       about the two commits): its net diff, its trailer lines, the
+#       values the plans it modifies link; <sig> (and line 1) is the
 #       signature of what they depend on (the trailer names, the plan
 #       directories of the source's doc-index, the parser programs:
 #       _lg_ifl_sig), so two plan-directory sets keep their own files
@@ -69,30 +70,35 @@
 # a tip whose own commits reach exactly one base commit has it as its merge
 # base, and that walk is its range; a tip reaching several (the trunk merged
 # in) asks `git merge-base` and walks its own range. One `git diff-tree
-# --stdin` gives every net diff, one `git cat-file --batch` the plans.
+# --stdin` gives every net diff, one `git cat-file --batch` the plans'
+# links.
 #
 # Claims (design §H.1), joined with the index: a trailers.claims value
 # naming a key or alias (split on commas and blanks, any case); a
 # trailers.claims_by_path value naming an item path ("./" dropped); an item
-# file in the net diff; a key or alias named (as a word) in a plan the
-# branch modifies — a .md file in the directory of a doc-index entry of a
-# doc_columns.plan type, or matching doc_columns.plan.globs; a
-# trailers.claims_by_ref keyword (#N) — with config items.adapter, the one
-# hosted item whose ref ends in "#N" (controller ruling R5: mapped at join
-# time against the index, the "H" lines of the join; the branch facts keep
-# the raw "#N"). A ref no hosted item ends in, or several do, or any ref
-# without an items adapter, is counted (once per branch and ref) in the
-# run's one stderr note and dropped (_lg_ifl_refs_note once the hosted
-# items are known; "no items adapter maps #N" without one). Contract
-# changes: a net-diff file a contract's defined_in
-# matches ({id, line: null}), or "Contract-Change: <id> <text>" ({id,
-# line: <text> without the leading separator}); acks: Ledger-Ack's first
-# word. A branch's PR: an open PR (config adapters.pr) whose head is the
-# branch's name (this host's branches; never a cross-repository one), else
-# whose resolved head commit is the branch's tip; the highest number.
+# file in the net diff; an item a plan the branch modifies links — a
+# Related work row marked include naming its key, an alias or its path,
+# or a frontmatter value that is one (_LG_AWK_IFL_LINKS: upkeep's
+# plan-link, never a key word of the body; archived items included, as
+# for every claim here); a plan is a .md file in the directory of a
+# doc-index entry of a doc_columns.plan type, or matching
+# doc_columns.plan.globs; a trailers.claims_by_ref keyword (#N) — with
+# config items.adapter, the one hosted item whose ref ends in "#N"
+# (controller ruling R5: mapped at join time against the index, the "H"
+# lines of the join; the branch facts keep the raw "#N"). A ref no hosted
+# item ends in, or several do, or any ref without an items adapter, is
+# counted (once per branch and ref) in the run's one stderr note and
+# dropped (_lg_ifl_refs_note once the hosted items are known; "no items
+# adapter maps #N" without one). Contract changes: a net-diff file a
+# contract's defined_in matches ({id, line: null}), or "Contract-Change:
+# <id> <text>" ({id, line: <text> without the leading separator}); acks:
+# Ledger-Ack's first word. A branch's PR: an open PR (config adapters.pr)
+# whose head is the branch's name (this host's branches; never a
+# cross-repository one), else whose resolved head commit is the branch's
+# tip; the highest number.
 
 _LG_IFL_SCHEMA="ledger-inflight/1"
-_LG_IFL_FACTS="ledger-branch/1"
+_LG_IFL_FACTS="ledger-branch/2"
 _LG_IFL_LOADED=""
 _LG_IFL_ON=0
 
@@ -803,60 +809,108 @@ END {
   }
 }'
 
-# The plan words (awk): stdin `git cat-file --batch` (NUL → \001) for
-# "<tip>:<path>" lines (-v req: the same lines, in order). Prints
-# "K\t<tip>\t<word>" per distinct key-shaped word (lowercased) of each
-# blob. Each header takes one request. As frontmatter.awk's batch mode, a
-# stream out of step with its requests exits 3 (the caller dies): a header
-# past the last request, a line where a header belongs that is none, a
-# separator line that is not empty, an object whose lines overrun its
-# size, a stream that ends inside an object or before every request has
-# its object — never a short read that passes, or that only fails when
-# git, past the pipe buffers, dies of SIGPIPE.
+# The plan links (awk, after relations.sh's _LG_AWK_RW — the Related work
+# reader — and frontmatter.awk run with mode=lib, as upkeep's
+# _LG_AWK_UP_PLAN_LINKS composes them): stdin `git cat-file --batch` (NUL
+# → \001) for "<tip>:<path>" lines (-v req: the same lines, in order).
+# Prints "L\t<tip>\t<value>" once per tip for each value its blobs LINK
+# (design 2026-10-18 §4 D9, as upkeep's plan-link reads a plan): the first
+# cell of a Related work row whose mark is "include" (relations.sh
+# rw_linked, which upkeep's plans call too), and each string of
+# a frontmatter value (a scalar, or a list's elements) — never a word of
+# the body. An unterminated frontmatter is no frontmatter: its lines are
+# body text, as upkeep reads them. In a value a tab is \002 and a newline
+# \001 (the join's path encoding); the join maps it to a key or alias (any
+# case), else to an item path ("./" dropped). Each header takes one
+# request. As frontmatter.awk's batch mode, a stream out of step with its
+# requests exits 3 (the caller dies): a header past the last request, a
+# line where a header belongs that is none, a separator line that is not
+# empty, an object whose lines overrun its size, a stream that ends inside
+# an object or before every request has its object — never a short read
+# that passes, or that only fails when git, past the pipe buffers, dies of
+# SIGPIPE.
 # shellcheck disable=SC2016  # awk source
-_LG_AWK_IFL_WORDS='
-function desync() { DIE = 1; exit 3 }
-function words(s,   n, i, w, W, j) {
-  s = tolower(s); gsub(/[^a-z0-9-]+/, " ", s)
-  n = split(s, W, " ")
+_LG_AWK_IFL_LINKS='
+function ifl_desync() { DIE = 1; exit 3 }
+function ifl_val(v) {
+  if (v == "") return
+  gsub(/\t/, "\002", v); gsub(/\n/, "\001", v)
+  if (!((tip, v) in SEENL)) { SEENL[tip, v] = 1; print "L\t" tip "\t" v }
+}
+function ifl_hex(h,   i, n) {
+  n = 0
+  for (i = 1; i <= length(h); i++) n = n * 16 + index("0123456789abcdef", tolower(substr(h, i, 1))) - 1
+  return n
+}
+# ifl_fm(j): each string of a frontmatter value as frontmatter.awk writes
+# it (a JSON string, or a list of them), decoded (js: \\ \" \t \n \r \u00XX).
+function ifl_fm(j,   n, i, c, s, ins) {
+  n = length(j); ins = 0
   for (i = 1; i <= n; i++) {
-    w = W[i]
-    if (w !~ /^[a-z0-9-]+-[1-9][0-9]*$/) continue
-    j = match(w, /-[1-9][0-9]*$/)
-    if (j < 2 || j > 17) continue
-    if (!((tip, w) in SEENW)) { SEENW[tip, w] = 1; print "K\t" tip "\t" w }
+    c = substr(j, i, 1)
+    if (!ins) { if (c == "\"") { ins = 1; s = "" }; continue }
+    if (c == "\"") { ifl_val(s); ins = 0; continue }
+    if (c == "\\") {
+      c = substr(j, ++i, 1)
+      if (c == "t") c = "\t"
+      else if (c == "n") c = "\n"
+      else if (c == "r") c = "\r"
+      else if (c == "u") { c = sprintf("%c", ifl_hex(substr(j, i + 1, 4))); i += 4 }
+    }
+    s = s c
   }
+}
+function ifl_line(line,   us) {
+  us = state
+  doc_line(line)
+  if (us == "body" || (us == "start" && state == "body")) ifl_val(rw_linked(line))
+}
+function ifl_end(   i) {
+  if (state == "fm") for (i = 1; i <= nL; i++) ifl_val(rw_linked(L[i]))
+  else for (i = 1; i <= nk; i++) ifl_fm(FV[FK[i]])
 }
 BEGIN { left = -1 }
 {
   # -2: this line is the separator after an object that ended on a
   # newline (or was empty) — tested first, since -2 < 0 would read it as
   # a header and take the next request with it.
-  if (left == -2) { if ($0 != "") desync(); left = -1; next }
+  if (left == -2) { if ($0 != "") ifl_desync(); left = -1; next }
   if (left < 0) {
-    if ((getline r < req) <= 0) desync()
+    if ((getline r < req) <= 0) ifl_desync()
     if ($0 ~ / (missing|ambiguous)$/) next
-    if ($0 !~ /^[0123456789abcdef]+ (blob|tree|commit|tag) [0123456789]+$/) desync()
+    if ($0 !~ /^[0123456789abcdef]+ (blob|tree|commit|tag) [0123456789]+$/) ifl_desync()
     t = index(r, ":"); tip = substr(r, 1, t - 1)
     blob = ($2 == "blob")
     left = $3 + 0
-    if (left == 0) left = -2
+    if (blob) { doc_begin(); rw_begin() }
+    if (left == 0) { if (blob) ifl_end(); left = -2 }
     next
   }
   # Another type (a gitlink whose commit is here): its content is skipped.
-  if (blob) words($0)
+  if (blob) ifl_line($0)
   # The object ends with this line: exactly (its newline was part of the
   # object; the separator line follows), or one byte short (the separator
   # ended it).
   left -= length($0) + 1
+  if (left < -1) ifl_desync()
+  if (left <= 0 && blob) ifl_end()
   if (left == 0) left = -2
-  else if (left < -1) desync()
 }
-# An `exit` in a rule still runs END: DIE says it was a desync already.
+# An `exit` in a rule still runs END: DIE says it was a desync already
+# (frontmatter.awk END, first, exits 3 on it).
 END {
   if (DIE) exit 3
   if (left != -1 || (getline r < req) > 0) exit 3
 }'
+
+# _lg_ifl_links <req>: the plan links (_LG_AWK_IFL_LINKS) of the
+# `git cat-file --batch` stream on stdin (NUL already mapped to \001), its
+# requests in <req>; the program is written beside it, as <req>.awk (a
+# pipeline's last stage runs in a subshell: no scratch name of its own).
+_lg_ifl_links() {
+  printf '%s\n' "$_LG_AWK_RW$_LG_AWK_IFL_LINKS" > "$1.awk" || _lg_die "cannot write $1.awk"
+  LC_ALL=C awk -v mode=lib -v bom="$_LG_BOM" -v req="$1" -f "$_LG_LIB/frontmatter.awk" -f "$1.awk"
+}
 
 # _lg_ifl_plans <src> <out>: which files are plans, as lines "d\t<dir/>"
 # (the directory of each entry of the doc-index <src> holds — the working
@@ -908,8 +962,9 @@ function ifl_plan(p,   d) {
 # The signature covers what facts depend on beyond the two commits: the
 # trailer names, the plan directories (the source's doc-index), and the
 # parser programs (_LG_AWK_TRAILER — the closing-keyword rule included —,
-# the walk, the plan words, the plan test _LG_AWK_IFL_PLAN and the glob
-# grammar _LG_AWK_GLOB it matches plan globs with).
+# the walk, the plan links _LG_AWK_IFL_LINKS with the Related work reader
+# _LG_AWK_RW and frontmatter.awk it runs on, the plan test _LG_AWK_IFL_PLAN
+# and the glob grammar _LG_AWK_GLOB it matches plan globs with).
 _LG_IFL_SRC=worktree
 _LG_IFL_SIGSRC=""
 _lg_ifl_sig() {
@@ -921,7 +976,8 @@ _lg_ifl_sig() {
   _lg_tr_since
   _lg_ifl_plans "$_LG_IFL_SRC" "$_SCRATCH/lg-ifl-plans"
   { printf '%s\n' "$_LG_IFL_FACTS"; cat "$_SCRATCH/lg-ifl-tr"; printf 'since %s\nplans\n' "$_LG_TR_SINCE"; cat "$_SCRATCH/lg-ifl-plans"
-    printf 'parsers\n%s\n%s\n%s\n%s\n%s\n' "$_LG_AWK_TRAILER" "$_LG_AWK_IFL_WALK" "$_LG_AWK_IFL_WORDS" "$_LG_AWK_IFL_PLAN" "$_LG_AWK_GLOB"; } > "$s.sig" \
+    printf 'parsers\n%s\n%s\n%s\n%s\n%s\n%s\n' "$_LG_AWK_TRAILER" "$_LG_AWK_IFL_WALK" "$_LG_AWK_RW" "$_LG_AWK_IFL_LINKS" "$_LG_AWK_IFL_PLAN" "$_LG_AWK_GLOB"
+    cat "$_LG_LIB/frontmatter.awk"; } > "$s.sig" \
     || _lg_die "cannot write $s.sig"
   _hash_one "$s.sig"
   _LG_IFL_SIG=${_HASH#sha256:}
@@ -995,23 +1051,23 @@ _lg_ifl_cold() {
     BEGIN { ifl_plans(plans) }
     { split($0, a, "\t"); if (ifl_plan(a[3])) print a[2] ":" a[3] }' "$s.diff" > "$s.preq" \
     || _lg_die "cannot list the in-flight plans"
-  : > "$s.words"
+  : > "$s.links"
   if [ -s "$s.preq" ]; then
     git cat-file --batch < "$s.preq" 2> "$s.err" | tr '\000' '\001' \
-      | LC_ALL=C awk -v req="$s.preq" "$_LG_AWK_IFL_WORDS" > "$s.words" \
+      | _lg_ifl_links "$s.preq" > "$s.links" \
       || _lg_die "cannot read the in-flight plans: $(head -n 1 "$s.err")"
   fi
   # One facts file per tip with a merge base: written in a private
   # directory, then moved into place (each rename atomic).
   mkdir -p -- "$dir" 2>/dev/null || _lg_die "cannot create $dir"
   tmpd=$(mktemp -d "$dir/.new.XXXXXX") || _lg_die "cannot create a temp dir in $dir"
-  if ! LC_ALL=C awk -F '\t' -v d="$tmpd" -v hdr="# $_LG_IFL_FACTS $_LG_IFL_SIG" -v sx="$_LG_IFL_SIG" -v diff="$s.diff" -v words="$s.words" -v pairs="$s.pairs" '
+  if ! LC_ALL=C awk -F '\t' -v d="$tmpd" -v hdr="# $_LG_IFL_FACTS $_LG_IFL_SIG" -v sx="$_LG_IFL_SIG" -v diff="$s.diff" -v links="$s.links" -v pairs="$s.pairs" '
       BEGIN { while ((getline l < pairs) > 0) { split(l, a, " "); WANT[a[1]] = 1 } }
       $1 == "B" { if ($2 in WANT) { MB[$2] = $3; n++; ORD[n] = $2 } next }
       $1 == "T" { T[$2] = T[$2] "T\t" substr($0, length($1) + length($2) + 3) "\n"; next }
       END {
         while ((getline l < diff) > 0) { split(l, a, "\t"); F[a[2]] = F[a[2]] "F\t" substr(l, length(a[1]) + length(a[2]) + 3) "\n" }
-        while ((getline l < words) > 0) { split(l, a, "\t"); K[a[2]] = K[a[2]] "K\t" a[3] "\n" }
+        while ((getline l < links) > 0) { split(l, a, "\t"); K[a[2]] = K[a[2]] "L\t" a[3] "\n" }
         for (i = 1; i <= n; i++) {
           o = ORD[i]; f = d "/f-" o "-" MB[o] "-" sx ".tsv"
           printf "%s\nmb\t%s\n%s%s%s# end\n", hdr, MB[o], F[o], T[o], K[o] > f
@@ -1335,9 +1391,11 @@ BEGIN {
         w = v; sub(/[ \t].*/, "", w)
         if (w != "" && !((i, w) in AK)) { AK[i, w] = 1; print "A\t" i "\t" w }
       }
-    } else if (k == "K\t") {
-      w = substr(l, 3)
+    } else if (k == "L\t") {
+      # A value a plan links: a key or alias (any case), else an item path.
+      v = substr(l, 3); w = tolower(v)
       if (w in KM) claim(i, KM[w])
+      else { if (substr(v, 1, 2) == "./") v = substr(v, 3); if (v in ID) claim(i, v) }
     }
   }
   close(f)
