@@ -33,7 +33,8 @@ Two things `check` cannot see. Check them yourself:
 
 1. Tell the user the verdict line and its fix, word for word. For missing tools the fix is the
    user's: approve or restart the doc-search server, then start a new session.
-2. If the fix is `sh .claude/doc-superpowers/search-mcp.sh index`, `status` or `check`, you may run it
+2. If the fix is `sh .claude/doc-superpowers/search-mcp.sh index`, `status` or `check`, and the verdict does
+   not say only the user can run it, you may run it
    from your top-level directory (or by the launcher's absolute path), then run `check`. Exit `0`: carry on.
 3. Otherwise stop. No other tool call, no search by other means, no edits, until the user tells you
    doc-search is ready.
