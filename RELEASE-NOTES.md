@@ -1,5 +1,49 @@
 # Release Notes
 
+## v3.11.0 (2026-10-28)
+
+This release lets a repository require doc-search: an agent stops while doc-search cannot answer, instead of working around it. Two new config keys set the policy, `doc-search check` decides one verdict, and the opt-in `--search-gate` hooks act on it in Claude Code and Codex. The gate applies only to a developer whose client finds doc-superpowers; for everyone else the committed hooks do nothing. A repository that does not set `"required": true` sees no change.
+
+The decision is mechanical because rule text alone did not hold. Fresh agents under deadline pressure, given a hand-written "search first" rule, carried on past a stale index and an outdated launcher in 2 of 2 runs ("a stale cache isn't one of the listed outages").
+
+### Upgrading from 3.10.0
+Nothing changes until a repository sets `"required": true`. `doc-search init` still writes a config without the new keys, so a 3.10.0 teammate can read it.
+- **`hooks install --search` users:** `scripts/search/launch.sh` changed, so the committed `.claude/doc-superpowers/search-mcp.sh` reads `outdated` in `hooks status --search`. Re-run `hooks install --search` and commit the launcher.
+- **Requiring doc-search** needs every opted-in developer on 3.11.0 or later:
+  - 3.10.0 and older reject the new keys: every tool and CLI verb answers `invalid config: unknown key required` (or `requires`). That message is the cue to update.
+  - 3.10.0 and older have no `check` or `gate` (an unknown verb, exit 3). Run through an older launcher copy, or directly, nothing gates such a developer: the gate is silently absent for them.
+  - The 3.11.0 launcher answers for an older plugin itself. Where the config is required, `check` exits 1, the session-start hook tells the agent to stop, the prompt hook blocks and the tool hook denies, with `doc-superpowers <version> predates the readiness gate` and the plugin update as the fix (`claude plugin update doc-superpowers`, or `git -C ~/.codex/doc-superpowers pull` for the Codex root).
+- **The gate's hooks:** run `hooks install --search --search-gate` and commit `.claude/settings.json` and `.codex/hooks.json`. The session-start hook carries `--client claude` or `--client codex`; an entry without it reads `partial` in `hooks status --search-gate`, and re-running the install replaces it.
+- **The agent rule:** copy the marked block of `references/search-rule.md` into `AGENTS.md` or `CLAUDE.md` and commit it. `hooks status --search-gate` says whether the copy is current.
+- **`doc-release.yml`** may now also commit `scripts/search/launch.sh` and `references/search-rule.md`, the two files `bump-version` stamps in the doc-superpowers tree. A project has neither file, so nothing changes for it.
+
+### Added
+- **Two config keys** (`docs/search/config.json`; `references/search.md` → *Configuration*). `"required": true` makes doc-search a gate in this repository; the default `false` keeps the soft behavior. `"requires": ">=X.Y.Z"` is a version floor for the plugin and for the committed launcher copy; the default `null` sets none.
+- **`doc-search check [--format text|json] [--budget 1-600]`**, the readiness probe (`references/search.md` → *CLI* → `check`).
+  - Exits `0` ready or degraded, `1` not-ready (with one fix command), `3` usage, `4` not in force (no doc-superpowers for this developer, no config, or not required).
+  - Ready means a valid config, the plugin and the launcher copy at or above `requires`, and both indexes matching the tree. Degraded: the static docs index serves while a transformer index builds, or the launcher copy differs from the plugin's but meets the floor.
+  - Where required, a stale index gets one incremental refresh, bounded by `--budget` (default 20 s). `check` never starts a first build, and where doc-search is not required it refreshes nothing.
+  - `--format json` gives the state, reason, fix, version, the launcher's state, each client's MCP state and the index states.
+- **`doc-search gate session-start|prompt|tool`**, what the client hooks run.
+  - `session-start` adds the verdict as context; not ready, it tells the agent to do no work until it is.
+  - `prompt` blocks the prompt while not ready, with the reason and the fix.
+  - `tool` runs no Python: it reads a per-worktree verdict file (`$(git rev-parse --git-path doc-search-gate)`) and, while it says not ready, denies every tool call but the launcher's `index`, `status` and `check`. `check` keeps that file too, so the halt's own fix followed by `check` lifts the gate.
+  - The launcher answers `check` and `gate` itself where doc-search cannot run: no root, no `uv`, or an older plugin.
+- **`hooks install --search-gate`** (`references/hooks.md` → *doc-search gate set*). It registers the three hooks (`SessionStart`, `UserPromptSubmit`, `PreToolUse`) in `.claude/settings.json` and `.codex/hooks.json`, merged per handler, both committed.
+  - It is never part of `--all` or `--search`, and is refused without the config, or without the plugin's own launcher copy (unless `--search` runs with it and writes that copy first).
+  - `uninstall --search` alone is refused while these hooks are installed: `uninstall --search-gate` first, or both together.
+  - `hooks status --search-gate [--json]` reports each file (`installed`, `partial`, `absent`) and the rule copy (`.tiers.search_gate`).
+- **The agent rule** `references/search-rule.md`: a block a project copies between `<!-- doc-superpowers:search-rule vX.Y.Z -->` and its closing marker. It is keyed to `check`'s exits and names the two cases `check` cannot see (the MCP tools missing while expected, and the wrong worktree). The status drift check compares the lines between the markers.
+- **The Codex root.** The launcher also finds doc-superpowers at `${CODEX_HOME:-$HOME/.codex}/doc-superpowers`, after `$DOC_SUPERPOWERS_ROOT` and the repository itself and before the Claude Code plugin cache, so a Codex-only developer needs no variable (`.codex/INSTALL.md` → *doc-search*).
+- **Two per-developer variables**, usually set in the launcher's env hook. `DOC_SEARCH_MCP=0`: this developer's client cannot run the MCP server, so `check` reports its MCP state as `off` and the rule does not halt on missing tools. `DOC_SEARCH_GATE=0`: the hooks allow everything for this developer and leave the verdict file alone.
+- **Version stamps.** Line 2 of `scripts/search/launch.sh` is `# doc-search launcher vX.Y.Z`, and the rule's opening marker carries the version too. `doc-tools.sh bump-version` writes both and `check-version` checks both, only in the doc-superpowers tree (a project's own files of those names are left alone).
+
+### Other
+- What is verified for Codex: the `.codex/hooks.json` shape was checked offline with codex-cli 0.163.0 (its `hooks/list` loaded the three hooks in a trusted project and none in an untrusted one). The hooks have not been seen firing in a live Codex session, and which tools Codex sends through `PreToolUse` is not verified. Cursor is unverified.
+- The rule's wording was tried with fresh agents, one fresh context per run, five runs per case: the MCP tools missing while expected, a launcher below the floor, doc-superpowers not installed, a first transformer build only the user can run, and Codex without the MCP entry. Each case got the intended answer in 5 of 5. Without the rule, the tools-missing case halted in 0 of 5.
+- Known limits, left for later: a launcher copy newer than the plugin's is refused by `install --search-gate` with a message that calls it older; for a development checkout set as the root, the fix names `claude plugin update`; the rule's excuses table does not name the client in its `mcp:` row.
+- Suite counts are in CLAUDE.md. The full local `check-ci.sh` passed under bash 5.x and `/bin/bash` 3.2: seven suites, 15524 assertions (from 14896), `test-hooks.sh` 4243, `test-doc-tools.sh` 1656, `test-spec-status-model.sh` 1045, the other four unchanged; doc-search's pytest suite, 863 passed with the 2 live tests skipped. GitHub Actions does not run on this account (billing lock), so this release was verified locally.
+
 ## v3.10.0 (2026-10-26)
 
 This release adds `setup` and `help` (#51, phase 1 of #54). `setup` turns doc-superpowers on in a repository in one pass, with fixed safe defaults, and shows every write before it makes one. `help` is a one-screen map of every feature. Both work from the skill (`/doc-superpowers setup`, `/doc-superpowers help`) and from a terminal (`scripts/doc-superpowers`), with the same text.
