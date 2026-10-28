@@ -4409,6 +4409,30 @@ test_lg_publish_rejects_non_ff() {
   teardown
 }
 
+test_lg_publish_rejects_non_ff_same_second() {
+  echo "test: ledger publish never forces — two lost races in the same second are both rejected with exit 2"
+  lg_publish_fixture
+  local vb=refs/heads/doc-ledger-views first
+  lg publish
+  assert_eq "0" "$LG_RC" "first publish: exit 0"
+  # Both clocks pinned: every commit of the two races has the same timestamp,
+  # as when both legs run within one second.
+  GIT_AUTHOR_DATE="2026-01-01T00:00:00Z" GIT_COMMITTER_DATE="2026-01-01T00:00:00Z" \
+    DOC_TOOLS_LEDGER_SELFTEST=publish-race lg publish
+  assert_eq "2" "$LG_RC" "the first race: exit 2"
+  first=$(git --git-dir="$LG_REMOTE" rev-parse "$vb")
+  GIT_AUTHOR_DATE="2026-01-01T00:00:00Z" GIT_COMMITTER_DATE="2026-01-01T00:00:00Z" \
+    DOC_TOOLS_LEDGER_SELFTEST=publish-race lg publish --format json
+  assert_eq "2" "$LG_RC" "a second race in the same second: exit 2"
+  assert_json_field "$LG_OUT" '.exit' "2" "…the verdict object says 2"
+  assert_contains "$LG_ERR" "rejected: the branch moved" "…stderr says the push was rejected"
+  assert_eq "selftest race" "$(git --git-dir="$LG_REMOTE" log -1 --format=%s "$vb")" \
+    "…the remote keeps the other publisher's commit"
+  assert_eq "$first" "$(git --git-dir="$LG_REMOTE" rev-parse "$vb^")" \
+    "…the rival's second commit descends from its first"
+  teardown
+}
+
 test_lg_publish_base_without_config() {
   echo "test: ledger publish — a base without docs/ledger/config.json cannot be published (exit 2)"
   lg_publish_fixture
@@ -15161,6 +15185,7 @@ run_tests() {
   test_lg_view_spaced_work_tree
   test_lg_publish_orphan_branch
   test_lg_publish_rejects_non_ff
+  test_lg_publish_rejects_non_ff_same_second
   test_lg_publish_base_without_config
   test_lg_publish_base_only
   test_lg_publish_base_without_remote_prefix
