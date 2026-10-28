@@ -1990,7 +1990,7 @@ test_editor_commit_gets_the_note_and_git_strips_it() {
   seen="$ed/seen"
   printf '#!/bin/sh\ncp "$1" "%s"\n{ printf "edited message\\n"; cat "%s"; } > "$1"\n' "$seen" "$seen" > "$ed/editor"
   chmod +x "$ed/editor"
-  run_hooked GIT_EDITOR="$ed/editor" -- git commit -q
+  run_hooked GIT_EDITOR="'$ed/editor'" -- git commit -q
   assert_eq "0" "$RUN_RC" "the commit succeeds"
   assert_contains "$(cat "$seen" 2>/dev/null)" "already stale" "the editor shows the note"
   assert_contains "$(cat "$seen" 2>/dev/null)" "docs/architecture.md" "naming the doc"
@@ -6097,7 +6097,8 @@ test_launcher_env_hook() {
   assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_OUT" "no hook: unchanged"
   # The default location: it runs before the root is resolved, so what it sets is used.
   mkdir -p "$hookdir"
-  printf 'DOC_SUPERPOWERS_ROOT=%s\n' "$other" > "$hookdir/env.sh"
+  # The hook is shell: a value is quoted, as a spaced path needs.
+  printf "DOC_SUPERPOWERS_ROOT='%s'\n" "$other" > "$hookdir/env.sh"
   srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
   assert_eq "0" "$RUN_RC" "the default hook: exit 0"
   assert_eq "uv run --project $other/search --frozen --no-dev doc-search serve" "$RUN_OUT" "…\$XDG_CONFIG_HOME/doc-search/env.sh is sourced before the root is resolved"
@@ -6109,7 +6110,7 @@ test_launcher_env_hook() {
   assert_contains "$RUN_OUT" "$other/search" "…and \$HOME/.config/doc-search/env.sh is read then"
   rm -rf "$HOME/.config"
   # DOC_SEARCH_ENV_FILE replaces the default; empty is unset; a missing file is skipped.
-  printf 'DOC_SUPERPOWERS_ROOT=%s\n' "$envroot" > "$other/hook.sh"
+  printf "DOC_SUPERPOWERS_ROOT='%s'\n" "$envroot" > "$other/hook.sh"
   srl_run DOC_SEARCH_ENV_FILE="$other/hook.sh" -- serve
   assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_OUT" "DOC_SEARCH_ENV_FILE names the hook (the default one is not read)"
   srl_run DOC_SEARCH_ENV_FILE= -- serve
@@ -6122,7 +6123,7 @@ test_launcher_env_hook() {
   bin=$(harness_mktemp_d envuv)
   printf '#!/bin/sh\nprintf "cache=%%s\\n" "${SEMBLE_CACHE_LOCATION:-unset}"\n' > "$bin/uv"
   chmod +x "$bin/uv"
-  printf 'if [ -e "%s/ready" ]; then export SEMBLE_CACHE_LOCATION=%s/semble; fi\n' "$other" "$other" > "$hookdir/env.sh"
+  printf 'if [ -e "%s/ready" ]; then export SEMBLE_CACHE_LOCATION="%s/semble"; fi\n' "$other" "$other" > "$hookdir/env.sh"
   srl_run SEMBLE_CACHE_LOCATION= DOC_SUPERPOWERS_ROOT="$envroot" PATH="$bin:$REAL_PATH" -- serve
   assert_eq "cache=unset" "$RUN_OUT" "an export the hook skips: doc-search keeps its default"
   : > "$other/ready"
