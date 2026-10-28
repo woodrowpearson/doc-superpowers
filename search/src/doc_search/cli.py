@@ -271,14 +271,19 @@ def _serve(args: argparse.Namespace) -> int:
 INIT_OMITS = ("required", "requires")
 
 
+def init_config() -> dict[str, Any]:
+    """The config `init` writes: DEFAULTS without INIT_OMITS (setup's copy, scripts/setup/search-config.json, is
+    this, byte for byte)."""
+    return {key: value for key, value in DEFAULTS.items() if key not in INIT_OMITS}
+
+
 def _init(args: argparse.Namespace) -> int:
     top = RepoInfo.from_cwd(Path.cwd()).top
     target = top / CONFIG_REL
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         with open(target, "x", encoding="utf-8") as handle:  # exclusive: it never overwrites
-            written = {key: value for key, value in DEFAULTS.items() if key not in INIT_OMITS}
-            handle.write(json.dumps(written, indent=2) + "\n")
+            handle.write(json.dumps(init_config(), indent=2) + "\n")
     except FileExistsError:
         print(f"doc-search: {CONFIG_REL} exists; not changed")
         return 0
