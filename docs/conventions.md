@@ -66,7 +66,7 @@ Version consistency is managed via `doc-tools.sh`:
 
 Manifest files managed: `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.cursor-plugin/plugin.json`, `gemini-extension.json`.
 
-The launcher stamp is line 2 of `scripts/search/launch.sh`, `# doc-search launcher vX.Y.Z` (the first such line in the first 5 lines). The search-rule stamp is the opening marker of the block in `references/search-rule.md`, `<!-- doc-superpowers:search-rule vX.Y.Z -->` (the first such line in the file). Neither is JSON, so `bump-version` rewrites them with `sed` rather than `jq`; a tree without the file skips its stamp.
+The launcher stamp is line 2 of `scripts/search/launch.sh`, `# doc-search launcher vX.Y.Z` (the first such line in the first 5 lines). The search-rule stamp is the opening marker of the block in `references/search-rule.md`, `<!-- doc-superpowers:search-rule vX.Y.Z -->` (the first such line in the file). Neither is JSON, so `bump-version` rewrites them with `sed` rather than `jq`. Both are kept only in the doc-superpowers tree (`search/pyproject.toml` and `scripts/doc-tools.sh` present): a tree without the file, or a project with files of those names of its own, skips the stamp.
 
 `RELEASE-NOTES.md` is not one of them. It is the canonical version source that `check-version` reads and compares the manifests against, and its `## vX.Y.Z` heading is written by the `release` action — never by `bump-version`.
 

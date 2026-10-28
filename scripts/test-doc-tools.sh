@@ -1477,10 +1477,20 @@ test_check_version_passes_when_synced() {
   teardown
 }
 
+# setup_ds_tree: the files that make the cwd the doc-superpowers tree, where
+# the stamps are kept: search/pyproject.toml and scripts/doc-tools.sh.
+setup_ds_tree() {
+  mkdir -p search scripts
+  : > search/pyproject.toml
+  [ -f scripts/doc-tools.sh ] || printf '#!/usr/bin/env bash\n' > scripts/doc-tools.sh
+}
+
 # setup_launcher_stamp <line 2>: scripts/search/launch.sh (mode 755) with
-# <line 2> as its second line. Line 4 is a second stamp-shaped line: only the
-# first one in the first 5 lines is the stamp.
+# <line 2> as its second line, in the doc-superpowers tree. Line 4 is a
+# second stamp-shaped line: only the first one in the first 5 lines is the
+# stamp.
 setup_launcher_stamp() {
+  setup_ds_tree
   mkdir -p scripts/search
   printf '#!/bin/sh\n%s\n# the header\n# doc-search launcher v0.0.1\necho launched\n' "$1" > scripts/search/launch.sh
   chmod 755 scripts/search/launch.sh
@@ -1589,6 +1599,7 @@ test_check_version_checks_launcher_stamp() {
 # body and closing marker, and a later stamp-shaped line: only the first one
 # in the file is the stamp.
 setup_rule_stamp() {
+  setup_ds_tree
   mkdir -p references
   printf '# The rule\n\nCopy the block.\n\n%s\n## Rule\n<!-- /doc-superpowers:search-rule -->\n<!-- doc-superpowers:search-rule v0.0.1 -->\n' "$1" > references/search-rule.md
   chmod 644 references/search-rule.md
@@ -1640,6 +1651,56 @@ test_bump_version_rewrites_search_rule_stamp() {
   rm -rf references scripts
   output=$("$DOC_TOOLS" bump-version 9.9.9 2>&1)
   assert_contains "$output" "skip: references/search-rule.md (not found)" "no template: skipped"
+  teardown
+}
+
+test_stamps_only_in_the_doc_superpowers_tree() {
+  echo "test: bump-version and check-version keep the launcher and search-rule stamps only in the doc-superpowers tree (search/pyproject.toml and scripts/doc-tools.sh): a project's own scripts/search/launch.sh or references/search-rule.md is neither written nor checked"
+  setup
+  setup_version_files
+  local output exit_code before_l before_r
+  mkdir -p scripts/search references
+  printf '#!/bin/sh\n# our own search launcher\n' > scripts/search/launch.sh
+  printf '# Our search rule\n' > references/search-rule.md
+  printf '#!/usr/bin/env bash\n' > scripts/doc-tools.sh
+  before_l=$(cat scripts/search/launch.sh)
+  before_r=$(cat references/search-rule.md)
+  set +e
+  output=$("$DOC_TOOLS" check-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "a project with doc-tools.sh vendored and files of those names: check-version exits 0"
+  assert_not_contains "$output" "launch.sh" "…the launcher is not checked"
+  assert_not_contains "$output" "search-rule.md" "…nor the rule"
+  set +e
+  output=$("$DOC_TOOLS" bump-version 2.0.0 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "bump-version exits 0"
+  assert_contains "$output" "skip: scripts/search/launch.sh (not the doc-superpowers tree)" "…skipping the launcher"
+  assert_contains "$output" "skip: references/search-rule.md (not the doc-superpowers tree)" "…and the rule"
+  assert_contains "$output" "Updated 5 file(s) to v2.0.0" "…the manifests only"
+  assert_eq "$before_l" "$(cat scripts/search/launch.sh)" "…the launcher unchanged"
+  assert_eq "$before_r" "$(cat references/search-rule.md)" "…the rule unchanged"
+  # search/pyproject.toml without scripts/doc-tools.sh is not the tree either.
+  "$DOC_TOOLS" bump-version 1.0.0 >/dev/null 2>&1
+  rm -f scripts/doc-tools.sh
+  mkdir -p search
+  : > search/pyproject.toml
+  set +e
+  output=$("$DOC_TOOLS" check-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "search/pyproject.toml alone: check-version exits 0"
+  assert_not_contains "$output" "launch.sh" "…no stamp checked"
+  # Both: the doc-superpowers tree, and a launcher without its stamp is a mismatch.
+  printf '#!/usr/bin/env bash\n' > scripts/doc-tools.sh
+  set +e
+  output=$("$DOC_TOOLS" check-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "both files: the doc-superpowers tree, check-version exits 1"
+  assert_contains "$output" "MISMATCH: scripts/search/launch.sh has no launcher stamp" "…the launcher checked"
   teardown
 }
 
@@ -7059,16 +7120,21 @@ test_i12_claude_code_json_is_not_a_version_file() {
   teardown
 }
 
-# The doc-release commit step may commit exactly the manifests bump-version
-# writes: its --allow list duplicates VERSION_FILES, so pin them in lockstep.
+# The doc-release commit step may commit exactly the files bump-version
+# writes: its --allow list duplicates VERSION_FILES and the stamp files
+# (*_STAMP_FILE, written in the doc-superpowers tree), so pin them in lockstep.
 test_i12_doc_release_allows_exactly_the_version_files() {
-  echo "test: I-12: doc-release's commit step allows exactly VERSION_FILES (+ the release files)"
+  echo "test: I-12: doc-release's commit step allows exactly VERSION_FILES and the stamp files (+ the release files)"
   local yml="$SCRIPT_DIR/hooks/ci/doc-release.yml" want got
-  want=$(sed -n '/^VERSION_FILES=(/,/^)/p' "$SCRIPT_DIR/doc-tools.sh" | sed -n 's/^ *"\([^:]*\):.*/\1/p' | sort)
+  want=$({
+    sed -n '/^VERSION_FILES=(/,/^)/p' "$SCRIPT_DIR/doc-tools.sh" | sed -n 's/^ *"\([^:]*\):.*/\1/p'
+    grep -E '^[A-Z_]+_STAMP_FILE="' "$SCRIPT_DIR/doc-tools.sh" | sed 's/^[^"]*"\([^"]*\)".*/\1/'
+  } | sort)
+  assert_contains "$want" "scripts/search/launch.sh" "the stamp files are read (the launcher's)"
   got=$(grep -F 'commit-changes.sh' "$yml" | grep -oE -- '--allow [^ ]+' | sed 's/^--allow //' |
     grep -vxE 'RELEASE-NOTES\.md|RELEASE-NOTES\.next/|CLAUDE\.md|README\.md' | sort) || true
   assert_true "VERSION_FILES is not empty" test -n "$want"
-  assert_eq "$want" "$got" "doc-release --allow manifests == VERSION_FILES"
+  assert_eq "$want" "$got" "doc-release --allow manifests and stamps == VERSION_FILES + the stamp files"
 }
 
 # Octal permission bits of a file (GNU or BSD stat).
@@ -8233,6 +8299,7 @@ run_tests() {
   test_check_version_checks_launcher_stamp
   test_bump_version_rewrites_search_rule_stamp
   test_check_version_checks_search_rule_stamp
+  test_stamps_only_in_the_doc_superpowers_tree
   test_fragments_list_empty
   test_fragments_list_valid
   test_fragments_validate_drifted
