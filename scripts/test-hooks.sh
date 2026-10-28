@@ -6508,6 +6508,434 @@ test_launcher_client_cwd() {
   teardown
 }
 
+# --- doc-search: the launcher's check and gate ---------------------------------
+#
+# `check` and `gate` answer in the launcher where doc-search cannot run (outside
+# a work tree, no root, no uv); otherwise they exec doc-search. `gate tool`
+# never runs uv: it decides from the verdict file,
+# $(git rev-parse --git-path doc-search-gate) — line 1 the verdict, line 2 the
+# reason and fix. Every JSON the launcher prints is parsed with `jq -e .`.
+
+SRG_TMP=$(harness_mktemp_d srg)
+SRG_UV_REASON="uv not found (https://docs.astral.sh/uv/)"
+SRG_LAUNCHER_FIX="sh .claude/doc-superpowers/search-mcp.sh"
+
+# srg_run <stdin file> [VAR=value …] -- <launcher args…>: the launcher under
+# /bin/sh in the cwd, stdin from the file, the fake uv in front of PATH (a
+# PATH=… given replaces it). The root variables and DOC_SEARCH_GATE are empty
+# unless given. Sets RUN_RC, RUN_OUT (stdout alone) and RUN_ERR (stderr).
+srg_run() {
+  local input=$1
+  local envs=()
+  shift
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    envs+=("$1")
+    shift
+  done
+  [ "$#" -gt 0 ] && shift
+  RUN_RC=0
+  RUN_OUT=$(env DOC_SUPERPOWERS_ROOT= CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= PATH="$SRL_BIN:$REAL_PATH" \
+    ${envs[@]+"${envs[@]}"} /bin/sh "$SCRIPT_DIR/search/launch.sh" "$@" <"$input" 2>"$SRG_TMP/err") || RUN_RC=$?
+  RUN_ERR=$(cat "$SRG_TMP/err")
+}
+
+# srg_pipe <stdin file> [VAR=value …] -- <launcher args…>: srg_run, the event
+# written through a pipe by cat. RUN_PIPE is cat's exit status: 0 when the
+# launcher drained it, 141 (SIGPIPE) when it exited without reading.
+srg_pipe() {
+  local input=$1 res
+  local envs=()
+  shift
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    envs+=("$1")
+    shift
+  done
+  [ "$#" -gt 0 ] && shift
+  res=$(
+    set +e
+    cat "$input" | env DOC_SUPERPOWERS_ROOT= CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= PATH="$SRL_BIN:$REAL_PATH" \
+      ${envs[@]+"${envs[@]}"} /bin/sh "$SCRIPT_DIR/search/launch.sh" "$@" 2>"$SRG_TMP/err"
+    printf '\n%s %s' "${PIPESTATUS[0]}" "${PIPESTATUS[1]}"
+  )
+  RUN_PIPE=${res##*$'\n'}
+  RUN_RC=${RUN_PIPE#* }
+  RUN_PIPE=${RUN_PIPE%% *}
+  RUN_OUT=${res%$'\n'*}
+  RUN_ERR=$(cat "$SRG_TMP/err")
+}
+
+# srg_event <file> <tool_name> [command]: a PreToolUse event in <file> — a
+# Bash-shaped tool_input with <command>, else a Read-shaped one.
+srg_event() {
+  if [ "$#" -gt 2 ]; then
+    jq -cn --arg t "$2" --arg c "$3" \
+      '{session_id: "s", hook_event_name: "PreToolUse", tool_name: $t, tool_input: {command: $c}}' > "$1"
+  else
+    jq -cn --arg t "$2" \
+      '{session_id: "s", hook_event_name: "PreToolUse", tool_name: $t, tool_input: {file_path: "README.md"}}' > "$1"
+  fi
+}
+
+# srg_nouv_path: a PATH with jq and no uv.
+srg_nouv_path() {
+  local dir
+  dir=$(make_nojq_path)
+  ln -s "$(type -P jq)" "$dir/jq"
+  printf '%s' "$dir"
+}
+
+# srg_is_json: RUN_OUT is exactly one JSON object (`jq -e .` parses it).
+srg_is_json() {
+  jq -e . >/dev/null 2>&1 <<<"$RUN_OUT" && [ "$(jq -cs 'length == 1 and (.[0] | type == "object")' <<<"$RUN_OUT" 2>/dev/null)" = "true" ]
+}
+
+# srg_deny <reason>: the PreToolUse deny JSON with <reason>, compact.
+srg_deny() {
+  jq -cn --arg r "$1" '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}'
+}
+
+# srg_compact: RUN_OUT as compact JSON ("NOT JSON" when it does not parse).
+srg_compact() {
+  jq -c . <<<"$RUN_OUT" 2>/dev/null || echo "NOT JSON"
+}
+
+test_launcher_gate_opt_out() {
+  echo "test: launcher: DOC_SEARCH_GATE=0 — every gate event exits 0 with no output (required with no uv, or a not-ready verdict); check is unchanged; the env hook can set it"
+  srh_fixture '{"required": true}'
+  local envroot nouv vf ev e
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  nouv=$(srg_nouv_path)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
+  ev="$SRG_TMP/rg.json"
+  srg_event "$ev" Bash "rg foo"
+  for e in session-start prompt; do
+    srg_run /dev/null DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate "$e"
+    assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate $e, required, no uv: exit 0, no output"
+    srg_run /dev/null DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" -- gate "$e"
+    assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate $e, with uv: exit 0, no output (doc-search is not run)"
+  done
+  srg_run "$ev" DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate tool, a not-ready verdict, rg: exit 0, no output (allowed)"
+  srg_run "$ev" DOC_SEARCH_GATE=" 0 " DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0:" "$RUN_RC:$RUN_OUT" "…' 0 ' (blanks around it) is 0 too"
+  srg_run "$ev" DOC_SEARCH_GATE=1 DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "…DOC_SEARCH_GATE=1 is not: rg is denied"
+  srg_run /dev/null DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" -- check --format json
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search check --format json" "$RUN_RC:$RUN_OUT" "check is unchanged: doc-search check runs"
+  srg_run /dev/null DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "1:doc-search: not ready: $SRG_UV_REASON" "$RUN_RC:$RUN_OUT" "…and, required with no uv, still says not ready, exit 1"
+  # Read after the env hook: the hook can set it.
+  mkdir -p "$XDG_CONFIG_HOME/doc-search"
+  printf 'DOC_SEARCH_GATE=0\n' > "$XDG_CONFIG_HOME/doc-search/env.sh"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0:" "$RUN_RC:$RUN_OUT" "DOC_SEARCH_GATE=0 set by the env hook: gate tool is silent"
+  printf "GATE_ALLOWED='.*'\n" > "$XDG_CONFIG_HOME/doc-search/env.sh"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "…but the hook cannot widen what is allowed (the launcher's own names are set after it)"
+  teardown
+}
+
+test_launcher_check_gate_outside_a_work_tree() {
+  echo "test: launcher: outside a git work tree — check says 'not in force: not a git work tree', exit 4, without running doc-search; every gate event is silent, exit 0"
+  setup
+  local envroot out nouv ev e
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  nouv=$(srg_nouv_path)
+  out=$(harness_mktemp_d outside)
+  ev="$SRG_TMP/rg.json"
+  srg_event "$ev" Bash "rg foo"
+  cd "$out"
+  srg_run /dev/null GIT_CEILING_DIRECTORIES="$SUITE_TMP" DOC_SUPERPOWERS_ROOT="$envroot" -- check
+  assert_eq "4:doc-search: not in force: not a git work tree:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: the line on stdout, exit 4 (uv is not run)"
+  srg_run /dev/null GIT_CEILING_DIRECTORIES="$SUITE_TMP" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check --format json
+  assert_eq "4:doc-search: not in force: not a git work tree" "$RUN_RC:$RUN_OUT" "…the same with no uv"
+  srg_run /dev/null GIT_CEILING_DIRECTORIES="$SUITE_TMP" -- check
+  assert_eq "4:doc-search: not in force: not a git work tree" "$RUN_RC:$RUN_OUT" "…and with no root (outside a work tree comes first)"
+  for e in session-start prompt; do
+    srg_run /dev/null GIT_CEILING_DIRECTORIES="$SUITE_TMP" DOC_SUPERPOWERS_ROOT="$envroot" -- gate "$e"
+    assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate $e: silent, exit 0"
+  done
+  srg_run "$ev" GIT_CEILING_DIRECTORIES="$SUITE_TMP" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate tool: silent, exit 0"
+  # Inside .git is not a work tree either.
+  cd "$TEST_DIR/.git"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check
+  assert_eq "4:doc-search: not in force: not a git work tree" "$RUN_RC:$RUN_OUT" "inside .git: not a git work tree, exit 4"
+  cd "$TEST_DIR"
+  teardown
+}
+
+test_launcher_check_gate_without_a_root() {
+  echo "test: launcher: no doc-superpowers root — check says 'not in force: doc-superpowers is not installed for this developer', exit 4; every gate event is silent, even required with a not-ready verdict; serve still fails"
+  srh_fixture '{"required": true}'
+  local nouv vf ev e
+  nouv=$(srg_nouv_path)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
+  ev="$SRG_TMP/rg.json"
+  srg_event "$ev" Bash "rg foo"
+  srg_run /dev/null -- check
+  assert_eq "4:doc-search: not in force: doc-superpowers is not installed for this developer:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: the line on stdout, exit 4"
+  srg_run /dev/null PATH="$nouv" -- check
+  assert_eq "4:doc-search: not in force: doc-superpowers is not installed for this developer" "$RUN_RC:$RUN_OUT" "…the same with no uv (no root comes first)"
+  for e in session-start prompt; do
+    srg_run /dev/null PATH="$nouv" -- gate "$e"
+    assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate $e, required, no uv: silent, exit 0"
+  done
+  srg_run "$ev" -- gate tool
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate tool, a not-ready verdict, rg: silent, exit 0"
+  srg_run /dev/null -- serve
+  assert_eq "2:doc-search: cannot find doc-superpowers (set DOC_SUPERPOWERS_ROOT)" "$RUN_RC:$RUN_ERR" "serve keeps its failure: exit 2, one stderr line"
+  teardown
+}
+
+test_launcher_check_gate_without_uv_required() {
+  echo "test: launcher: no uv where the raw config says \"required\": true — check: 'not ready: uv not found', exit 1; gate prompt blocks and gate session-start adds context, as JSON; gate tool decides as usual"
+  srh_fixture '{"required": true}'
+  local envroot nouv vf ev want
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  nouv=$(srg_nouv_path)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "1:doc-search: not ready: $SRG_UV_REASON:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: the line on stdout, exit 1"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate prompt
+  assert_eq "0" "$RUN_RC" "gate prompt: exit 0"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  want="doc-search is required here and not ready: $SRG_UV_REASON. Run: install uv — then send your message again. (Set DOC_SEARCH_GATE=0 to turn the gate off for yourself.)"
+  assert_eq "$(jq -cn --arg r "$want" '{decision: "block", reason: $r}')" "$(srg_compact)" "…blocks the prompt with the reason"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate session-start
+  assert_eq "0" "$RUN_RC" "gate session-start: exit 0"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  want="doc-search is required here and not ready: $SRG_UV_REASON. Fix: install uv. Do no work until it is ready: tell the user this line and stop."
+  assert_eq "$(jq -cn --arg r "$want" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $r}}')" "$(srg_compact)" "…adds the reason as context"
+  # gate tool: as usual, from the verdict file (none yet: silent).
+  ev="$SRG_TMP/rg.json"
+  srg_event "$ev" Bash "rg foo"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
+  assert_eq "0:" "$RUN_RC:$RUN_OUT" "gate tool, no verdict file: silent"
+  printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "gate tool, a not-ready verdict: rg is denied (no uv needed)"
+  rm -f "$vf"
+  # The raw text decides, as Python's config_says_required does: "required"\s*:\s*true.
+  mkdir -p src/deep
+  (cd src/deep && srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check && echo "$RUN_RC" > "$SRG_TMP/deep.rc")
+  assert_eq "1" "$(cat "$SRG_TMP/deep.rc")" "from a subdirectory: the config at the repository top, exit 1"
+  printf '{\n  "required"\n    :\ttrue\n}\n' > docs/search/config.json
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "1" "$RUN_RC" "\"required\", a newline, a colon, a tab, true: required (Python's \\s spans lines)"
+  printf '{"required": true,\n' > docs/search/config.json
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "1" "$RUN_RC" "an invalid config that says \"required\": true: required"
+  printf '{"required": false}\n' > docs/search/config.json
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "4" "$RUN_RC" "\"required\": false: not required, exit 4"
+  printf '{"required": "true"}\n' > docs/search/config.json
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "4" "$RUN_RC" "\"required\": \"true\" (a string): not required, exit 4"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- serve
+  assert_eq "2:doc-search: uv not found (https://docs.astral.sh/uv/)" "$RUN_RC:$RUN_ERR" "serve keeps its failure: exit 2, one stderr line"
+  teardown
+}
+
+test_launcher_check_gate_without_uv_not_required() {
+  echo "test: launcher: no uv, the config not required (or absent) — check: 'not in force: uv not found', exit 4; gate session-start and prompt silent; gate tool decides as usual"
+  srh_fixture '{}'
+  local envroot nouv vf ev e
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  nouv=$(srg_nouv_path)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "4:doc-search: not in force: $SRG_UV_REASON:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: the line on stdout, exit 4"
+  for e in session-start prompt; do
+    srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate "$e"
+    assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate $e: silent, exit 0"
+  done
+  rm -f docs/search/config.json
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "4:doc-search: not in force: $SRG_UV_REASON" "$RUN_RC:$RUN_OUT" "no config: the same, exit 4"
+  ev="$SRG_TMP/rg.json"
+  srg_event "$ev" Bash "rg foo"
+  printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "gate tool, a not-ready verdict: rg is denied (the file decides)"
+  teardown
+}
+
+test_launcher_check_gate_exec_doc_search() {
+  echo "test: launcher: a root and uv — check and gate session-start|prompt exec doc-search with their arguments; gate tool never runs uv; another gate event is a usage error"
+  srh_fixture '{"required": true}'
+  local envroot vf ev
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  vf=$(git rev-parse --git-path doc-search-gate)
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search check" "$RUN_RC:$RUN_OUT" "check: doc-search check"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check --format json --budget 5
+  assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search check --format json --budget 5" "$RUN_OUT" "…its arguments passed on"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate session-start
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search gate session-start" "$RUN_RC:$RUN_OUT" "gate session-start: doc-search gate session-start"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate prompt --budget 5
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search gate prompt --budget 5" "$RUN_RC:$RUN_OUT" "gate prompt: doc-search gate prompt, its arguments passed on"
+  ev="$SRG_TMP/ok.json"
+  srg_event "$ev" Bash "$SRG_LAUNCHER_FIX index"
+  rm -f "$SRL_BIN/argc"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate tool, no verdict file: silent"
+  printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate tool, not-ready, the index command: silent (allowed)"
+  assert_true "…and uv was never run" test ! -e "$SRL_BIN/argc"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate stop
+  assert_eq "3::doc-search: usage: gate session-start|prompt|tool" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate stop: a usage error on stderr, exit 3"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate
+  assert_eq "3:" "$RUN_RC:$RUN_OUT" "gate with no event: exit 3"
+  teardown
+}
+
+test_launcher_gate_tool() {
+  echo "test: launcher: gate tool — no verdict file, or line 1 not not-ready: silent; not-ready: only a Bash call of exactly the fix commands is allowed, everything else denied with line 2 as the reason; without jq everything is denied"
+  srh_fixture '{"required": true}'
+  local envroot vf top ev reason want c nojq
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  top=$(pwd -P)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  ev="$SRG_TMP/ev.json"
+  srg_event "$ev" Bash "rg foo"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "no verdict file: silent, exit 0"
+  printf 'ready\n' > "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "line 1 ready: silent"
+  printf 'not-ready-ish\nx\n' > "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0:" "$RUN_RC:$RUN_OUT" "line 1 not exactly not-ready: silent"
+  reason="index absent: \"docs\" at C:\\x; fix: $SRG_LAUNCHER_FIX index"
+  printf 'not-ready\n%s\n' "$reason" > "$vf"
+  want="doc-search is required here and not ready: $reason. Stop and report this to the user; do not work around it."
+  for c in "$SRG_LAUNCHER_FIX index" \
+    "$SRG_LAUNCHER_FIX status" \
+    "$SRG_LAUNCHER_FIX check" \
+    "$SRG_LAUNCHER_FIX check --format text" \
+    "sh \"$top/.claude/doc-superpowers/search-mcp.sh\" status --format json" \
+    "sh $top/.claude/doc-superpowers/search-mcp.sh index"; do
+    srg_event "$ev" Bash "$c"
+    srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+    assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "allowed: $c"
+  done
+  for c in "$SRG_LAUNCHER_FIX index && rm -rf x" \
+    "$SRG_LAUNCHER_FIX index; ls" \
+    "$SRG_LAUNCHER_FIX index | cat" \
+    "$SRG_LAUNCHER_FIX index &" \
+    "rg foo" \
+    "$SRG_LAUNCHER_FIX serve" \
+    "$SRG_LAUNCHER_FIX query foo" \
+    "$SRG_LAUNCHER_FIX index --format yaml" \
+    "bash .claude/doc-superpowers/search-mcp.sh index" \
+    "sh evil.claude/doc-superpowers/search-mcp.sh index" \
+    "sh .claude/doc-superpowers/search-mcp.shx index" \
+    " $SRG_LAUNCHER_FIX index" \
+    "$SRG_LAUNCHER_FIX index"$'\n'"rm -rf x" \
+    "rm -rf x"$'\n'"$SRG_LAUNCHER_FIX index" \
+    "$SRG_LAUNCHER_FIX index"$'\n'; do
+    srg_event "$ev" Bash "$c"
+    srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+    assert_eq "0" "$RUN_RC" "denied, exit 0: $(printf '%s' "$c" | tr '\n' '/')"
+    assert_true "…one JSON object (jq -e .)" srg_is_json
+    assert_eq "$(srg_deny "$want")" "$(srg_compact)" "…the deny, line 2 verbatim in its reason"
+  done
+  srg_event "$ev" Read
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "$(srg_deny "$want")" "$(srg_compact)" "a Read tool: denied"
+  jq -cn --arg c "$SRG_LAUNCHER_FIX index" '{tool_name: "Bash", tool_input: {command: [$c]}}' > "$ev"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "$(srg_deny "$want")" "$(srg_compact)" "a Bash command that is not a string: denied"
+  printf 'not json' > "$ev"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "$(srg_deny "$want")" "$(srg_compact)" "an event that is not JSON: denied"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "$(srg_deny "$want")" "$(srg_compact)" "no event: denied"
+  # Line 2 absent: the reason without it.
+  printf 'not-ready\n' > "$vf"
+  srg_event "$ev" Bash "rg foo"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "$(srg_deny "doc-search is required here and not ready. Stop and report this to the user; do not work around it.")" "$(srg_compact)" "no line 2: denied, the reason without it"
+  printf 'not-ready\n%s\n' "$reason" > "$vf"
+  # From a subdirectory: the same verdict file.
+  mkdir -p src/deep
+  cd src/deep
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "$(srg_deny "$want")" "$(srg_compact)" "from a subdirectory: the worktree's verdict file, rg denied"
+  srg_event "$ev" Bash "$SRG_LAUNCHER_FIX index"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0:" "$RUN_RC:$RUN_OUT" "…and the index command allowed"
+  cd "$top"
+  # Without jq: every tool is denied, with a fixed reason (line 2 cannot be escaped).
+  nojq=$(make_nojq_path)
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nojq" -- gate tool
+  assert_eq "0" "$RUN_RC" "without jq, not-ready: exit 0"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "…the index command is denied too"
+  assert_eq "doc-search is required here and not ready, and this hook cannot read the tool call without jq. Stop and report this to the user; do not work around it." \
+    "$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$RUN_OUT" 2>/dev/null || true)" "…with the fixed reason"
+  rm -f "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nojq" -- gate tool
+  assert_eq "0:" "$RUN_RC:$RUN_OUT" "without jq, no verdict file: silent"
+  teardown
+}
+
+test_launcher_gate_reads_the_event() {
+  echo "test: launcher: gate takes the event on stdin, never echoes it, and drains it where it does not read it, so a large event's writer never blocks"
+  srh_fixture '{"required": true}'
+  local envroot nouv nojq vf big out e
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  nouv=$(srg_nouv_path)
+  nojq=$(make_nojq_path)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  out=$(harness_mktemp_d outside)
+  big="$SRG_TMP/big.json"
+  {
+    printf '{"tool_name":"Bash","tool_input":{"command":"rg MARKER-7f3a '
+    head -c 300000 /dev/zero | tr '\0' x
+    printf '"}}'
+  } > "$big"
+  # gate tool: not-ready reads it to decide.
+  printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
+  srg_pipe "$big" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
+  assert_eq "0:0" "$RUN_PIPE:$RUN_RC" "gate tool, not-ready: the event read whole (its writer exits 0)"
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "…and denied"
+  assert_not_contains "$RUN_OUT$RUN_ERR" "MARKER-7f3a" "…never echoed"
+  srg_pipe "$big" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nojq" -- gate tool
+  assert_eq "0:0" "$RUN_PIPE:$RUN_RC" "gate tool, not-ready, no jq: drained"
+  assert_not_contains "$RUN_OUT$RUN_ERR" "MARKER-7f3a" "…never echoed"
+  rm -f "$vf"
+  srg_pipe "$big" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
+  assert_eq "0:0:" "$RUN_PIPE:$RUN_RC:$RUN_OUT" "gate tool, no verdict file: drained, silent"
+  # session-start and prompt, where the launcher answers: drained, never echoed.
+  for e in session-start prompt; do
+    srg_pipe "$big" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate "$e"
+    assert_eq "0:0" "$RUN_PIPE:$RUN_RC" "gate $e, required, no uv: drained"
+    assert_true "…one JSON object (jq -e .)" srg_is_json
+    assert_not_contains "$RUN_OUT$RUN_ERR" "MARKER-7f3a" "…never echoed"
+    srg_pipe "$big" PATH="$nouv" -- gate "$e"
+    assert_eq "0:0:" "$RUN_PIPE:$RUN_RC:$RUN_OUT" "gate $e, no root: drained, silent"
+    srg_pipe "$big" DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" -- gate "$e"
+    assert_eq "0:0:" "$RUN_PIPE:$RUN_RC:$RUN_OUT" "gate $e, DOC_SEARCH_GATE=0: drained, silent"
+  done
+  cd "$out"
+  srg_pipe "$big" GIT_CEILING_DIRECTORIES="$SUITE_TMP" DOC_SUPERPOWERS_ROOT="$envroot" -- gate prompt
+  assert_eq "0:0:" "$RUN_PIPE:$RUN_RC:$RUN_OUT" "gate prompt outside a work tree: drained, silent"
+  cd "$TEST_DIR"
+  teardown
+}
+
 echo ""
 echo "=== doc-search: the launcher and the opt-in --search set ==="
 test_launcher_resolution_order
@@ -6518,6 +6946,14 @@ test_launcher_without_uv
 test_launcher_is_posix_sh
 test_launcher_env_hook
 test_launcher_client_cwd
+test_launcher_gate_opt_out
+test_launcher_check_gate_outside_a_work_tree
+test_launcher_check_gate_without_a_root
+test_launcher_check_gate_without_uv_required
+test_launcher_check_gate_without_uv_not_required
+test_launcher_check_gate_exec_doc_search
+test_launcher_gate_tool
+test_launcher_gate_reads_the_event
 test_search_install_refused_without_config
 test_search_install_writes_launcher_and_entry
 test_search_install_idempotent
