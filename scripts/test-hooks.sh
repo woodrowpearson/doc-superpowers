@@ -6224,6 +6224,8 @@ test_search_install_writes_launcher_and_entry() {
   srh_fixture
   inst install --search
   assert_eq "0" "$IRC" "install --search (no .mcp.json): exit 0"
+  # shellcheck disable=SC2016  # the message's literal text
+  assert_contains "$IOUT" 'DOC_SUPERPOWERS_ROOT, this checkout, the Codex install ${CODEX_HOME:-~/.codex}/doc-superpowers, or the plugin cache' "…its message names every root, the Codex install too"
   assert_true "the launcher is the plugin's scripts/search/launch.sh, byte for byte" cmp -s "$SRH_LAUNCHER" "$SCRIPT_DIR/search/launch.sh"
   assert_true "…executable" test -x "$SRH_LAUNCHER"
   assert_eq "755" "$(srh_mode "$SRH_LAUNCHER")" "…mode 755"
@@ -6557,6 +6559,23 @@ test_search_gate_preflight() {
   assert_eq "$(sgt_want codex)" "$(sgt_jq "$SGT_CODEX" .hooks)" "…and the Codex entries"
   inst install --search-gate --json
   assert_eq "2" "$IRC" "install --search-gate --json: exit 2 (--json is status's)"
+  # A launcher copy that is not the plugin's (an older one has no gate): refused, unless --search refreshes it.
+  rm -f "$SGT_CLAUDE" "$SGT_CODEX"
+  rmdir .codex 2>/dev/null || true
+  printf '#!/bin/sh\n# doc-search launcher v3.10.0\nexec true\n' > "$SRH_LAUNCHER"
+  before=$(_tree_state)
+  inst install --search-gate
+  assert_eq "1" "$IRC" "a launcher copy that differs from the plugin's: exit 1"
+  assert_eq "ERROR: install --search-gate needs the doc-search launcher .claude/doc-superpowers/search-mcp.sh to be the plugin's (it differs, and a copy from before the readiness gate cannot answer the hooks): re-run install --search first (or with it). Nothing was changed." \
+    "$IOUT" "…the message, whole"
+  assert_eq "$before" "$(_tree_state)" "…nothing written"
+  inst install --search --search-gate
+  assert_eq "0" "$IRC" "install --search --search-gate with that copy: exit 0"
+  assert_true "…the launcher refreshed first" cmp -s "$SCRIPT_DIR/search/launch.sh" "$SRH_LAUNCHER"
+  assert_eq "$(sgt_want codex)" "$(sgt_jq "$SGT_CODEX" .hooks)" "…and the entries written"
+  printf '#!/bin/sh\n' > "$SRH_LAUNCHER"
+  inst uninstall --search-gate
+  assert_eq "0" "$IRC" "uninstall --search-gate does not need the plugin's launcher"
   teardown
 }
 
@@ -6772,7 +6791,9 @@ test_search_gate_not_in_all() {
   inst uninstall --all
   assert_file_exists "$SGT_CLAUDE" "uninstall --all keeps it"
   inst uninstall --search
-  assert_file_exists "$SGT_CODEX" "uninstall --search keeps it"
+  assert_eq "1" "$IRC" "uninstall --search, the gate's hooks registered: refused, exit 1"
+  assert_file_exists "$SGT_CODEX" "…the gate's hooks kept"
+  assert_file_exists "$SRH_LAUNCHER" "…and the launcher they run"
   inst status --json
   assert_eq "null" "$(srh_json '.tiers.search_gate')" "status --json: not in it"
   inst status --search --json
@@ -6783,6 +6804,48 @@ test_search_gate_not_in_all() {
   assert_not_contains "$IOUT" "doc-search gate" "status --all: no gate section"
   inst status
   assert_contains "$IOUT" "doc-search gate (the opt-in --search-gate set):" "plain status: its section"
+  teardown
+}
+
+test_search_uninstall_refused_while_gated() {
+  echo "test: search-gate: uninstall --search alone is refused (exit 1, the message naming uninstall --search-gate, nothing changed) while either hook file holds the gate's entries, whose commands run the launcher it would remove; with --search-gate too it removes both"
+  sgt_fixture '{"required": true}'
+  local before f
+  inst install --search-gate
+  for f in "$SGT_CLAUDE" "$SGT_CODEX"; do
+    before=$(_tree_state)
+    inst uninstall --search
+    assert_eq "1" "$IRC" "the gate's hooks in $f: uninstall --search exits 1"
+    assert_contains "$IOUT" "ERROR: uninstall --search would remove the launcher .claude/doc-superpowers/search-mcp.sh, which the doc-search gate's hooks run ($f" "…naming the file"
+    assert_contains "$IOUT" "uninstall --search-gate first, or both together (uninstall --search --search-gate). Nothing was changed." "…and the way out"
+    assert_eq "$before" "$(_tree_state)" "…nothing changed"
+    inst uninstall --git --search
+    assert_eq "1" "$IRC" "…with another tier too: exit 1 (every check runs first)"
+    assert_eq "$before" "$(_tree_state)" "…nothing changed"
+    # Next round: the entries in the other file only.
+    jq '.hooks.SessionStart = [] | .hooks.UserPromptSubmit = [] | .hooks.PreToolUse = []' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  done
+  inst install --search-gate
+  inst uninstall --search --search-gate
+  assert_eq "0" "$IRC" "uninstall --search --search-gate: exit 0"
+  assert_file_not_exists "$SRH_LAUNCHER" "…the launcher removed"
+  assert_file_not_exists "$SGT_CLAUDE" "…and the gate's hooks"
+  assert_file_not_exists "$SGT_CODEX" "…in both files"
+  inst install --search
+  inst uninstall --search
+  assert_eq "0" "$IRC" "no gate's hooks: uninstall --search exits 0"
+  teardown
+}
+
+test_search_gate_status_warns_launcher_differs() {
+  echo "test: search-gate: status warns when the hooks are registered and the launcher copy they run differs from the plugin's (an older one cannot answer them)"
+  sgt_fixture '{"required": true}'
+  inst install --search-gate
+  inst status --search-gate
+  assert_not_contains "$IOUT" "differs from the plugin's scripts/search/launch.sh" "the plugin's copy: no warning"
+  printf '#!/bin/sh\n# doc-search launcher v3.10.0\n' > "$SRH_LAUNCHER"
+  inst status --search-gate
+  assert_contains "$IOUT" "⚠ the hooks run .claude/doc-superpowers/search-mcp.sh, which differs from the plugin's scripts/search/launch.sh: a copy from before the readiness gate cannot answer them (re-run install --search)" "a copy that differs: ⚠"
   teardown
 }
 
@@ -7659,6 +7722,8 @@ test_search_gate_unreadable_rule_copy
 test_search_gate_never_writes_through_links
 test_search_gate_not_in_all
 test_search_gate_status_and_json
+test_search_uninstall_refused_while_gated
+test_search_gate_status_warns_launcher_differs
 test_search_gate_rule_drift
 test_search_gate_shipped_rule_is_current
 test_search_gate_hooks_run_the_launcher
