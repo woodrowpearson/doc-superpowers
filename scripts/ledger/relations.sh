@@ -921,8 +921,10 @@ cmd_ledger_recheck() {
 # plan). JSON: {rows: [{key, path, confirmed, why}], table}.
 
 # The Related work reader (awk), shared by sweep --plan (_lg_r_plan_scan),
-# validate --plan (_lg_validate_plan) and upkeep's plans
-# (_LG_AWK_UP_PLAN_LINKS): rw_begin() before a document, then rw_line(line)
+# validate --plan (_lg_validate_plan), upkeep's plans
+# (_LG_AWK_UP_PLAN_LINKS) and in-flight's plan links (inflight.sh
+# _LG_AWK_IFL_LINKS, whose facts signature hashes it): rw_begin() before a
+# document, then rw_line(line)
 # for each of its lines, a CR already dropped. The section is the one a
 # heading of any level named "Related work" (any case, trailing #s aside)
 # opens, to the next heading of the same or a higher level; a fenced block
@@ -934,6 +936,11 @@ cmd_ledger_recheck() {
 # "\|" in it read as "|", and RW_MC the Mark column — and 0 for any other
 # line. RW_FOUND: a Related work heading was seen. rw_trim(s): s without
 # its surrounding blanks; rw_bare(s): without its surrounding `, * and _.
+# rw_linked(line): rw_line(line) (a CR dropped first), then the item the
+# line links — when it is a data row whose mark is "include" (any case,
+# less its surrounding `, * and _), its first cell, likewise stripped, a
+# tab in it as a blank; else "". The one plan-link row test: upkeep's and
+# in-flight's plans both call it.
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_RW='
 function rw_trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
@@ -943,6 +950,12 @@ function rw_bare(s) {
   return s
 }
 function rw_begin() { RW_IN = 0; RW_LV = 0; RW_FOUND = 0; RW_F = ""; RW_T = 0; RW_MC = 0; RW_N = 0 }
+function rw_linked(line,   c) {
+  sub(/\r$/, "", line)
+  if (rw_line(line) != 1 || RW_MC > RW_N || tolower(rw_trim(rw_bare(RW_C[RW_MC]))) != "include") return ""
+  c = rw_trim(rw_bare(RW_C[1])); gsub(/\t/, " ", c)
+  return c
+}
 function rw_cell(s) { gsub(/\001/, "|", s); return rw_trim(s) }
 function rw_cells(line,   i) {
   gsub(/\\\|/, "\001", line)

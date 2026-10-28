@@ -515,7 +515,9 @@ doc-tools.sh ledger <verb> [options] [args]
     tip → exit 2, nothing written; unreachable or offline → a warning); validate --pushed checks only the
     provisional keys a branch adds since its merge-base with config base
   → in flight (inflight.sh): local, worktree, remote and <ref_prefix>/<host>/<branch> refs; fetch into
-    refs/doc-superpowers/inflight-fetch/*; --push forced, --no-verify, after inflight.pre_push_check
+    refs/doc-superpowers/inflight-fetch/*; --push forced, --no-verify, after inflight.pre_push_check;
+    a plan a branch modifies claims what it links (its `include` Related work rows and frontmatter
+    values: relations.sh's rw_linked and frontmatter.awk over one cat-file batch, as upkeep reads one)
   → upkeep (upkeep.sh, `<a>..<b>`; the net diff without renames, the index of <b>: the working tree's
     when <b> is HEAD): the items involved (claim trailers, an item file in the diff, a key in a message,
     an item a plan the range adds or modifies links through an `include` Related work row, read by
