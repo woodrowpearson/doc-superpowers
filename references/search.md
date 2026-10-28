@@ -31,9 +31,9 @@ doc-search is opt-in per repository: `docs/search/config.json` turns it on, and 
 
 **The inert contract.** Without `docs/search/config.json`:
 - every tool answers exactly `doc-search: not enabled (no docs/search/config.json)`;
-- every CLI verb except `init` prints that line and exits 0 (`status --format json` prints `{"enabled": false, "message": "<that line>"}`).
+- every CLI verb except `init`, `check` and `gate` prints that line and exits 0 (`status --format json` prints `{"enabled": false, "message": "<that line>"}`); `check` answers `not-in-force` (exit 4) and `gate` prints nothing.
 
-With an invalid config, every tool answers `doc-search: invalid config: <message>` (the message names the key) and the CLI exits 2. Outside a git work tree, the CLI exits 2.
+With an invalid config, every tool answers `doc-search: invalid config: <message>` (the message names the key) and the CLI exits 2. Outside a git work tree, the CLI exits 2. `check` and `gate` answer a verdict in both cases instead (*CLI* → `check`).
 
 **Turning it off:** `install.sh uninstall --search` removes the `.mcp.json` entry (and `.mcp.json` itself when nothing else is left in it) and the launcher (refused while the `--search-gate` hooks, which run the launcher, are registered: `uninstall --search --search-gate` removes both); deleting `docs/search/config.json` makes a server that is still registered inert. Nothing doc-search builds is a source of truth: semble's cache can be deleted at any time.
 
@@ -110,6 +110,8 @@ An unknown key, at any level, is an error that names it (`doc-search: invalid co
 | `HF_HOME` | Where model downloads are kept (Hugging Face's), the transformer's included |
 | `GRPC_ENABLE_FORK_SUPPORT` | doc-search sets it to `false` before the cloud extra loads, unless it is already set: with gRPC's default fork support, a git child forked while the cloud client is live sometimes died before exec |
 | `DOC_SUPERPOWERS_ROOT`, `CLAUDE_PLUGIN_CACHE`, `CODEX_HOME` | Where the launcher looks for doc-superpowers (*Turning it on*); `CODEX_HOME` (default `$HOME/.codex`) decides the Codex root, `$CODEX_HOME/doc-superpowers` |
+| `DOC_SEARCH_MCP=0` | This developer's client cannot run the MCP server (an organization policy, say): `check` reports `mcp` as `off` for every client, so the search rule does not halt on missing tools |
+| `DOC_SEARCH_GATE=0` | The readiness gate's hooks print nothing and allow everything for this developer, and neither `gate` nor `check` touches the verdict file (blanks ignored) |
 | `DOC_SEARCH_CLIENT_CWD` | The MCP client's working directory: its worktree becomes the server's default (*Tools* → `worktree`). The launcher sets it for `serve` from its parent process (`/proc/$PPID/cwd`, else `lsof`) unless it is already set; set it yourself for a client that starts the server through another wrapper. A directory outside this repository's worktrees is ignored, and `status` says so |
 | `DOC_SEARCH_ENV_FILE` | The per-user env hook: a POSIX sh file the launcher sources at every launch, before it resolves anything (empty is unset; default `${XDG_CONFIG_HOME:-~/.config}/doc-search/env.sh`). An MCP client starts the server without your shell profile, so set the variables above here — and decide them here, since it is read again at each launch (a cache on a volume that is not always mounted: export `SEMBLE_CACHE_LOCATION` only while the volume is there). A missing file is skipped; one that does not parse is skipped with one stderr line, and doc-search still starts. Its output goes to stderr. It runs in the launcher's shell, so it should only set variables: an `exit` ends the launch |
 
@@ -389,6 +391,8 @@ Start with `status` — the tool, or `sh .claude/doc-superpowers/search-mcp.sh s
 | `cloud failed: no credentials (run gcloud auth application-default login)` | As it says; or `DOC_SEARCH_CLOUD=0` on a machine that should not use the cloud. |
 | `cloud failed: cloud extra not installed (uv sync --extra cloud)` | The server ran without the extra: the launcher adds it when `jq` reads a non-null `cloud`; re-register through the launcher. |
 | `cloud failed: TimeoutError …`, or `… DeadlineExceeded …` | Firestore's flat query over a large collection is slow when cold: raise `cloud.timeout_s`. The leg is skipped for 60 s after a failure. |
+| `doc-search: invalid config: unknown key required` (or `requires`) | This doc-superpowers is older than 3.11.0, and the repository uses the readiness gate's keys: update the plugin (`claude plugin update doc-superpowers`; the Codex root, `git -C ~/.codex/doc-superpowers pull`). |
+| `doc-search: not ready: doc-superpowers <version> predates the readiness gate` | The launcher copy is 3.11.0 or later, the plugin it found is older, and the config is required: update the plugin, as the fix says. |
 | `doc-search: cannot find doc-superpowers (set DOC_SUPERPOWERS_ROOT)` / `uv not found` | The launcher's two failures: install the plugin (or set the variable), or install `uv`. |
 | The client gives up starting the server | The first start syncs the environment: run `search-mcp.sh status` once by hand, then restart the client. |
 
