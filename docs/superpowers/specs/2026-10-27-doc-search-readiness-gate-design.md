@@ -1,6 +1,6 @@
 # doc-search readiness gate — design
 
-**Status:** approved 2026-10-27 · **Release:** 3.10.0 · **Parent:** `2026-10-19-doc-search-design.md`
+**Status:** approved 2026-10-27 · **Release:** 3.11.0 (proposed) · **Parent:** `2026-10-19-doc-search-design.md`
 
 ## Problem
 
@@ -40,7 +40,7 @@ The failures follow the rule text, so the decision has to be mechanical.
 - `"requires": ">=X.Y.Z"` is the version floor for the plugin and for the committed launcher copy.
   The default `null` sets none.
 
-A plugin older than 3.10.0 rejects both as unknown keys, so every verb says `invalid config: unknown
+A plugin older than 3.11.0 rejects both as unknown keys, so every verb says `invalid config: unknown
 key required`. That message is the cue to update.
 
 ### Per-developer opt-in
@@ -73,19 +73,26 @@ key required`. That message is the cue to update.
 3. The committed launcher copy carries a stamp (`# doc-search launcher vX.Y.Z`) that meets `requires`.
 4. Both indexes match the tree.
 
-**Index refresh.** `check` first runs the incremental refresh that `query` would run, bounded by
-`--budget` (default 20 s). Without it, an agent's own edits would read as stale at the next prompt.
+**Index refresh.** Where the config requires doc-search, `check` first runs the incremental refresh
+that `query` would run, bounded by `--budget` (default 20 s). Without it, an agent's own edits would
+read as stale at the next prompt. Where it does not, `check` refreshes nothing (no index write, no
+wait): it reports the would-be state from the cache states alone, so a repository that never opted in
+never pays the budget at a prompt.
 
 **Degraded** covers two cases:
-- The transformer docs index is absent, building, or refreshing, and the static fallback matches the
-  tree.
+- The transformer docs index is absent or building, and the static fallback matches the tree.
 - The launcher copy differs from the plugin's but meets the floor.
+
+A saved transformer index that is stale is refreshed incrementally; a refresh that overruns the budget
+is `not-ready`, not `degraded`: once a transformer index serves, no static fallback stands beside it.
 
 **Fixes.** Every not-ready verdict names one fix command. `check` never starts a first transformer
 build, and `status` is unchanged.
 
 **The launcher answers when Python cannot run:**
 - No root: `4`.
+- A root that predates the gate (doc-superpowers 3.10.0 or older, whose CLI has neither `check` nor
+  `gate`): `1` when the raw config says `"required": true`, fix the plugin update, else `4`.
 - No `uv`: `1` when the raw config says `"required": true`, else `4`.
 - Not in a git work tree: `4`.
 
@@ -101,16 +108,25 @@ The hooks call the committed launcher, so a project commits no other script:
 | `tool` | Shell only, no `uv`. It reads the verdict file and, while that says not-ready, denies every tool except the exact fix commands (`search-mcp.sh index`, `status`, `check`) |
 
 - **The verdict file** is `$(git rev-parse --git-path doc-search-gate)`, one per worktree and shared
-  by that worktree's sessions. `session-start` and `prompt` write it atomically.
+  by that worktree's sessions. `session-start`, `prompt` and `check` write it atomically (not with
+  `DOC_SEARCH_GATE=0`), so the halt's own fix followed by `check` lifts the tool gate.
+- **The client.** `install.sh` registers `gate session-start --client claude` for Claude Code and
+  `--client codex` for Codex. The `mcp:` line then reports that client's registration (`.mcp.json` for
+  Claude Code, Codex's `config.toml` for Codex); `check` run by itself reports each client's.
 - **When `gate` stays silent:** with no root, no config, or `DOC_SEARCH_GATE=0`, it prints nothing
   and allows.
 - **Failure handling:**
   - A `check` that raises is treated as not ready when the config is required.
   - A hook that times out lets the prompt through, which is the client's behavior. The verdict file
     keeps its last value.
+  - The command finds the launcher through `git rev-parse --show-toplevel`, so it needs the hook's
+    working directory inside the repository. Outside it the command fails, and the client lets the
+    call through (fails open).
 
 `install.sh install --search-gate` merges the three entries into `.claude/settings.json` and
-`.codex/hooks.json`. The repository commits them. Because the probe's exit `4` gives the
+`.codex/hooks.json`. The repository commits them. It needs the committed launcher to be the plugin's
+own copy, since an older copy cannot answer the hooks, and `uninstall --search` alone is refused while
+the entries run that launcher. Because the probe's exit `4` gives the
 per-developer opt-in, committed hooks are inert for everyone else.
 
 ### The rule template
@@ -121,7 +137,8 @@ per-developer opt-in, committed hooks are inert for everyone else.
 - **Keyed to `check`.** `0` means use doc-search, and `degraded` is said once. `4` keeps the soft rule:
   `rg` with a one-line reason. `1` means halt and report.
 - **Two agent-observable predicates:**
-  - The MCP tools are missing while `check` says `mcp: expected`: halt.
+  - The MCP tools are missing while the `mcp:` line says `expected` for your client: halt (not in a
+    Claude Code subagent whose definition lists no MCP tools).
   - `status`'s `worktree:` line is not your top-level directory: pass `worktree:`.
 - **Wording.** It carries a rationalization table and red flags from the baseline, and is tested
   RED and then GREEN.
