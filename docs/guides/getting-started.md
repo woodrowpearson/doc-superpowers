@@ -285,6 +285,8 @@ sh .claude/doc-superpowers/search-mcp.sh index
 
 Then restart Claude Code (it asks once to approve the project's `.mcp.json` server); its tools are `search`, `fetch`, `related` and `status`. Configuration, the CLI and its exit codes, the cloud leg's setup, other clients and troubleshooting are in `references/search.md`.
 
+**Requiring it.** To make agents stop while doc-search cannot answer, set `"required": true` in `docs/search/config.json`, run `/doc-superpowers hooks install --search-gate`, and copy the marked block of `references/search-rule.md` into `AGENTS.md` or `CLAUDE.md`; commit all three. Every developer who has doc-superpowers installed then needs 3.11.0 or later (an older plugin answers `invalid config: unknown key required`); for the others the hooks do nothing. `DOC_SEARCH_GATE=0` turns the hooks off for one developer. `references/search.md` → *Turning it on* and *CLI* → `check` has the details.
+
 For wrapper skill integration details, see `references/spec-lifecycle-protocol.md`.
 For code review and commit review integration, see `references/integration-patterns.md`.
 

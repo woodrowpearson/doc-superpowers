@@ -39,7 +39,7 @@ doc-superpowers/
 │   ├── pyproject.toml    # runtime: semble>=0.7,<0.8, mcp>=2.3,<3, pathspec; extra cloud: google-genai, google-cloud-firestore; extra local-transformer: onnxruntime (1.31; 1.23.2 on Intel macOS), flatbuffers, protobuf, and tokenizers + huggingface-hub (declared; semble already installs them); dev: pytest; console script doc-search
 │   ├── uv.lock           # Locked (the launcher and CI run with --frozen); no torch; onnxruntime only in the local-transformer extra
 │   ├── src/doc_search/
-│   │   ├── config.py     # docs/search/config.json: defaults, deep merge, validation (unknown keys refused; docs.model transformer:<name> against the registry, docs.threads, code.model refuses the prefix), DOC_SEARCH_CLOUD=0; INERT_LINE
+│   │   ├── config.py     # docs/search/config.json: defaults, deep merge, validation (unknown keys refused; docs.model transformer:<name> against the registry, docs.threads, code.model refuses the prefix; required, a bool; requires, ">=X.Y.Z" or null), DOC_SEARCH_CLOUD=0; INERT_LINE
 │   │   ├── repo.py corpus.py docindex.py  # git plumbing, worktrees, path confinement; the docs corpus (globs, enrichment, terminal filter); the doc-index join
 │   │   ├── engines.py    # IndexPool: the semble docs + code index pair per worktree, background builds (one at a time, docs first), revalidation, LRU of 2, on-disk cache state; with a transformer docs model also the lane of its own, the static fallback that serves while it builds, the swap, eviction
 │   │   ├── transformer.py encode_cache.py progress.py  # the opt-in local docs embedder: the model registry, the ONNX encoder and its seam at semble's model loader; the per-host vector cache (sqlite) and the host encoder lock; build progress, ETA and the file other processes read
@@ -48,6 +48,7 @@ doc-superpowers/
 │   │   ├── tools.py      # fetch, related, status
 │   │   ├── server.py     # the MCP server (MCPServer, SDK v2): four tools over one Runtime; cli.py builds the same Runtime
 │   │   ├── cli.py evaluate.py  # doc-search serve | init | index | query | status | eval | check | gate; known-answer evaluation
+│   │   ├── version.py    # the running plugin's version (package.json) and the launcher copy's stamp line, both compared with requires
 │   │   ├── check.py gate.py  # the readiness probe (`check`'s verdict) and the client hooks' entry (`gate session-start|prompt`), which keeps the verdict file `gate tool` reads
 │   │   ├── chunker.py    # the cloud write path's heading-bounded chunker
 │   │   └── cloud/        # read.py (the cloud leg: Vertex query → Firestore find_nearest, branch-changed suppression), write.py (the guarded indexer), vertex.py (google-genai embeddings), __init__.py (the one gateway to the extra's modules: CloudUnavailable without it; gRPC fork support off before they load)
@@ -81,7 +82,7 @@ doc-superpowers/
 │   ├── doc-superpowers   # The dispatcher every client runs as "$ROOT/scripts/doc-superpowers": help [topic], setup, version, and the hooks / tools / search pass-throughs (each sub-script under "$BASH")
 │   ├── help/             # The help text (overview, setup, search, hooks, ci, ledger, claims, release): one source for the terminal and the skill's `help` action
 │   ├── setup/            # setup's engine: setup.sh (flags, modes), catalog.json (the items), lib-model.sh lib-probe.sh lib-plan.sh lib-exec.sh lib-harness.sh lib-prompt.sh lib-tui.sh, search-config.json (doc-search init's defaults), shim.sh (the ~/.local/bin template)
-│   ├── search/launch.sh  # doc-search's launcher (POSIX sh): finds doc-superpowers at run time, then uv run --project <root>/search --frozen --no-dev [--extra cloud] [--extra local-transformer] doc-search (the second extra when docs.model starts transformer:; without jq, --all-extras --no-extra local-transformer, or --all-extras when grep finds a transformer: model); install --search copies it to .claude/doc-superpowers/search-mcp.sh
+│   ├── search/launch.sh  # doc-search's launcher (POSIX sh): finds doc-superpowers at run time, then uv run --project <root>/search --frozen --no-dev [--extra cloud] [--extra local-transformer] doc-search (the second extra when docs.model starts transformer:; without jq, --all-extras --no-extra local-transformer, or --all-extras when grep finds a transformer: model); line 2 is the version stamp (# doc-search launcher vX.Y.Z, written by bump-version); it answers check and gate itself where doc-search cannot run (no root, no uv, a root from before the gate) and gate tool always, from the verdict file; install --search copies it to .claude/doc-superpowers/search-mcp.sh
 │   ├── merge-doc-index.sh  # Custom git merge driver for .doc-index.json
 │   ├── test-merge-driver.sh # Test suite for merge driver
 │   ├── test-hooks.sh     # Test suite for hooks installer and hook scripts
@@ -197,7 +198,7 @@ doc-superpowers/
 | `references/spec-claims.md` | Spec claims (opt-in, enabled by `docs/spec-claims/`): sidecar and claim schema, `config.json`, checks V1–V12, exit codes, adapter contracts, gates and records, the direction policy keys (config `policy`), reference pytest/jest helpers | Changing a `claims` verb, check, adapter contract or the claims policy |
 | `references/spec-lifecycle-protocol.md` | Wrapper author integration guide — input/output contracts for spec-generate, spec-inject, spec-verify; integration patterns for calling skills; the claims **Direction protocol** (`CODE-DIVERGES`, `DOC-STALE`, `RETIRE`, its policy keys and their defaults) | Adding integration patterns, changing action contracts, changing the direction protocol |
 | `search/` | doc-search, the opt-in MCP server over docs and code: a uv package (`src/doc_search/`, `tests/`), its own Python toolchain, never needed by the rest of doc-superpowers. Inert without `docs/search/config.json` | Changing the server, a tool, the CLI, the config, the fusion, the cloud leg or the local transformer (with `references/search.md`; tests: `bash scripts/check-ci.sh search`) |
-| `scripts/search/launch.sh` | doc-search's POSIX-sh launcher, vendored byte for byte to `.claude/doc-superpowers/search-mcp.sh` by `install --search`; it picks the uv extras from the config (`cloud`, `local-transformer`) | Changing how the server is found or started, or which extras it adds (installed copies then read `outdated`) |
+| `scripts/search/launch.sh` | doc-search's POSIX-sh launcher, vendored byte for byte to `.claude/doc-superpowers/search-mcp.sh` by `install --search`; it picks the uv extras from the config (`cloud`, `local-transformer`), carries the version stamp on line 2, and answers `check` and `gate` itself where doc-search cannot run, and `gate tool` always (no `uv`: it reads the verdict file) | Changing how the server is found or started, which extras it adds, or the gate's shell answers (installed copies then read `outdated`) |
 | `references/search-rule.md` | The search rule a project that requires doc-search copies into `AGENTS.md` or `CLAUDE.md`: a preamble, then the marked block (`check`'s exit codes, the two things `check` cannot see, the halt, the excuses table). Its opening marker's version is a release stamp (`bump-version`, `check-version`); `install.sh status --search-gate` compares a copy by the lines between the markers | Changing the rule's wording (re-run its micro-tests; projects then read `outdated`) |
 | `references/search.md` | doc-search's reference: inert contract, config keys and environment, CLI verbs and exit codes, the four tools, the cloud leg's setup and write-path guards, other clients' snippets, performance, privacy, troubleshooting | Changing any of those (pinned by `test-spec-status-model.sh`: its ten sections, the inert line, the verbs) |
 | `references/tool-mappings.md` | The one capability matrix — per-client tool names and capabilities (INSTALL files, AGENTS.md and GEMINI.md link here), tool resolution | Adding framework support, tool name or capability changes |
@@ -493,10 +494,14 @@ User invokes /doc-superpowers hooks install --search (never part of --all)
   → Not recorded in installed.json; status --search [--json] reports launcher + entry (.tiers.search)
 
 User invokes /doc-superpowers hooks install --search-gate (never part of --all or --search)
-  → No docs/search/config.json, or no launcher (unless --search is named too): refuse, exit 1, nothing written;
+  → No docs/search/config.json, or no launcher, or a launcher that is not the plugin's byte for byte (unless
+    --search is named too, which refreshes it first): refuse, exit 1, nothing written;
     no jq, a symlinked target, or a hook file that is not one object (or whose hooks is not one): refuse
   → Per event (SessionStart, UserPromptSubmit, PreToolUse), merge the group running the launcher's gate into
-    .claude/settings.json and .codex/hooks.json (others' handlers kept; a file already exact is not rewritten)
+    .claude/settings.json and .codex/hooks.json (others' handlers kept; a file already exact is not rewritten;
+    SessionStart runs gate session-start --client claude, or --client codex, and an entry without --client or
+    with the other client's is replaced, not duplicated)
+  → uninstall --search alone is refused (exit 1, nothing changed) while either file holds these entries
   → Not recorded in installed.json; status --search-gate [--json] reports each file and the search-rule block
     (.tiers.search_gate): its body, the lines between the markers, against references/search-rule.md's —
     current, outdated (or no closing marker), absent; each copy's marker version shown, not judged
@@ -582,6 +587,25 @@ search(query, scope, limit, doc_type, path_prefix, include_terminal, worktree)
 `doc-search index --cloud` is the only writer of the cloud corpus (`cloud/write.py`): base guard, the stamp's decision table, the lease, per-file sha skip, HEAD's blobs, the prune cap, then the stamp.
 
 With `docs.model: "transformer:<name>"` the docs kind changes (`engines.py`; the contract is `references/search.md` → *Modes* → *Local transformer*): `IndexPool` calls `transformer.install`, which routes semble's model loader (`semble.index.dense._load_cached`, pinned by `tests/test_semble_seam.py`) to the ONNX `Encoder`. The docs build then runs in the transformer lane (not the build line), under `encode_cache.host_lock` (one encoder per host), and `Encoder.encode` reads and writes `EncodeCache` batch by batch while `progress.BuildProgress` counts. A validated index is saved and replaces the static one, and once the thread's own encode has run at least one forward batch (built or failed) the pool drops the encoder's onnxruntime session (`transformer.release_session`; the first query after it makes a new one; a load, a no-op recheck or an all-cache-hits refresh releases nothing). Until then a hidden static docs state answers docs (`WorktreeIndexes.docs_fallback`; the note `docs: semble's static index while the transformer index builds (see status)`) in the server; the CLI verbs build with `fallback=False`, in the foreground, and print the progress lines.
+
+### doc-search readiness gate (`check` and the `--search-gate` hooks)
+
+The contract is `references/search.md` → *CLI* → `check` and `gate`; the design is `docs/superpowers/specs/2026-10-27-doc-search-readiness-gate-design.md`.
+
+```
+Client hook (SessionStart / UserPromptSubmit / PreToolUse) → sh "$(git rev-parse --show-toplevel)/.claude/doc-superpowers/search-mcp.sh" gate <event>
+  → launch.sh (answer_check_gate), after the env hook, first row that applies:
+    DOC_SEARCH_GATE=0 → gate silent | not a git work tree or no root → check exits 4, gate silent
+    gate tool → read the verdict file ($(git rev-parse --git-path doc-search-gate)); while line 1 is not-ready,
+      deny every tool call but the launcher's index | status | check; never runs uv
+    a root without search/src/doc_search/gate.py, or no uv → answered here: not-ready when the raw config says
+      "required": true (fix: the plugin update, or install uv), else not in force; the verdict file kept
+    otherwise → exec uv run … doc-search check | gate session-start [--client claude|codex] | gate prompt
+  → check.assess: config → plugin version against requires (version.py) → launcher copy's stamp → index states;
+    where required, one incremental refresh bounded by --budget (never a first build); not required → not-in-force
+  → cli check: the verdict line (or JSON), exit 0 / 1 / 4; gate.py: the client's JSON (context, or a blocked prompt)
+    or nothing, exit 0; both keep the verdict file (written while not-ready, removed otherwise)
+```
 
 ### Typical `spec-generate` flow
 
