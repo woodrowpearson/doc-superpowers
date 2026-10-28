@@ -48,6 +48,9 @@ LAUNCHER_REL = ".claude/doc-superpowers/search-mcp.sh"
 INDEX_FIX = f"sh {LAUNCHER_REL} index"
 PLUGIN_FIX = "claude plugin update doc-superpowers"
 CONFIG_FIX = f"edit {CONFIG_REL}, then run sh {LAUNCHER_REL} check"
+TRANSFORMER_NOT_BUILT = "transformer index not built"
+"""Row 5's reason when nothing serves the docs: its fix, INDEX_FIX, is a first transformer build that takes hours,
+so the session-start text gives it to the user (gate.py)."""
 
 _EXITS: dict[str, int] = {"ready": 0, "degraded": 0, "not-ready": 1, "not-in-force": 4}
 _REQUIRED_RE = re.compile(r'"required"\s*:\s*true')
@@ -234,7 +237,7 @@ def _classify(cfg: Config, cache: Mapping[str, str | None]) -> tuple[str | None,
     if transformer and cache["docs"] == "absent":
         fallback = cache["docs_fallback"]
         if fallback == "absent":
-            return "transformer index not built", False, []
+            return TRANSFORMER_NOT_BUILT, False, []
         if fallback == "valid":
             building = True
         else:

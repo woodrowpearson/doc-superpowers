@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -16,9 +18,10 @@ from typing import Any
 import pytest
 
 from doc_search import gate as gate_mod
-from doc_search.check import CONFIG_FIX, Verdict
+from doc_search.check import CONFIG_FIX, TRANSFORMER_NOT_BUILT, Verdict
 from doc_search.config import CONFIG_REL
-from doc_search.gate import agent_can_run, hook_output, verdict_path, write_verdict
+from doc_search.gate import TRANSFORMER_USER_ONLY, agent_can_run, hook_output, verdict_path, write_verdict
+from doc_search.version import plugin_root
 import test_check
 from test_check import INDEX_FIX, configure, install_launcher
 
@@ -322,3 +325,84 @@ def test_gate_budget_reaches_assess(gated, run, monkeypatch: pytest.MonkeyPatch)
     run("gate", "prompt", "--budget", "7")
 
     assert budgets == [20, 7]
+
+
+# --- check keeps the verdict file; DOC_SEARCH_GATE=0 -----------------------------------------------------
+
+
+def launcher_gate_tool(top: Path, command: str) -> subprocess.CompletedProcess[str]:
+    """The plugin's launcher answering `gate tool` in `top`, as a client runs it (the event on stdin)."""
+    event = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+    env = {**os.environ, "DOC_SUPERPOWERS_ROOT": str(plugin_root()), "DOC_SEARCH_GATE": ""}
+    launcher = plugin_root() / "scripts" / "search" / "launch.sh"
+    return subprocess.run(
+        ["sh", str(launcher), "gate", "tool"], cwd=top, input=event, capture_output=True, text=True, env=env
+    )
+
+
+def test_check_keeps_the_verdict_file(gated, run) -> None:
+    verdict_file(gated).write_text("not-ready\nold\n")
+
+    assert run("check").code == 1
+    assert verdict_file(gated).read_bytes() == f"not-ready\ndocs index absent; fix: {INDEX_FIX}\n".encode()
+    assert run("index").code == 0
+    assert run("check", "--format", "json").code == 0
+    assert not verdict_file(gated).exists(), "halt step 2: index, then check, and the verdict file is gone"
+    denied = launcher_gate_tool(gated.root, "rg foo")
+    assert (denied.returncode, denied.stdout) == (0, ""), "…so the tool gate lets the next call through"
+
+
+def test_check_not_in_force_removes_the_verdict_file(gated, run) -> None:
+    configure(gated, required=False)
+    verdict_file(gated).write_text("not-ready\nold\n")
+
+    assert run("check").code == 4
+    assert not verdict_file(gated).exists()
+
+
+@pytest.mark.parametrize("off", ["0", " 0 "])
+def test_check_with_the_gate_off_leaves_the_verdict_file(gated, run, monkeypatch: pytest.MonkeyPatch, off) -> None:
+    monkeypatch.setenv("DOC_SEARCH_GATE", off)
+    verdict_file(gated).write_text("not-ready\nold\n")
+
+    assert run("check").code == 1
+    assert verdict_file(gated).read_text() == "not-ready\nold\n", "not written"
+    assert run("index").code == 0
+    assert run("check").code == 0
+    assert verdict_file(gated).read_text() == "not-ready\nold\n", "…nor removed"
+
+
+@pytest.mark.parametrize("off", ["0", " 0 "])
+def test_gate_off_is_silent(gated, run, monkeypatch: pytest.MonkeyPatch, off) -> None:
+    def never(*_args: object, **_kwargs: object) -> Verdict:
+        raise AssertionError("assess must not run")
+
+    monkeypatch.setattr(gate_mod, "assess", never)
+    monkeypatch.setenv("DOC_SEARCH_GATE", off)
+    verdict_file(gated).write_text("not-ready\nold\n")
+
+    for event in ("session-start", "prompt"):
+        assert gate(run, event) == (0, None)
+    assert verdict_file(gated).read_text() == "not-ready\nold\n", "the verdict file is left as it is"
+    monkeypatch.setenv("DOC_SEARCH_GATE", "1")
+    monkeypatch.setattr(gate_mod, "assess", _assess_not_ready)
+    assert gate(run, "prompt")[1] == block("docs index absent", INDEX_FIX), "DOC_SEARCH_GATE=1 is not off"
+
+
+def _assess_not_ready(*_args: object, **_kwargs: object) -> Verdict:
+    return verdict("not-ready", "docs index absent", INDEX_FIX)
+
+
+# --- a fix that is the user's ----------------------------------------------------------------------------
+
+
+def test_session_start_marks_the_first_transformer_build_as_the_users() -> None:
+    first = verdict("not-ready", TRANSFORMER_NOT_BUILT, INDEX_FIX)
+
+    assert hook_output("session-start", first) == context(
+        f"doc-search is required here and not ready: transformer index not built. Fix: {INDEX_FIX}."
+        f" {TRANSFORMER_USER_ONLY} Do no work until it is ready: tell the user this line and stop."
+    )
+    assert TRANSFORMER_USER_ONLY == "Only the user can run this fix: the first transformer build takes hours."
+    other = verdict("not-ready", "docs index absent", INDEX_FIX)
+    assert TRANSFORMER_USER_ONLY not in hook_output("session-start", other)["hookSpecificOutput"]["additionalContext"]

@@ -13,7 +13,8 @@ stderr every PROGRESS_EVERY_S seconds. `status` is the readiness probe: it never
 whether semble's saved index of each kind is `valid`, `stale` or `absent` on disk (for a transformer docs model also
 the static index that serves while it builds), and, from the progress file a live build publishes, how that build
 is getting on. `check` is the gating probe: it runs the incremental refresh a stale index needs, bounded by
-`--budget`, and never starts a first build.
+`--budget`, and never starts a first build. `check` and `gate` keep the verdict file the tool gate reads (gate.py),
+unless `DOC_SEARCH_GATE=0`.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ from typing import Any, NoReturn
 
 from semble.utils import resolve_model_name
 
-from .check import assess, outside
+from .check import Verdict, assess, outside
 from .cloud import CloudUnavailable, describe
 from .cloud.vertex import VertexEmbedder
 from .cloud.write import BaseRefError, CloudIndexer, CorpusRefused, IndexReport, LeaseHeld, LeaseLost
@@ -42,7 +43,7 @@ from .docindex import DocIndex
 from .encode_cache import cache_size, encode_cache_path
 from .engines import FOREGROUND_WAIT_S, Building, IndexPool, WorktreeIndexes
 from .evaluate import EvalFileError, run_eval
-from .gate import EVENTS, hook_output, judge, verdict_path, write_verdict
+from .gate import EVENTS, gate_off, hook_output, judge, verdict_path, write_verdict
 from .progress import ProgressView, read_progress
 from .render import render_search
 from .repo import GitError, NotARepo, RepoInfo, resolve_worktree
@@ -545,12 +546,15 @@ def _kind_status(rt: Any, got: WorktreeIndexes | Building | None, kind: str) -> 
 
 
 def _check(args: argparse.Namespace) -> int:
-    """The gating probe (check.py): the verdict line, `mcp:` and `launcher:`, or the verdict as JSON with `exit`."""
+    """The gating probe (check.py): the verdict line, `mcp:` and `launcher:`, or the verdict as JSON with `exit`. In a
+    repository it keeps the verdict file as `gate` does, so `check` after a fix lifts the tool gate."""
     try:
         top: Path | None = RepoInfo.from_cwd(Path.cwd()).top
     except NotARepo:
         top = None
     verdict = assess(top, budget_s=args.budget, env=os.environ) if top else outside(os.environ, Path.cwd())
+    if top is not None and not gate_off(os.environ):
+        _keep_verdict(top, verdict)
     if args.format == "json":
         print(json.dumps({**asdict(verdict), "exit": verdict.exit_code()}, indent=2, ensure_ascii=False))
     else:
@@ -566,19 +570,26 @@ def _check(args: argparse.Namespace) -> int:
 def _gate(args: argparse.Namespace) -> int:
     """The hook entry (gate.py): read and drop the event on stdin, judge, keep the verdict file, print the JSON."""
     _drain_stdin()
+    if gate_off(os.environ):
+        return 0
     try:
         top = RepoInfo.from_cwd(Path.cwd()).top
     except (NotARepo, GitError):
         return 0
     verdict = judge(top, budget_s=args.budget, env=os.environ)
-    try:
-        write_verdict(verdict_path(top), verdict)
-    except (GitError, OSError) as err:
-        print(" ".join(f"doc-search: gate: cannot keep the verdict file: {err}".split()), file=sys.stderr)
+    _keep_verdict(top, verdict, "gate")
     output = hook_output(args.event, verdict)
     if output is not None:
         print(json.dumps(output))
     return 0
+
+
+def _keep_verdict(top: Path, verdict: Verdict, verb: str = "check") -> None:
+    """Write or remove the verdict file the tool gate reads (gate.py); a failure is one stderr line."""
+    try:
+        write_verdict(verdict_path(top), verdict)
+    except (GitError, OSError) as err:
+        print(" ".join(f"doc-search: {verb}: cannot keep the verdict file: {err}".split()), file=sys.stderr)
 
 
 def _drain_stdin() -> None:
