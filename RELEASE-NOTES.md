@@ -1,5 +1,22 @@
 # Release Notes
 
+## v3.10.1 (2026-10-28)
+
+This patch release fixes `check-ci.sh` for an interpreter at a path with a space. It also makes every test suite run under a spaced path on every run (#61, #62). Before, the suites met a spaced path only on a host whose `TMPDIR` had one. There, `test-hooks.sh`, `test-doc-pr-release.sh` and `test-ledger.sh` failed, and every failure but the `check-ci.sh` one was a test bug.
+
+### Upgrading from 3.10.0
+Nothing to do: no installed file changes. `check-ci.sh` and the test suites ship only in this repository.
+
+### Fixes
+- **`check-ci.sh --bash` with a spaced path.** The interpreter list was space-joined and word-split, so `--bash "/opt/my tools/bin/bash"` stopped with `--bash /opt/my: not an executable bash` (exit 2), and so did a detected interpreter under such a path. The list is now one path per line.
+
+### Other
+- Tests: the harness root (`test-helpers.sh`) is named `doc-sp test`, so every shim, fixture repo, fake `HOME`, scratch file and installed workflow in all seven suites sits under a spaced path on every run, whatever `TMPDIR` is. The test bugs this surfaced are fixed:
+  - `test-hooks.sh` passed an unquoted `GIT_EDITOR` (git runs it through `sh`), wrote unquoted assignments into the doc-search env hook, and cut a logged `BASH_BIN=` path at its first space.
+  - `test-doc-pr-release.sh` word-split a workflow file list, and rejected any step output whose value held a space. A `$RUNNER_TEMP` report path can hold one; the check is now one `key=` line of at most 4,096 bytes.
+  - `test-ledger.sh` (#61) counted cache paths from an unquoted list, set an unquoted `remote.origin.receivepack`, and expected a raw link where the views percent-encode it. A new test runs `ledger view` from a worktree at a spaced path.
+- The `check-ci.sh` self-tests now pass a spaced `--bash` path on every run. Suite counts are in CLAUDE.md. The local `check-ci.sh` run of the seven suites passed under bash 5.3 and `/bin/bash` 3.2, under a spaced `TMPDIR` too. Actions cannot run on this account (billing lock).
+
 ## v3.10.0 (2026-10-26)
 
 This release adds `setup` and `help` (#51, phase 1 of #54). `setup` turns doc-superpowers on in a repository in one pass, with fixed safe defaults, and shows every write before it makes one. `help` is a one-screen map of every feature. Both work from the skill (`/doc-superpowers setup`, `/doc-superpowers help`) and from a terminal (`scripts/doc-superpowers`), with the same text.
