@@ -36,7 +36,11 @@ _HARNESS_TMP=$(mktemp -d -t doc-sp-test.XXXXXX) || {
   exit 1
 }
 _SHIM_DIR="$_HARNESS_TMP/shim"
-SUITE_TMP="$_HARNESS_TMP/tmp"
+# The scratch dir's name holds a space, so every fixture repo and scratch path
+# is a spaced path on every run, whatever TMPDIR is: a word-split path in a
+# hook, a step script or a test fails here, not only on a host whose TMPDIR
+# (or a user whose repo path) has one.
+SUITE_TMP="$_HARNESS_TMP/suite tmp"
 mkdir -p "$_SHIM_DIR" "$SUITE_TMP" "$_HARNESS_TMP/home" "$_HARNESS_TMP/xdg" || exit 1
 
 # Never inherit a TEST_DIR from the caller's environment: cleanup removes it.
