@@ -887,9 +887,7 @@ ifl_plan($0) { print "M\t" $0 }
 # shellcheck disable=SC2016  # awk source
 _LG_AWK_UP_PLAN_LINKS='
 function up_body(line,   c) {
-  sub(/\r$/, "", line)
-  if (rw_line(line) != 1 || RW_MC > RW_N || tolower(rw_trim(rw_bare(RW_C[RW_MC]))) != "include") return
-  c = rw_trim(rw_bare(RW_C[1])); gsub(/\t/, " ", c)
+  c = rw_linked(line)
   if (c != "") print UP "\tR\t" c
 }
 {

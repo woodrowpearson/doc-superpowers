@@ -6337,7 +6337,7 @@ lg_ifl_fixture() {
   LG_WT1="$LG_WT/wt 1"
   LG_WT2="$LG_WT/wt 2"
   git worktree add -q -b feat-wt "$LG_WT1" main
-  ( cd "$LG_WT1" && printf '# Plan\n\nCovers core-2.\n' > docs/plans/p.md && git add -A \
+  ( cd "$LG_WT1" && printf -- '---\nissue: core-2\n---\n# Plan\n\nCovers core-2.\n' > docs/plans/p.md && git add -A \
     && git commit -q -m "plan core-2" -m "Contract-Change: endpoint:create — adds a field" )
   git worktree add -q --detach "$LG_WT2" main
   ( cd "$LG_WT2" && git commit -q --allow-empty -m "detached work" -m "Ledger-Claims: app-4" )
@@ -6575,7 +6575,7 @@ Ledger-Ack: 0123456789ab — seen it
 Fixes #12"
   echo changed >> src/order/total.js
   git add -A && git commit -qm "touch the total"
-  printf '# Q\n\nCovers core-2.\n' > docs/plans/q.md
+  printf -- '---\nitems: [core-2]\n---\n# Q\n\nCovers core-2.\n' > docs/plans/q.md
   git add -A && git commit -qm "a new plan"
   git checkout -q -b feature main
   git commit -q --allow-empty -m "feature work" -m "Ledger-Claims: app-4"
@@ -6597,7 +6597,7 @@ Fixes #12"
   assert_json_field "$LG_OUT" '.merge_base' "$(git rev-parse origin/main)" "merge_base: the trunk merged in"
   assert_json_field "$LG_OUT" '.files | join(",")' "docs/plans/q.md,src/order/total.js" "files: the net diff from the merge base"
   assert_json_field "$LG_OUT" '.claims | join(",")' "app-1,app-3,app-4,core-2" \
-    "claims: a trailer (any case), a path trailer, the merged feature's trailer, a plan's key — never the trunk's app-5, never an unknown key"
+    "claims: a trailer (any case), a path trailer, the merged feature's trailer, a key the plan links — never the trunk's app-5, never an unknown key"
   assert_json_field "$LG_OUT" '.contract_changes | map("\(.id)=\(.line)") | join(",")' "endpoint:create=renames a param,field:order.total=null" \
     "contract changes: Contract-Change and defined_in — never the trunk's component:Sheet"
   assert_json_field "$LG_OUT" '.acks | join(",")' "0123456789ab" "acks"
@@ -6612,6 +6612,69 @@ Fixes #12"
   assert_eq "1" "$(printf '%s\n' "$LG_ERR" | grep -c '^ledger:')" "one ledger: note"
   assert_contains "$LG_ERR" "1 issue reference not resolved (#12)" "…counting the unresolved ref"
   lg_ifl_teardown
+}
+
+test_lg_ifl_plan_claims_follow_links() {
+  echo "test: a plan claims what it links (references/ledger.md, Merge-time upkeep → plan-link) — a Related work row marked include, a frontmatter value or list element (a key in any case, or an item path, ./ dropped); never an excluded row, an unmarked row, another cell, a table in a fenced block, the body's key words, a plan with no table, or an unterminated frontmatter"
+  lg_ifl_fixture
+  git checkout -q -b linked main
+  # shellcheck disable=SC2016  # literal backticks: a code span in a cell
+  printf -- '---\nissue: ./docs/issues/a.md\nitems: [CORE-1]\nnotes:\n  - not-a-key-7\n---\n# Plan\n\nThis plan mentions app-5 in prose.\n\n```md\n## Related work\n\n| Item | Why related | Mark |\n|---|---|---|\n| app-7 | an example, fenced | include |\n```\n\n## Related work\n\n| Item | Why related | Mark |\n|---|---|---|\n| `app-3` | lists src/order/total.js; see app-4 | **include** |\n| app-2 | lists src/order/total.js | exclude: shares only total.js |\n| core-2 | lists server/create.js | Exclude |\n| app-6 | a candidate not yet marked |  |\n\n## Chunk 1\n\nTouches app-2 and core-2 again.\n' > docs/plans/linked.md
+  git add -A && git commit -qm "a plan with a marked table"
+  git checkout -q -b prose main
+  printf '# Plan\n\nCovers app-5 and core-2 (no table, no frontmatter).\n' > docs/plans/prose.md
+  printf -- '---\nissue: app-4\n# Plan with an unterminated frontmatter\n' > docs/plans/open.md
+  git add -A && git commit -qm "plans that link nothing"
+  git checkout -q -b aliased main
+  printf '# Plan\n\n## Related work\n\n| Item | Mark |\n|---|---|\n| OLD-7 | include |\n| ./docs/issues/b.md | Include |\n' > docs/plans/aliased.md
+  git add -A && git commit -qm "a plan linking an alias and a path"
+  git checkout -q main
+  # app-6 and app-7, in the working tree's index only (the join reads it there).
+  lg_item docs/issues/h.md "key: app-6" "ledger: app" "status: Open" "severity: P3" "summary: Unmarked in the plan's table"
+  lg_item docs/issues/i.md "key: app-7" "ledger: app" "status: Open" "severity: P3" "summary: Included only inside a fenced block"
+  lg_call _lg_branch_facts "$(git rev-parse linked)"
+  assert_eq "0" "$LG_RC" "rc 0"
+  assert_json_field "$LG_OUT" '.claims | join(",")' "app-1,app-3,core-1" \
+    "claims: the include row (code span and bold mark stripped), the frontmatter path and the list's key in another case — never app-2 or core-2 (excluded rows, then named in the body), app-4 (another cell), app-5 (prose), app-6 (an unmarked row) or app-7 (a fenced table)"
+  lg_call _lg_branch_facts "$(git rev-parse prose)"
+  assert_eq "0|" "$LG_RC|$(printf '%s' "$LG_OUT" | jq -r '.claims | join(",")')" \
+    "no claims: key words in a plan with no table, and a frontmatter block that never closes (read as body text)"
+  # app-5's old key, in the working tree's index (the join reads it there).
+  awk '{ print } /^key: app-5$/ { print "aliases: [old-7]" }' docs/issues/g.md > docs/issues/g.md.new && mv docs/issues/g.md.new docs/issues/g.md
+  lg_call _lg_branch_facts "$(git rev-parse aliased)"
+  assert_eq "0|app-2,app-5" "$LG_RC|$(printf '%s' "$LG_OUT" | jq -r '.claims | join(",")')" "include rows naming an alias (in another case) and an item path (./ dropped) claim their items"
+  lg inflight --branch linked
+  assert_eq "linked local no PR claims:app-1,app-3,core-1 contracts:— files:1" "$LG_OUT" "inflight --branch linked: the linked items only"
+  lg_ifl_teardown
+}
+
+test_lg_notice_plan_excluded_rows_never_stop() {
+  echo "test: ledger notices — two plans that list one item only in excluded Related work rows, or name it in prose, raise no stop; two plans that include one item do (devex: 25 false stops from excluded sweep --plan rows)"
+  lg_ntc_fixture
+  git checkout -q main
+  mkdir -p docs/plans
+  printf '# Plan\n\nNothing yet.\n' > docs/plans/p.md
+  lg_doc_index '{"docs":{"docs/plans/p.md":{"doc_type":"plan"}}}'
+  git add -A && git commit -qm "the plan directory"
+  git push -q origin main
+  git fetch -q origin
+  git checkout -q -B mine main
+  local rw
+  rw=$'## Related work\n\n| Item | Why related | Mark |\n|---|---|---|'
+  printf '# Mine\n\nAlso about core-2.\n\n%s\n| app-2 | lists shared.txt | include |\n| core-2 | lists shared.txt | exclude: shares only shared.txt |\n' "$rw" > docs/plans/mine.md
+  git add -A && git commit -qm "my plan"
+  lg_ntc_branch y-plan "y's plan" docs/plans/y.md "$(printf '# Y\n\n%s\n| app-2 | lists shared.txt | include |\n| core-2 | lists shared.txt | exclude: not this work |' "$rw")"
+  lg_ntc_branch z-plan "z's plan" docs/plans/z.md "$(printf '# Z\n\nMentions core-2 and app-2.\n\n%s\n| core-2 | lists shared.txt | exclude: not this work |' "$rw")"
+  lg inflight --format json
+  assert_json_field "$LG_OUT" '[.branches[] | "\(.name)=\(.claims | join(","))"] | join(" ")' "mine=app-2 y-plan=app-2 z-plan=" \
+    "claims: each plan's include rows only"
+  lg notices --format json
+  assert_eq "0" "$LG_RC" "exit 0"
+  assert_json_field "$LG_OUT" '[.notices[] | "\(.urgency) \(.other.branch) \(.overlap.keys // [] | join(","))"] | join("|")' "stop y-plan app-2" \
+    "one stop: the item both plans include — none for core-2 (excluded, or prose) on y-plan or z-plan"
+  lg notices --gate
+  assert_eq "1" "$LG_RC" "--gate: the one real stop blocks"
+  teardown
 }
 
 test_lg_branch_facts_criss_cross() {
@@ -8065,15 +8128,24 @@ test_lg_ifl_facts_sig_in_name() {
   lg_ifl_teardown
 }
 
-# lg_ifl_sig_of [<text> [glob]]: the in-flight facts signature, computed
-# afresh, with <text> appended to the plan test (_LG_AWK_IFL_PLAN), or with
-# "glob" to the glob grammar (_LG_AWK_GLOB) — for lg_call.
+# lg_ifl_sig_of [<text> [glob|rw|fm]]: the in-flight facts signature,
+# computed afresh, with <text> appended to the plan test (_LG_AWK_IFL_PLAN),
+# or with "glob" to the glob grammar (_LG_AWK_GLOB), "rw" to the Related
+# work reader (_LG_AWK_RW), "links" to the plan links (_LG_AWK_IFL_LINKS),
+# "fm" to a copy of frontmatter.awk (_LG_LIB
+# pointed at the copy) — for lg_call.
 lg_ifl_sig_of() {
-  if [ "${2:-}" = glob ]; then
-    _LG_AWK_GLOB="$_LG_AWK_GLOB${1:-}"
-  else
-    _LG_AWK_IFL_PLAN="$_LG_AWK_IFL_PLAN${1:-}"
-  fi
+  local d
+  case "${2:-}" in
+    glob) _LG_AWK_GLOB="$_LG_AWK_GLOB${1:-}" ;;
+    rw) _LG_AWK_RW="$_LG_AWK_RW${1:-}" ;;
+    links) _LG_AWK_IFL_LINKS="$_LG_AWK_IFL_LINKS${1:-}" ;;
+    fm)
+      d=$(harness_mktemp_d lg-lib)
+      { cat "$_LG_LIB/frontmatter.awk"; printf '%s\n' "${1:-}"; } > "$d/frontmatter.awk"
+      _LG_LIB=$d ;;
+    *) _LG_AWK_IFL_PLAN="$_LG_AWK_IFL_PLAN${1:-}" ;;
+  esac
   _LG_IFL_SIG=""
   _lg_ifl_sig
   printf '%s\n' "$_LG_IFL_SIG"
@@ -8092,6 +8164,24 @@ test_lg_ifl_facts_sig_covers_plan_test() {
   lg_ifl_teardown
 }
 
+test_lg_ifl_facts_sig_covers_link_readers() {
+  echo "test: the in-flight facts signature covers the plan links (_LG_AWK_IFL_LINKS) and the readers it runs on (_LG_AWK_RW, frontmatter.awk): another reader is another signature, so no cached claims outlive a change to the link test"
+  lg_ifl_fixture
+  local a
+  lg_call lg_ifl_sig_of
+  a=$LG_OUT
+  lg_call lg_ifl_sig_of "# another Related work reader" rw
+  assert_eq "0|16|different" "$LG_RC|${#LG_OUT}|$(if [ "$LG_OUT" != "$a" ] && [ -n "$a" ]; then echo different; else echo same; fi)" \
+    "another _LG_AWK_RW: another 16-hex signature"
+  lg_call lg_ifl_sig_of "# another plan links reader" links
+  assert_eq "0|16|different" "$LG_RC|${#LG_OUT}|$(if [ "$LG_OUT" != "$a" ] && [ -n "$a" ]; then echo different; else echo same; fi)" \
+    "another _LG_AWK_IFL_LINKS: another 16-hex signature"
+  lg_call lg_ifl_sig_of "# another frontmatter parser" fm
+  assert_eq "0|16|different" "$LG_RC|${#LG_OUT}|$(if [ "$LG_OUT" != "$a" ] && [ -n "$a" ]; then echo different; else echo same; fi)" \
+    "another frontmatter.awk: another 16-hex signature"
+  lg_ifl_teardown
+}
+
 test_lg_ifl_facts_sig_covers_glob() {
   echo "test: the in-flight facts signature covers the glob grammar (_LG_AWK_GLOB, with which the plan test matches doc_columns.plan.globs; final review M4): another grammar is another signature"
   lg_ifl_fixture
@@ -8104,10 +8194,13 @@ test_lg_ifl_facts_sig_covers_glob() {
   lg_ifl_teardown
 }
 
-# --- Task 16b (U7): the plan words' `git cat-file --batch` reader -------------
+# --- Task 16b (U7): the plan links' `git cat-file --batch` reader -------------
 
 # lg_ifl_plan_file <path> <filler-lines> <last-line-format>: a plan — a
 # heading, <filler-lines> lines naming no key, then the printf format.
+# LG_IFL_RW: a Related work section's heading and table header, for a
+# format ending in one "| <key> | include |" row.
+LG_IFL_RW='## Related work\n\n| Item | Mark |\n|---|---|\n'
 lg_ifl_plan_file() {
   {
     printf '# Plan\n\n'
@@ -8120,7 +8213,7 @@ lg_ifl_plan_file() {
 # lg_ifl_plans_fixture <filler-lines>: open items app-1..app-4 (docs/issues/
 # a1.md..a4.md), the plan directory docs/plans (doc-index doc_type plan),
 # base origin/main on a bare remote (LG_REMOTE), and four branches off main,
-# each adding plans whose last line names one key, after <filler-lines>
+# each adding plans whose last line links one key (an include row), after <filler-lines>
 # lines of filler — the blob shapes `git cat-file --batch` ends differently:
 #   plan-1  docs/plans/one.md, newline-terminated: app-1
 #   plan-2  an empty docs/plans/empty.md, then docs/plans/two.md: app-2
@@ -8145,17 +8238,17 @@ lg_ifl_plans_fixture() {
   git push -q origin main
   git fetch -q origin
   git checkout -q -b plan-1 main
-  lg_ifl_plan_file docs/plans/one.md "$n" 'Covers app-1.\n'
+  lg_ifl_plan_file docs/plans/one.md "$n" "$LG_IFL_RW"'| app-1 | include |\n'
   git add -A && git commit -qm "plan 1"
   git checkout -q -b plan-2 main
   : > docs/plans/empty.md
-  lg_ifl_plan_file docs/plans/two.md "$n" 'Covers app-2.\n'
+  lg_ifl_plan_file docs/plans/two.md "$n" "$LG_IFL_RW"'| app-2 | include |\n'
   git add -A && git commit -qm "plan 2"
   git checkout -q -b plan-3 main
-  lg_ifl_plan_file docs/plans/three.md "$n" 'Covers app-3.'
+  lg_ifl_plan_file docs/plans/three.md "$n" "$LG_IFL_RW"'| app-3 | include |'
   git add -A && git commit -qm "plan 3"
   git checkout -q -b plan-4 main
-  lg_ifl_plan_file docs/plans/four.md "$n" 'Covers app-4.\n'
+  lg_ifl_plan_file docs/plans/four.md "$n" "$LG_IFL_RW"'| app-4 | include |\n'
   git add -A && git commit -qm "plan 4"
   git checkout -q main
 }
@@ -8165,62 +8258,84 @@ plan-2 local no PR claims:app-2 contracts:— files:2
 plan-3 local no PR claims:app-3 contracts:— files:1
 plan-4 local no PR claims:app-4 contracts:— files:1"
 
-test_lg_ifl_plan_words_exact_tips() {
-  echo "test: the plan words (U7) — a small batch: each plan's key goes to its own tip (the separator after a newline-terminated or empty blob is not a header)"
+test_lg_ifl_plan_links_exact_tips() {
+  echo "test: the plan links (U7) — a small batch: each plan's linked key goes to its own tip (the separator after a newline-terminated or empty blob is not a header)"
   lg_ifl_plans_fixture 2
   lg inflight
   assert_eq "0" "$LG_RC" "exit 0"
-  assert_eq "$LG_IFL_PLANS_OUT" "$LG_OUT" "each branch claims the key its own plan names — none dropped, none moved to another tip"
+  assert_eq "$LG_IFL_PLANS_OUT" "$LG_OUT" "each branch claims the key its own plan links — none dropped, none moved to another tip"
   rm -rf "$(dirname "$LG_REMOTE")"
   teardown
 }
 
-# lg_t_ifl_words <req> <stream>: the plan-words reader on a crafted stream.
-lg_t_ifl_words() {
-  LC_ALL=C awk -v req="$1" "$_LG_AWK_IFL_WORDS" < "$2"
+# lg_t_ifl_links <req> <stream>: the plan-links reader on a crafted stream.
+lg_t_ifl_links() {
+  _lg_ifl_links "$1" < "$2"
 }
 
-test_lg_ifl_plan_words_stream_in_step() {
-  echo "test: the plan words (U7 audit) — a non-blob's content is skipped, a missing object takes its request, and a stream out of step with its requests exits 3 (never a silent short read)"
+test_lg_ifl_plan_links_stream_in_step() {
+  echo "test: the plan links (U7 audit) — a non-blob's content is skipped, a missing object takes its request, and a stream out of step with its requests exits 3 (never a silent short read)"
   lg_fixture
   lg_enable
   local rq st o
   rq=$(harness_mktemp ifl-req)
   st=$(harness_mktemp ifl-stream)
   o=0123456789abcdef0123456789abcdef01234567
+  # A 17-byte plan "---\nx: app-1\n---\n": its frontmatter links app-1.
   printf 't1:docs/plans/sub\nt2:docs/plans/gone.md\nt3:docs/plans/a.md\n' > "$rq"
-  printf '%s tree 8\napp-7 x\n\nt2:docs/plans/gone.md missing\n%s blob 10\nSee app-1\n\n' "$o" "$o" > "$st"
-  lg_call lg_t_ifl_words "$rq" "$st"
+  printf '%s tree 17\n---\nx: app-7\n---\n\nt2:docs/plans/gone.md missing\n%s blob 17\n---\nx: app-1\n---\n\n' "$o" "$o" > "$st"
+  lg_call lg_t_ifl_links "$rq" "$st"
   assert_eq "0" "$LG_RC" "in step: exit 0"
-  assert_eq "$(printf 'K\tt3\tapp-1')" "$LG_OUT" "…the blob's word, on its own tip; the tree's content read as content (no word, no header)"
+  assert_eq "$(printf 'L\tt3\tapp-1')" "$LG_OUT" "…the blob's link, on its own tip; the tree's content skipped (no link, no header)"
   printf 't1:docs/plans/a.md\n' > "$rq"
-  printf '%s blob 10\nSee app-1\n\n%s blob 10\nSee app-2\n\n' "$o" "$o" > "$st"
-  lg_call lg_t_ifl_words "$rq" "$st"
+  printf '%s blob 17\n---\nx: app-1\n---\n\n%s blob 17\n---\nx: app-2\n---\n\n' "$o" "$o" > "$st"
+  lg_call lg_t_ifl_links "$rq" "$st"
   assert_eq "3" "$LG_RC" "a header past the last request: exit 3"
   printf 't1:docs/plans/a.md\nt2:docs/plans/b.md\n' > "$rq"
-  printf '%s blob 4\nSee app-1\n\n%s blob 10\nSee app-2\n\n' "$o" "$o" > "$st"
-  lg_call lg_t_ifl_words "$rq" "$st"
+  printf '%s blob 4\n---\nx: app-1\n---\n\n%s blob 17\n---\nx: app-2\n---\n\n' "$o" "$o" > "$st"
+  lg_call lg_t_ifl_links "$rq" "$st"
   assert_eq "3" "$LG_RC" "a size short of the content: exit 3"
   # Fix round 1 (m2), as frontmatter.awk's batch mode: a short read never passes.
   printf 't1:docs/plans/a.md\n' > "$rq"
-  printf '%s blob 10\nSee ap' "$o" > "$st"
-  lg_call lg_t_ifl_words "$rq" "$st"
+  printf '%s blob 17\n---\nx: ap' "$o" > "$st"
+  lg_call lg_t_ifl_links "$rq" "$st"
   assert_eq "3" "$LG_RC" "a stream cut inside an object: exit 3"
   printf 't1:docs/plans/a.md\nt2:docs/plans/b.md\n' > "$rq"
-  printf '%s blob 10\nSee app-1\n\n' "$o" > "$st"
-  lg_call lg_t_ifl_words "$rq" "$st"
+  printf '%s blob 17\n---\nx: app-1\n---\n\n' "$o" > "$st"
+  lg_call lg_t_ifl_links "$rq" "$st"
   assert_eq "3" "$LG_RC" "fewer objects than requests: exit 3"
-  printf '%s blob 10\nSee app-1\nX\n%s blob 10\nSee app-2\n\n' "$o" "$o" > "$st"
-  lg_call lg_t_ifl_words "$rq" "$st"
+  printf '%s blob 17\n---\nx: app-1\n---\nX\n%s blob 17\n---\nx: app-2\n---\n\n' "$o" "$o" > "$st"
+  lg_call lg_t_ifl_links "$rq" "$st"
   assert_eq "3" "$LG_RC" "a separator line that is not empty: exit 3"
-  printf '%s blob 0\n\n%s blob 9\nSee app-2\n' "$o" "$o" > "$st"
-  lg_call lg_t_ifl_words "$rq" "$st"
-  assert_eq "0|$(printf 'K\tt2\tapp-2')" "$LG_RC|$LG_OUT" "in step: an empty object, then one without a final newline of its own (the separator ends it): exit 0"
+  printf '%s blob 0\n\n%s blob 16\n---\nx: app-2\n---\n' "$o" "$o" > "$st"
+  lg_call lg_t_ifl_links "$rq" "$st"
+  assert_eq "0|$(printf 'L\tt2\tapp-2')" "$LG_RC|$LG_OUT" "in step: an empty object, then one without a final newline of its own (the separator ends it, and its frontmatter): exit 0"
+  # Two blobs on one tip: an include row, the frontmatter strings of a list
+  # (a quoted one decoded) — each once — and nothing from the body's words.
+  printf 't1:docs/plans/a.md\nt1:docs/plans/b.md\n' > "$rq"
+  {
+    printf '%s blob 63\n## Related work\n\n| Item | Mark |\n|---|---|\n| app-1 | include |\n\n' "$o"
+    printf '%s blob 43\n---\nk: [app-1, "a\\"b"]\n---\nSee app-9 here.\n\n' "$o"
+  } > "$st"
+  lg_call lg_t_ifl_links "$rq" "$st"
+  assert_eq "0|$(printf 'L\tt1\tapp-1\nL\tt1\ta"b')" "$LG_RC|$LG_OUT" "an include row and frontmatter list strings (decoded), each value once per tip; a body word never"
+  # Nothing leaks from one blob to the next: a Related work section left
+  # open (t1), then a bare table row on another tip (t2) links nothing; an
+  # unclosed frontmatter's lines are body text, so its include row links
+  # (t3), and the same value on another tip is printed again.
+  printf 't1:docs/plans/a.md\nt2:docs/plans/b.md\nt3:docs/plans/c.md\n' > "$rq"
+  {
+    printf '%s blob 43\n## Related work\n\n| Item | Mark |\n|---|---|\n\n' "$o"
+    printf '%s blob 20\n| app-2 | include |\n\n' "$o"
+    printf '%s blob 76\n---\nk: app-4\n## Related work\n\n| Item | Mark |\n|---|---|\n| app-1 | include |\n\n' "$o"
+  } > "$st"
+  lg_call lg_t_ifl_links "$rq" "$st"
+  assert_eq "0|$(printf 'L\tt3\tapp-1')" "$LG_RC|$LG_OUT" "no state crosses blobs or tips; an unclosed frontmatter's include row links, its key: value line does not"
   teardown
 }
 
-test_lg_ifl_plan_words_large_batch() {
-  echo "test: the plan words (U7) — plan blobs past the pipe buffers (> 64 KB) across several tips: the reader reads the whole batch (exit 0, no SIGPIPE) and attributes every word to its tip"
+test_lg_ifl_plan_links_large_batch() {
+  echo "test: the plan links (U7) — plan blobs past the pipe buffers (> 64 KB) across several tips: the reader reads the whole batch (exit 0, no SIGPIPE) and attributes every link to its tip"
   lg_ifl_plans_fixture 2500
   local bytes
   bytes=$(git cat-file -s "plan-1:docs/plans/one.md")
@@ -8228,7 +8343,7 @@ test_lg_ifl_plan_words_large_batch() {
   lg inflight
   assert_eq "0" "$LG_RC" "exit 0"
   assert_not_contains "$LG_ERR" "cannot read the in-flight plans" "…the plans read"
-  assert_eq "$LG_IFL_PLANS_OUT" "$LG_OUT" "each branch claims the key its own plan names"
+  assert_eq "$LG_IFL_PLANS_OUT" "$LG_OUT" "each branch claims the key its own plan links"
   rm -rf "$(dirname "$LG_REMOTE")"
   teardown
 }
@@ -15264,6 +15379,8 @@ run_tests() {
   test_lg_inflight_unicode_branch
   test_lg_host_id_anonymous
   test_lg_branch_facts_claims_and_contracts
+  test_lg_ifl_plan_claims_follow_links
+  test_lg_notice_plan_excluded_rows_never_stop
   test_lg_branch_facts_criss_cross
   test_lg_show_inflight_claims
   test_lg_view_publish_inflight
@@ -15282,6 +15399,7 @@ run_tests() {
   test_lg_ifl_facts_sig_in_name
   test_lg_ifl_facts_sig_covers_plan_test
   test_lg_ifl_facts_sig_covers_glob
+  test_lg_ifl_facts_sig_covers_link_readers
 
   # --- Task 11 fix round 3 ---
   test_lg_inflight_scan_children_reaped
@@ -15395,9 +15513,9 @@ run_tests() {
   test_lg_init_accept_findings_before_offline
   test_lg_init_import_empty_globs_finding
   # --- Task 16b ---
-  test_lg_ifl_plan_words_exact_tips
-  test_lg_ifl_plan_words_large_batch
-  test_lg_ifl_plan_words_stream_in_step
+  test_lg_ifl_plan_links_exact_tips
+  test_lg_ifl_plan_links_large_batch
+  test_lg_ifl_plan_links_stream_in_step
   test_lg_init_legacy_ledgers_only_named
   test_lg_init_hand_written_discovery_without_legacy_ledgers
   test_lg_init_preseeded_legacy_entries_authoritative
