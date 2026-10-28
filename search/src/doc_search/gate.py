@@ -6,13 +6,16 @@ The client hooks run `sh <top>/.claude/doc-superpowers/search-mcp.sh gate <event
 `check`'s `assess`, writes the verdict file, and prints the client's JSON (the same for Claude Code and Codex)
 or nothing. It always exits 0: the decision is the JSON.
 
-- `session-start`: the verdict as context; not-ready says to do no work until it is ready. Not in force: nothing.
+- `session-start`: the verdict as context; not-ready says to do no work until it is ready, and that only the user
+  can run a fix the tool gate does not allow, or a first transformer build. Not in force: nothing.
 - `prompt`: not-ready blocks the prompt with the reason and the fix; anything else: nothing.
 - An exception in `assess` is not-ready (`check failed: <type>: <message>`) when the raw config says
   `"required": true`, and not in force otherwise.
+- `DOC_SEARCH_GATE=0` (blanks ignored): nothing, and the verdict file is not touched.
 
 The verdict file, `$(git rev-parse --git-path doc-search-gate)`, is two LF lines while the verdict is not-ready
-(`not-ready`, then `<reason>; fix: <fix>`) and absent otherwise. It is replaced atomically.
+(`not-ready`, then `<reason>; fix: <fix>`) and absent otherwise. It is replaced atomically. `check` keeps it
+too (cli.py), so the halt's own fix, run by the agent, lifts the tool gate.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .check import LAUNCHER_REL, Verdict, assess, config_says_required
+from .check import LAUNCHER_REL, TRANSFORMER_NOT_BUILT, Verdict, assess, config_says_required
 from .repo import git
 
 EVENTS = ("session-start", "prompt")
@@ -34,6 +37,7 @@ CHECK_FIX = f"sh {LAUNCHER_REL} check"
 """The fix of a `check` that raised: run it again, and read what it says."""
 
 NOT_READY = "doc-search is required here and not ready"
+TRANSFORMER_USER_ONLY = "Only the user can run this fix: the first transformer build takes hours."
 USER_ONLY = f"Only the user can run this fix; you may run only sh {LAUNCHER_REL} index, status or check."
 
 # The commands the launcher's `gate tool` allows while not ready (launch.sh, GATE_ALLOWED_PLAIN and
@@ -44,6 +48,12 @@ _ALLOWED = (
     re.compile(r'sh "([A-Za-z0-9_. /-]*/)?\.claude/doc-superpowers/search-mcp\.sh"' + _VERB),
 )
 _BREAKS = re.compile(r"[\r\n]+")
+
+
+def gate_off(env: Mapping[str, str]) -> bool:
+    """The developer's switch: `DOC_SEARCH_GATE=0` (blanks ignored, as the launcher reads it). The hooks are silent,
+    and neither `gate` nor `check` touches the verdict file."""
+    return "".join(env.get("DOC_SEARCH_GATE", "").split()) == "0"
 
 
 def agent_can_run(fix: str | None) -> bool:
@@ -97,7 +107,9 @@ def hook_output(event: str, verdict: Verdict) -> dict[str, Any] | None:
         return None
     if verdict.state == "not-ready":
         text = f"{NOT_READY}: {reason}. Fix: {fix}."
-        if not agent_can_run(verdict.fix):
+        if verdict.reason == TRANSFORMER_NOT_BUILT:
+            text += f" {TRANSFORMER_USER_ONLY}"
+        elif not agent_can_run(verdict.fix):
             text += f" {USER_ONLY}"
         text += " Do no work until it is ready: tell the user this line and stop."
     else:

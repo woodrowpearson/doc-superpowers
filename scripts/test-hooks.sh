@@ -5893,10 +5893,23 @@ SRL_BIN=$(harness_mktemp_d fakeuv)
 printf '#!/bin/sh\nprintf "uv %%s\\n" "$*"\necho "$#" > "$(dirname "$0")/argc"\n' > "$SRL_BIN/uv"
 chmod +x "$SRL_BIN/uv"
 
-# srl_root <dir>: <dir> as a doc-superpowers root (a search/pyproject.toml).
+# srl_root <dir>: <dir> as a doc-superpowers root (a search/pyproject.toml),
+# one with the readiness gate (search/src/doc_search/gate.py).
 srl_root() {
+  mkdir -p "$1/search/src/doc_search"
+  : > "$1/search/pyproject.toml"
+  : > "$1/search/src/doc_search/gate.py"
+}
+
+# srl_pregate_root <dir> [version]: <dir> as a root that predates the
+# readiness gate (no search/src/doc_search/gate.py), its package.json at
+# <version> (default 3.10.0; "none" writes no package.json).
+srl_pregate_root() {
   mkdir -p "$1/search"
   : > "$1/search/pyproject.toml"
+  if [ "${2:-3.10.0}" != none ]; then
+    printf '{\n  "name": "doc-superpowers",\n  "version": "%s"\n}\n' "${2:-3.10.0}" > "$1/package.json"
+  fi
 }
 
 # srl_run [VAR=value …] -- <launcher args…>: run the launcher (under /bin/sh)
@@ -7191,9 +7204,10 @@ test_launcher_check_gate_without_uv_required() {
   assert_eq "1" "$RUN_RC" "without jq, check --format json: exit 1"
   assert_true "…one JSON object (jq -e .)" srg_is_json
   assert_eq "$(srg_check_json not-ready 1 "$SRG_UV_REASON" "install uv")" "$(srg_compact)" "…the same verdict"
-  # gate tool: as usual, from the verdict file (none yet: silent).
+  # gate tool: as usual, from the verdict file (check wrote one; without it: silent).
   ev="$SRG_TMP/rg.json"
   srg_event "$ev" Bash "rg foo"
+  rm -f "$vf"
   srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
   assert_eq "0:" "$RUN_RC:$RUN_OUT" "gate tool, no verdict file: silent"
   # gate prompt and session-start: doc-search gate's words (Fix:, and the user-only
@@ -7506,6 +7520,103 @@ test_launcher_gate_reads_the_event() {
   teardown
 }
 
+test_launcher_check_keeps_the_verdict_file() {
+  echo "test: launcher: check, where the launcher answers it, keeps the verdict file as gate does — required with no uv writes it, not in force (not required, no root) removes it; DOC_SEARCH_GATE=0 leaves it alone"
+  srh_fixture '{"required": true}'
+  local envroot nouv vf want
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  nouv=$(srg_nouv_path)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  want="$SRG_TMP/want-check-verdict"
+  printf 'not-ready\n%s; fix: install uv\n' "$SRG_UV_REASON" > "$want"
+  rm -f "$vf"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "1" "$RUN_RC" "required, no uv: check exits 1"
+  assert_true "…and writes the verdict file, two LF lines" cmp -s "$want" "$vf"
+  printf 'ready\n' > "$vf"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check --format json
+  assert_true "…check --format json too" cmp -s "$want" "$vf"
+  rm -f "$vf"
+  srg_run /dev/null DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "1" "$RUN_RC" "DOC_SEARCH_GATE=0, required, no uv: check still exits 1"
+  assert_true "…but writes no verdict file" test ! -e "$vf"
+  printf '{"required": false}\n' > docs/search/config.json
+  printf 'not-ready\nold\n' > "$vf"
+  srg_run /dev/null DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "not-ready" "$(head -n 1 "$vf" 2>/dev/null || true)" "DOC_SEARCH_GATE=0, not required: the verdict file is not removed"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "4" "$RUN_RC" "not required, no uv: check exits 4"
+  assert_true "…and removes the verdict file" test ! -e "$vf"
+  printf '{"required": true}\n' > docs/search/config.json
+  printf 'not-ready\nold\n' > "$vf"
+  srg_run /dev/null PATH="$nouv" -- check
+  assert_eq "4" "$RUN_RC" "no root: check exits 4"
+  assert_true "…and removes the verdict file" test ! -e "$vf"
+  teardown
+}
+
+test_launcher_pre_gate_root() {
+  echo "test: launcher: a root that predates the readiness gate (no search/src/doc_search/gate.py) — required: check says not ready, '<X> predates the readiness gate', the plugin update as the fix, exit 1, and gate session-start|prompt answer as with no uv; not required: check exit 4, gate silent; uv is never run"
+  srh_fixture '{"required": true}'
+  local envroot vf want reason fix codex
+  envroot=$(harness_mktemp_d pregate)
+  srl_pregate_root "$envroot" 3.10.0
+  vf=$(git rev-parse --git-path doc-search-gate)
+  reason="doc-superpowers 3.10.0 predates the readiness gate"
+  fix="claude plugin update doc-superpowers"
+  rm -f "$SRL_BIN/argc"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check
+  assert_eq "1:doc-search: not ready: $reason:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: not ready, exit 1"
+  assert_true "…uv never run" test ! -e "$SRL_BIN/argc"
+  want="$SRG_TMP/want-pregate"
+  printf 'not-ready\n%s; fix: %s\n' "$reason" "$fix" > "$want"
+  assert_true "…the verdict file written" cmp -s "$want" "$vf"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "$reason" "$fix")" "$(srg_compact)" "check --format json: the verdict, the plugin update as its fix"
+  rm -f "$vf"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate session-start
+  assert_eq "0" "$RUN_RC" "gate session-start: exit 0"
+  want="doc-search is required here and not ready: $reason. Fix: $fix. Only the user can run this fix; you may run only sh .claude/doc-superpowers/search-mcp.sh index, status or check. Do no work until it is ready: tell the user this line and stop."
+  assert_eq "$(jq -cn --arg r "$want" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $r}}')" "$(srg_compact)" "…the context, the fix the user's"
+  assert_eq "not-ready" "$(head -n 1 "$vf" 2>/dev/null || true)" "…the verdict file written"
+  rm -f "$vf"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate prompt
+  want="doc-search is required here and not ready: $reason. Fix: $fix — then send your message again. (Set DOC_SEARCH_GATE=0 to turn the gate off for yourself.)"
+  assert_eq "0:$(jq -cn --arg r "$want" '{decision: "block", reason: $r}')" "$RUN_RC:$(srg_compact)" "gate prompt: blocked, exit 0"
+  assert_eq "not-ready" "$(head -n 1 "$vf" 2>/dev/null || true)" "…the verdict file written"
+  srg_event "$SRG_TMP/pg.json" Bash "rg foo"
+  srg_run "$SRG_TMP/pg.json" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "$(srg_deny "doc-search is required here and not ready: $reason; fix: $fix. Stop and report this to the user; do not work around it.")" "$(srg_compact)" "gate tool: rg denied, from the verdict file"
+  assert_true "…uv never run" test ! -e "$SRL_BIN/argc"
+  # The Codex install is pulled, as check.py's plugin fix says.
+  codex="$HOME/.codex/doc-superpowers"
+  srl_pregate_root "$codex" 3.9.0
+  srg_run /dev/null -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "doc-superpowers 3.9.0 predates the readiness gate" "git -C ~/.codex/doc-superpowers pull")" "$(srg_compact)" "the Codex root: its version, git pull as the fix"
+  # No package.json: the version is unknown.
+  srl_pregate_root "$envroot/../pregate-nopkg" none
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot/../pregate-nopkg" -- check
+  assert_eq "1:doc-search: not ready: doc-superpowers (version unknown) predates the readiness gate" "$RUN_RC:$RUN_OUT" "no package.json: (version unknown)"
+  # Not required: not in force, silent, the file removed.
+  printf '{}\n' > docs/search/config.json
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check
+  assert_eq "4:doc-search: not in force: $reason" "$RUN_RC:$RUN_OUT" "not required: check exit 4"
+  assert_true "…the verdict file removed" test ! -e "$vf"
+  printf 'not-ready\nold\n' > "$vf"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate session-start
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate session-start: silent"
+  assert_true "…the verdict file removed" test ! -e "$vf"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate prompt
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate prompt: silent"
+  assert_true "…uv never run" test ! -e "$SRL_BIN/argc"
+  # A root with the gate execs doc-search as before.
+  srl_root "$envroot"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search check" "$RUN_RC:$RUN_OUT" "with gate.py: doc-search check"
+  teardown
+}
+
 echo ""
 echo "=== doc-search: the launcher and the opt-in --search set ==="
 test_launcher_resolution_order
@@ -7525,6 +7636,8 @@ test_launcher_check_gate_exec_doc_search
 test_launcher_gate_tool
 test_launcher_gate_keeps_the_verdict_file
 test_launcher_gate_reads_the_event
+test_launcher_check_keeps_the_verdict_file
+test_launcher_pre_gate_root
 test_search_install_refused_without_config
 test_search_install_writes_launcher_and_entry
 test_search_install_idempotent
