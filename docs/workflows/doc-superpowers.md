@@ -8,7 +8,7 @@ SKILL.md opens with a **When-to-Use decision flowchart**, a Quick Reference of t
 
 ## Primary Workflow
 
-All actions share a common entry pattern: discovery phase first, then action-specific logic. The `hooks`, `release` and `ledger` actions are exceptions — `hooks` is a scaffolding command that routes to the installer, `release` analyzes git history rather than documentation scopes, and `ledger` routes straight to `doc-tools.sh ledger <verb>` (the opt-in work ledger, `references/ledger.md`; the same verbs run inside `init`'s *Ledger (opt-in)* step and the tasks `spec-inject` injects when `docs/ledger/config.json` exists). All three still run discovery's first step, *Detect Bundled Tooling*, since their references and the installer come from the plugin root it resolves.
+All actions share a common entry pattern: discovery phase first, then action-specific logic. The `hooks`, `setup`, `help`, `release` and `ledger` actions are exceptions — `hooks` is a scaffolding command that routes to the installer, `setup` and `help` route to the dispatcher `scripts/doc-superpowers` (setup's engine and the help text; *Process: `setup` and `help`* below), `release` analyzes git history rather than documentation scopes, and `ledger` routes straight to `doc-tools.sh ledger <verb>` (the opt-in work ledger, `references/ledger.md`; the same verbs run inside `init`'s *Ledger (opt-in)* step and the tasks `spec-inject` injects when `docs/ledger/config.json` exists). All five still run discovery's first step, *Detect Bundled Tooling*, since their references, the installer and the dispatcher come from the plugin root it resolves. (The diagram below predates `setup` and `help`.)
 
 `audit`, `update` and `diagram` also take an optional `[scope]` (`/doc-superpowers <action> [scope]`): one scope from discovery's *Detect Scopes*, default `all`. It limits their scope agents to that scope, and every other action ignores it.
 
@@ -116,6 +116,8 @@ Actions consume discovery output:
 
 Does not use discovery:
   hooks          → scaffolding command, routes directly to install.sh
+  setup          → scripts/doc-superpowers setup: probes what is installed, runs install.sh
+  help           → scripts/doc-superpowers help [topic], shown verbatim
   release        → analyzes git history, not documentation scopes
   ledger         → routes directly to doc-tools.sh ledger (init's ledger step and
                    ledger init read items, not scopes: their own sources and registry proposal);
@@ -331,6 +333,23 @@ Update is the **write counterpart** to audit's read-only analysis. It consumes a
 5. Check CLAUDE.md currency — compare sections against actual filesystem; update if stale per `references/doc-spec.md` rules. In a doc-superpowers CI workflow, report what it needs instead of editing it
 6. Check README.md currency — compare what it says about the project's own features, commands and usage against the project itself; update if stale per `references/doc-spec.md` rules. In a doc-superpowers CI workflow, report it instead, as for CLAUDE.md
 7. Unless this is a doc-superpowers CI workflow (the installer is neither shipped nor granted there), run `"$ROOT/scripts/hooks/install.sh" status` and append a one-line summary: `Hooks: N/5 git, N/3 claude, N/9 ci` — with `docs/ledger/config.json`, plus the ledger sets from their own sections: `, ledger N/3 git, N/2 claude`
+
+## Process: `setup` and `help`
+
+`setup` is the guided entry point for a repository (`references/setup.md`). It does not run discovery: it routes to `"$ROOT/scripts/doc-superpowers" setup` (`scripts/setup/setup.sh`), which probes what is installed (`install.sh status --json` for the git, Claude, CI and doc-search tiers, the records, host checks), starts from the team record or the fixed safe defaults (the merge driver, the 5 report-only git hooks, the 3 Claude hooks; no doc-search, CI, ledger, claims or terminal command), and plans the selection against what is installed.
+
+### Steps (the skill; the Bash tool has no terminal)
+
+1. `setup --dry-run`: the summary and the review (what each step writes, committed for the team or local to you, the network, the downloads, the `git add` line), shown verbatim.
+2. Ask *Apply these* / *Customize* / *Cancel*.
+3. Customize: `setup --list`, one question round per group, then `setup --dry-run --set <id>=<value> …`.
+4. Ask *Write and build* (a second explicit yes to the download) / *Write only* / *Back*; with a team record and a per-user change, *for you only* / *for the team* (asked in step 3 already when a `--dry-run` refusal names `--for-team`). *For the team* changes the plan, so `setup --dry-run --set … --for-team` shows that review for the user to confirm first.
+5. `setup --yes --set … [--for-team] [--build] [--link-bin]` (a build in the background): the installer's steps and setup's own files, each step checked before the first runs (exit 1, nothing written), stopping at a failure (exit 2, a re-run finishes); the team record (`.setup` in `installed.json`) and the local one last; the build last of all.
+6. Show what was written and the `git add` line; never commit.
+
+In a terminal, `doc-superpowers setup` is the same engine with a full-screen picker (or plain prompts); `setup --apply` reproduces the recorded setup in a teammate's clone.
+
+`help [topic]` routes to `"$ROOT/scripts/doc-superpowers" help [topic]`, which prints `scripts/help/<topic>.txt`; the skill shows that output verbatim in a code block, so the terminal and the skill print one text.
 
 ## Process: `hooks` — Install Workflow Hooks
 

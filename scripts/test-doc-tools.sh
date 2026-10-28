@@ -515,28 +515,30 @@ test_shipped_scripts_pass_shellcheck() {
   # Paths relative to the root, so `-x` follows the scripts' source
   # directives the way they are written.
   local s="$root/scripts"
-  for f in "$s"/doc-tools.sh "$s"/merge-doc-index.sh "$s"/ledger/*.sh "$s"/adapters/*.sh "$s"/search/*.sh \
+  for f in "$s"/doc-tools.sh "$s"/doc-superpowers "$s"/setup/*.sh "$s"/merge-doc-index.sh "$s"/ledger/*.sh "$s"/adapters/*.sh "$s"/search/*.sh \
     "$s"/hooks/*.sh "$s"/hooks/claude/*.sh "$s"/hooks/ci/doc-pr-release/*.sh \
     "$s"/hooks/ci/doc-superpowers-steps/*.sh "$s"/hooks/git/* \
     "$s"/check-ci.sh "$s"/check-self-install.sh "$s"/leak-scan.sh "$s"/install-maintainer-hooks.sh; do
     [ -f "$f" ] || continue
     f="${f#"$root"/}"
     case "$f" in
-      # The ledger legs have no #! line: install.sh wraps them into a hook,
-      # as POSIX sh.
-      scripts/hooks/git/ledger-*) legs+=("$f") ;;
+      # POSIX sh, checked as sh: the ledger legs (no #! line: install.sh
+      # wraps them into a hook) and the terminal shim setup renders into
+      # ~/.local/bin (a template: @CLONE_ROOT@ is a plain word until then).
+      scripts/hooks/git/ledger-* | scripts/setup/shim.sh) legs+=("$f") ;;
       *) targets+=("$f") ;;
     esac
     n=$((n + 1))
   done
   assert_true "the gate covers the shipped scripts ($n found)" test "$n" -ge 40
+  assert_true "the terminal shim is checked as POSIX sh" grep -qxF scripts/setup/shim.sh <<<"$(printf '%s\n' ${legs[@]+"${legs[@]}"})"
   rc=0
   out=$(cd "$root" && shellcheck -S warning -x "${targets[@]}" 2>&1) || rc=$?
   assert_eq "0" "$rc" "shellcheck -S warning: no finding in ${#targets[@]} scripts${out:+ —
 $(head -n 40 <<<"$out")}"
   rc=0
   out=$(cd "$root" && shellcheck -S warning -s sh ${legs[@]+"${legs[@]}"} 2>&1) || rc=$?
-  assert_eq "0" "$rc" "shellcheck -S warning -s sh: no finding in the ${#legs[@]} ledger hook legs${out:+ —
+  assert_eq "0" "$rc" "shellcheck -S warning -s sh: no finding in the ${#legs[@]} POSIX sh scripts (the ledger hook legs, the terminal shim)${out:+ —
 $(head -n 40 <<<"$out")}"
 }
 
@@ -563,6 +565,8 @@ test_scripts_are_free_of_bash4_only_constructs() {
   local candidate
   for candidate in \
     "$repo_root"/scripts/doc-tools.sh \
+    "$repo_root"/scripts/doc-superpowers \
+    "$repo_root"/scripts/setup/*.sh \
     "$repo_root"/scripts/merge-doc-index.sh \
     "$repo_root"/scripts/ledger/*.sh \
     "$repo_root"/scripts/adapters/*.sh \
@@ -827,6 +831,8 @@ test_shipped_jq_is_free_of_jq17_only_forms() {
   local targets=() candidate
   for candidate in \
     "$repo_root"/scripts/doc-tools.sh \
+    "$repo_root"/scripts/doc-superpowers \
+    "$repo_root"/scripts/setup/*.sh \
     "$repo_root"/scripts/merge-doc-index.sh \
     "$repo_root"/scripts/ledger/*.sh \
     "$repo_root"/scripts/adapters/*.sh \
@@ -7123,8 +7129,8 @@ test_i10_no_hidden_sed_or_ripgrep_dependency() {
   echo "test: no shipped script needs GNU sed or ripgrep; CI installs no GNU sed"
   local repo_root f hits=""
   repo_root="$(cd "$SCRIPT_DIR/.." && pwd)"
-  for f in "$repo_root"/scripts/doc-tools.sh "$repo_root"/scripts/merge-doc-index.sh \
-    "$repo_root"/scripts/hooks/*.sh "$repo_root"/scripts/hooks/claude/*.sh \
+  for f in "$repo_root"/scripts/doc-tools.sh "$repo_root"/scripts/doc-superpowers "$repo_root"/scripts/setup/*.sh \
+    "$repo_root"/scripts/merge-doc-index.sh "$repo_root"/scripts/hooks/*.sh "$repo_root"/scripts/hooks/claude/*.sh \
     "$repo_root"/scripts/hooks/git/* "$repo_root"/scripts/hooks/ci/*/*.sh \
     "$repo_root"/scripts/hooks/ci/*.yml "$repo_root"/.github/workflows/*.yml; do
     [ -f "$f" ] || continue

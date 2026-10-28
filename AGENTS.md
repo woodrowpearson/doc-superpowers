@@ -4,7 +4,7 @@ Documentation orchestrator skill for AI coding agents. Generates, audits, and ma
 
 ## Skill Location
 
-The main skill definition is `skills/doc-superpowers/SKILL.md`. Activate it when the user asks about documentation quality, auditing, freshness, diagrams, specs, ADRs, release notes, a work ledger (keyed issue files, ledger views, related or in-flight work), or doc-search (one MCP server over the docs and the code).
+The main skill definition is `skills/doc-superpowers/SKILL.md`. Activate it when the user asks to set doc-superpowers up in a repository, or about documentation quality, auditing, freshness, diagrams, specs, ADRs, release notes, a work ledger (keyed issue files, ledger views, related or in-flight work), or doc-search (one MCP server over the docs and the code).
 
 ## Key Commands
 
@@ -16,6 +16,8 @@ The main skill definition is `skills/doc-superpowers/SKILL.md`. Activate it when
 | `update` | Execute doc updates from audit |
 | `diagram` | Regenerate diagrams |
 | `sync` | Sync doc index with filesystem |
+| `setup` | Set this repository up in one pass: fixed safe defaults, every write shown first |
+| `help` | One-screen help: every feature and command, or one topic |
 | `hooks install` | Install workflow hooks |
 | `hooks status` | Show installed hooks |
 | `hooks uninstall` | Remove installed hooks |
@@ -35,6 +37,8 @@ The main skill definition is `skills/doc-superpowers/SKILL.md`. Activate it when
 | Codex | `.codex/INSTALL.md` |
 | OpenCode | `.opencode/INSTALL.md` |
 | Gemini CLI | `gemini extensions install https://github.com/woodrowpearson/doc-superpowers` (`gemini-extension.json` loads `GEMINI.md`) |
+
+After installing, the entry point in each repository is `setup` (`/doc-superpowers setup`, or `scripts/doc-superpowers setup` from the plugin's root in a terminal): fixed safe defaults, every write shown first, the team's choice recorded; `references/setup.md`. `help` prints the one-screen map of every feature and command.
 
 ## Tool Mapping and Capabilities
 
