@@ -33,7 +33,7 @@ from typing import Any, NoReturn
 
 from semble.utils import resolve_model_name
 
-from .check import Verdict, assess, outside
+from .check import CLIENTS, Verdict, assess, mcp_line, outside
 from .cloud import CloudUnavailable, describe
 from .cloud.vertex import VertexEmbedder
 from .cloud.write import BaseRefError, CloudIndexer, CorpusRefused, IndexReport, LeaseHeld, LeaseLost
@@ -156,6 +156,9 @@ def _build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argumen
 
     hook = verb("gate", "The client hooks' entry: check, keep the verdict file, print the hook's JSON (always exit 0).")
     hook.add_argument("event", choices=EVENTS, help="the hook event (the launcher answers `tool` itself)")
+    hook.add_argument(
+        "--client", choices=CLIENTS, default=None, help="the client whose MCP registration counts (default: each)"
+    )
     budget(hook)
 
     ev = verb("eval", "Known-answer evaluation: recall@k and MRR per leg, and the semble-single decision.")
@@ -559,7 +562,7 @@ def _check(args: argparse.Namespace) -> int:
         print(json.dumps({**asdict(verdict), "exit": verdict.exit_code()}, indent=2, ensure_ascii=False))
     else:
         print(verdict.line())
-        print(f"mcp: {verdict.mcp}")
+        print(f"mcp: {mcp_line(verdict.mcp)}")
         print(f"launcher: {verdict.launcher}")
     return verdict.exit_code()
 
@@ -576,7 +579,7 @@ def _gate(args: argparse.Namespace) -> int:
         top = RepoInfo.from_cwd(Path.cwd()).top
     except (NotARepo, GitError):
         return 0
-    verdict = judge(top, budget_s=args.budget, env=os.environ)
+    verdict = judge(top, budget_s=args.budget, env=os.environ, client=args.client)
     _keep_verdict(top, verdict, "gate")
     output = hook_output(args.event, verdict)
     if output is not None:

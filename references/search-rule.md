@@ -20,8 +20,11 @@ prompt, a denied tool call, or the output of `sh .claude/doc-superpowers/search-
 
 Two things `check` cannot see. Check them yourself:
 
-- **Tools missing.** The verdict's `mcp:` line says `expected`, and your tool list has no doc-search
+- **Tools missing.** The verdict's `mcp:` line says `expected` for your client (`claude=` or `codex=`;
+  the session-start line names yours), and your tool list has no doc-search
   tools (`mcp__doc-search__*` in Claude Code). The server did not start or was not approved: halt.
+  In a Claude Code subagent whose definition lists no MCP tools this is not a halt: use `rg` with a
+  one-line reason (the tool gate still applies).
 - **Wrong worktree.** doc-search `status` reports a `worktree:` that is not your top-level directory
   (`git rev-parse --show-toplevel`). Pass `worktree: "<your top-level directory>"` on every call.
   This is not a halt.
@@ -30,8 +33,8 @@ Two things `check` cannot see. Check them yourself:
 
 1. Tell the user the verdict line and its fix, word for word. For missing tools the fix is the
    user's: approve or restart the doc-search server, then start a new session.
-2. If the fix is `sh .claude/doc-superpowers/search-mcp.sh index`, `status` or `check`, you may run it,
-   then run `check`. Exit `0`: carry on.
+2. If the fix is `sh .claude/doc-superpowers/search-mcp.sh index`, `status` or `check`, you may run it
+   from your top-level directory (or by the launcher's absolute path), then run `check`. Exit `0`: carry on.
 3. Otherwise stop. No other tool call, no search by other means, no edits, until the user tells you
    doc-search is ready.
 

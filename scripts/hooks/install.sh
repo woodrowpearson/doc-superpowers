@@ -44,8 +44,9 @@ set -euo pipefail
 #     .mcpServers in .mcp.json (the rest of that file is the project's);
 #   - doc-search's gate set (--search-gate, never part of --all or --search):
 #     in .claude/settings.json and .codex/hooks.json, each hook HANDLER whose
-#     command is exactly one of the launcher's three gate commands, under its
-#     own event (SessionStart, UserPromptSubmit, PreToolUse).
+#     command is exactly one of the launcher's three gate commands (session-start
+#     with or without either --client), under its own event (SessionStart,
+#     UserPromptSubmit, PreToolUse).
 #
 # STATE — the CI tier's choices (workflow set, base branch, cron, strict) are
 # recorded in .claude/doc-superpowers/installed.json (state.sh), so a plain
@@ -246,12 +247,14 @@ Tiers:
             sh "\$(git rev-parse --show-toplevel)/.claude/doc-superpowers/search-mcp.sh" gate <event>,
             merged into two files to commit:
               .claude/settings.json  Claude Code: SessionStart (startup|resume|
-                                     clear|compact, 45 s) gate session-start,
+                                     clear|compact, 45 s) gate session-start
+                                     --client claude,
                                      UserPromptSubmit (45 s) gate prompt,
                                      PreToolUse (*, 10 s) gate tool
-              .codex/hooks.json      Codex: the same, PreToolUse with no
-                                     matcher; Codex runs them in a trusted
-                                     project once each is approved in /hooks
+              .codex/hooks.json      Codex: the same, --client codex,
+                                     PreToolUse with no matcher; Codex runs
+                                     them in a trusted project once each is
+                                     approved in /hooks
             They gate only where the config sets "required": true. Others'
             entries are kept, and a file already holding ours is not
             rewritten. uninstall --search-gate removes our entries, and a file
@@ -1933,34 +1936,44 @@ status_search() {
 # in installed.json. Three hook entries, each running the committed launcher's
 # gate (references/search.md → gate), merged into two committed files:
 #   - .claude/settings.json (Claude Code): SessionStart (matcher
-#     startup|resume|clear|compact, timeout 45), UserPromptSubmit (45) and
-#     PreToolUse (matcher *, 10);
-#   - .codex/hooks.json (Codex, the same shape): the same three, PreToolUse
-#     without a matcher (all tools). Codex runs it only in a trusted project,
-#     once each hook is approved in /hooks.
+#     startup|resume|clear|compact, timeout 45; gate session-start --client
+#     claude), UserPromptSubmit (45) and PreToolUse (matcher *, 10);
+#   - .codex/hooks.json (Codex, the same shape): the same three, session-start
+#     with --client codex, PreToolUse without a matcher (meant for all tools;
+#     Codex's coverage is not verified). Codex runs it only in a trusted
+#     project, once each hook is approved in /hooks.
 # Per event, an entry is ours when a handler's command is exactly that event's
-# gate command; every other key, event, group and handler is kept, and a file
+# gate command (for session-start, also without --client or with the other
+# client's: replaced, not duplicated); every other key, event, group and
+# handler is kept, and a file
 # already holding the three is never rewritten. Install needs the config and
 # the launcher (or --search beside it). Uninstall removes our handlers (a group
 # left empty, then an event, then .hooks) and the file when that leaves {} or
 # {"hooks":{}}.
 
-# $want: {<event>: <our group>}; each group's one handler runs that event's command.
+# $want: {<event>: <our group>}; each group's one handler runs that event's
+# command. A handler is ours when its command is that command without its
+# --client, or with either client's: an entry from before --client (3.11.0
+# added it to session-start), or the other client's, is replaced, not
+# duplicated, and status reads it as changed.
 # shellcheck disable=SC2016  # jq program
 _GATE_JQ_DEFS='
-  def gcmd($e): $want[$e].hooks[0].command;
-  def gours($c): type == "object" and .type == "command" and .command == $c;
-  def gstrip($c): map(if type == "object" and ((.hooks | type) == "array") and any(.hooks[]; gours($c))
-                      then (.hooks |= map(select(gours($c) | not))) | select(.hooks | length > 0) else . end);
+  def gbase($e): $want[$e].hooks[0].command | rtrimstr(" --client claude") | rtrimstr(" --client codex");
+  def gours($e): gbase($e) as $b
+    | type == "object" and .type == "command"
+      and (.command == $b or .command == ($b + " --client claude") or .command == ($b + " --client codex"));
+  def gstrip($e): map(if type == "object" and ((.hooks | type) == "array") and any(.hooks[]; gours($e))
+                      then (.hooks |= map(select(gours($e) | not))) | select(.hooks | length > 0) else . end);
   def gevent($e): ((.hooks // {})[$e] // []);
-  def gcount($e): [gevent($e)[] | select(type == "object" and ((.hooks | type) == "array")) | .hooks[] | select(gours(gcmd($e)))] | length;
+  def gcount($e): [gevent($e)[] | select(type == "object" and ((.hooks | type) == "array")) | .hooks[] | select(gours($e))] | length;
   def ghas($e): gcount($e) == 1 and any(gevent($e)[]; . == $want[$e]);'
 
-# gate_want <claude|codex>: our groups for that client, compact.
+# gate_want <claude|codex>: our groups for that client, compact. session-start
+# names the client, whose MCP registration its line reports.
 gate_want() {
   jq -cn --arg p "$GATE_CMD" --arg who "$1" '
     def h($e; $t): [{type: "command", command: "\($p) \($e)", timeout: $t}];
-    {SessionStart: {matcher: "startup|resume|clear|compact", hooks: h("session-start"; 45)},
+    {SessionStart: {matcher: "startup|resume|clear|compact", hooks: h("session-start --client \($who)"; 45)},
      UserPromptSubmit: {hooks: h("prompt"; 45)},
      PreToolUse: ((if $who == "claude" then {matcher: "*"} else {} end) + {hooks: h("tool"; 10)})}'
 }
@@ -2024,7 +2037,7 @@ gate_plan() {
     new=$(jq -c --argjson want "$want" "$_GATE_JQ_DEFS"'
       reduce ($want | keys_unsorted[]) as $e (.;
         if ghas($e) then .
-        else .hooks = (.hooks // {}) | .hooks[$e] = ((gevent($e) | gstrip(gcmd($e))) + [$want[$e]]) end)' <<<"$cur" 2>&1) \
+        else .hooks = (.hooks // {}) | .hooks[$e] = ((gevent($e) | gstrip($e)) + [$want[$e]]) end)' <<<"$cur" 2>&1) \
       || { printf '%s' "$new"; return 1; }
     [ -e "$1" ] && [ "$new" = "$cur" ] && return 0
   else
@@ -2032,7 +2045,7 @@ gate_plan() {
       . as $orig
       | reduce ($want | keys_unsorted[]) as $e (.;
           if gcount($e) > 0
-          then .hooks[$e] |= gstrip(gcmd($e)) | (if (.hooks[$e] | length) == 0 then del(.hooks[$e]) else . end)
+          then .hooks[$e] |= gstrip($e) | (if (.hooks[$e] | length) == 0 then del(.hooks[$e]) else . end)
           else . end)
       | if (.hooks | length) == 0 and ($orig.hooks | length) > 0 then del(.hooks) else . end' <<<"$cur" 2>&1) \
       || { printf '%s' "$new"; return 1; }

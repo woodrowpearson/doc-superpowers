@@ -35,7 +35,11 @@ USER_ONLY = (
 )
 
 
-def verdict(state: str, reason: str | None = None, fix: str | None = None, mcp: str = "not-registered") -> Verdict:
+NONE = {"claude": "not-registered", "codex": "not-registered"}
+"""`mcp` with no client named and nothing registered."""
+
+
+def verdict(state: str, reason: str | None = None, fix: str | None = None, mcp: dict[str, str] = NONE) -> Verdict:
     state_: Any = state  # a State literal
     mcp_: Any = mcp
     return Verdict(state_, reason, fix, True, None, "1.2.3", "current", mcp_, {}, False)
@@ -117,13 +121,14 @@ def test_gate_session_start_context_per_state(gated, run) -> None:
 
     assert run("index").code == 0
     code, out = gate(run, "session-start")
-    assert code == 0 and out == context("doc-search: ready\nmcp: not-registered")
+    assert code == 0 and out == context("doc-search: ready\nmcp: claude=not-registered codex=not-registered")
     assert not verdict_file(gated).exists()
 
     install_launcher(gated, "#!/bin/sh\n# doc-search launcher v0.0.1\n")
     code, out = gate(run, "session-start")
     assert code == 0 and out == context(
-        "doc-search: ready (degraded: launcher copy differs from the plugin's)\nmcp: not-registered"
+        "doc-search: ready (degraded: launcher copy differs from the plugin's)"
+        "\nmcp: claude=not-registered codex=not-registered"
     )
     assert not verdict_file(gated).exists()
 
@@ -143,15 +148,16 @@ def test_gate_session_start_tells_the_agent_when_only_the_user_can_fix(gated, ru
 
 
 def test_hook_output_texts() -> None:
-    ready = verdict("ready", mcp="expected")
+    ready = verdict("ready", mcp={"claude": "expected"})
     degraded = verdict("degraded", "static index while the transformer index builds")
     not_ready = verdict("not-ready", "code index absent", INDEX_FIX)
     plugin = verdict("not-ready", "doc-superpowers 1.2.3 is below requires >=9.0.0", "claude plugin update x")
     off = verdict("not-in-force", "not required here (ready)")
 
-    assert hook_output("session-start", ready) == context("doc-search: ready\nmcp: expected")
+    assert hook_output("session-start", ready) == context("doc-search: ready\nmcp: claude=expected")
     assert hook_output("session-start", degraded) == context(
-        "doc-search: ready (degraded: static index while the transformer index builds)\nmcp: not-registered"
+        "doc-search: ready (degraded: static index while the transformer index builds)"
+        "\nmcp: claude=not-registered codex=not-registered"
     )
     assert hook_output("session-start", plugin) == context(
         "doc-search is required here and not ready: doc-superpowers 1.2.3 is below requires >=9.0.0."
@@ -306,25 +312,36 @@ def test_gate_outside_a_repository_is_silent(tmp_path: Path, run, monkeypatch: p
     assert gate(run, "session-start") == (0, None)
 
 
-@pytest.mark.parametrize("argv", [("stop",), ("tool",), ("prompt", "--budget", "0"), ("prompt", "--budget", "601")])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("stop",),
+        ("tool",),
+        ("prompt", "--budget", "0"),
+        ("prompt", "--budget", "601"),
+        ("session-start", "--client", "cursor"),
+        ("session-start", "--client"),
+    ],
+)
 def test_gate_usage(repo, run, argv: tuple[str, ...]) -> None:
     done = run("gate", *argv)
 
     assert done.code == 3 and done.out == ""
 
 
-def test_gate_budget_reaches_assess(gated, run, monkeypatch: pytest.MonkeyPatch) -> None:
-    budgets: list[float] = []
+def test_gate_budget_and_client_reach_assess(gated, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[float, str | None]] = []
 
-    def spy(top: Path, *, budget_s: float, env: Any) -> Verdict:
-        budgets.append(budget_s)
+    def spy(top: Path, *, budget_s: float, env: Any, client: str | None) -> Verdict:
+        seen.append((budget_s, client))
         return verdict("ready")
 
     monkeypatch.setattr(gate_mod, "assess", spy)
     run("gate", "prompt")
     run("gate", "prompt", "--budget", "7")
+    run("gate", "session-start", "--client", "codex")
 
-    assert budgets == [20, 7]
+    assert seen == [(20, None), (7, None), (20, "codex")]
 
 
 # --- check keeps the verdict file; DOC_SEARCH_GATE=0 -----------------------------------------------------
@@ -406,3 +423,22 @@ def test_session_start_marks_the_first_transformer_build_as_the_users() -> None:
     assert TRANSFORMER_USER_ONLY == "Only the user can run this fix: the first transformer build takes hours."
     other = verdict("not-ready", "docs index absent", INDEX_FIX)
     assert TRANSFORMER_USER_ONLY not in hook_output("session-start", other)["hookSpecificOutput"]["additionalContext"]
+
+
+# --- the client ------------------------------------------------------------------------------------------
+
+
+def test_gate_session_start_names_the_clients_mcp_state(gated, run) -> None:
+    assert run("index").code == 0
+    (gated.root / ".mcp.json").write_text(json.dumps({"mcpServers": {"doc-search": {"command": "sh"}}}))
+
+    assert gate(run, "session-start", "--client", "claude") == (0, context("doc-search: ready\nmcp: claude=expected"))
+    assert gate(run, "session-start", "--client", "codex") == (
+        0,
+        context("doc-search: ready\nmcp: codex=not-registered"),
+    ), "a Codex session: .mcp.json does not register the server for it"
+    assert gate(run, "session-start") == (
+        0,
+        context("doc-search: ready\nmcp: claude=expected codex=not-registered"),
+    ), "no client (a hook entry from before --client): each client"
+    assert gate(run, "prompt", "--client", "codex") == (0, None)

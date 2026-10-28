@@ -18,7 +18,7 @@ import pytest
 from semble import ContentType, SembleIndex
 from semble.cache import find_index_from_cache_folder
 
-from doc_search.check import LAUNCHER_REL, Verdict, config_says_required
+from doc_search.check import LAUNCHER_REL, Verdict, config_says_required, mcp_state
 from doc_search.config import CONFIG_REL
 from doc_search.engines import IndexPool
 from doc_search.transformer import TransformerSpec
@@ -87,7 +87,11 @@ def test_check_ready_after_index(gated, run) -> None:
     text = run("check")
     code, payload = check(run)
 
-    assert text.code == 0 and text.lines == ["doc-search: ready", "mcp: not-registered", "launcher: current"]
+    assert text.code == 0 and text.lines == [
+        "doc-search: ready",
+        "mcp: claude=not-registered codex=not-registered",
+        "launcher: current",
+    ]
     assert code == 0 and payload["state"] == "ready" and payload["reason"] is None and payload["fix"] is None
     assert payload["cache"] == {"docs": "valid", "code": "valid", "docs_fallback": None}
     assert payload["refreshed"] is False and payload["required"] is True
@@ -399,28 +403,45 @@ def test_check_invalid_config_without_required_is_not_in_force(repo, run) -> Non
 
 
 def test_check_mcp_states(repo, run, own_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def mcp() -> str:
+    """With no client named (an agent ran `check` itself), `mcp` is each client's state: Claude Code's from
+    `.mcp.json`, Codex's from the project's or the user's Codex config."""
+
+    def mcp() -> dict[str, str]:
         return check(run)[1]["mcp"]
 
-    assert mcp() == "not-registered"
+    assert mcp() == {"claude": "not-registered", "codex": "not-registered"}
 
     (own_home / ".codex" / "config.toml").write_text('[mcp_servers.doc-search]\ncommand = "sh"\n')
-    assert mcp() == "expected", "the user's Codex config"
+    assert mcp() == {"claude": "not-registered", "codex": "expected"}, "the user's Codex config: Codex only"
     (own_home / ".codex" / "config.toml").unlink()
 
     project = repo.root / ".codex" / "config.toml"
     project.parent.mkdir()
     project.write_text('[mcp_servers."doc-search"]\ncommand = "sh"\n')
-    assert mcp() == "expected", "the project's Codex config"
+    assert mcp() == {"claude": "not-registered", "codex": "expected"}, "the project's Codex config: Codex only"
     project.unlink()
 
     (repo.root / ".mcp.json").write_text(json.dumps({"mcpServers": {"other": {}}}))
-    assert mcp() == "not-registered"
+    assert mcp() == {"claude": "not-registered", "codex": "not-registered"}
     (repo.root / ".mcp.json").write_text(json.dumps({"mcpServers": {"doc-search": {"command": "sh"}}}))
-    assert mcp() == "expected", ".mcp.json"
+    assert mcp() == {"claude": "expected", "codex": "not-registered"}, ".mcp.json: Claude Code only"
+    assert run("check").lines[1] == "mcp: claude=expected codex=not-registered", "the text names each client"
 
     monkeypatch.setenv("DOC_SEARCH_MCP", "0")
-    assert mcp() == "off", "the developer's switch wins"
+    assert mcp() == {"claude": "off", "codex": "off"}, "the developer's switch wins, for every client"
+
+
+def test_mcp_state_per_client(repo, own_home: Path) -> None:
+    env = {"HOME": str(own_home), "CODEX_HOME": str(own_home / ".codex")}
+    (repo.root / ".mcp.json").write_text(json.dumps({"mcpServers": {"doc-search": {"command": "sh"}}}))
+
+    assert mcp_state(repo.root, env, "claude") == {"claude": "expected"}
+    assert mcp_state(repo.root, env, "codex") == {"codex": "not-registered"}, ".mcp.json is not Codex's"
+    (own_home / ".codex" / "config.toml").write_text('[mcp_servers.doc-search]\ncommand = "sh"\n')
+    (repo.root / ".mcp.json").unlink()
+    assert mcp_state(repo.root, env, "codex") == {"codex": "expected"}
+    assert mcp_state(repo.root, env, "claude") == {"claude": "not-registered"}, "Codex's config is not Claude Code's"
+    assert mcp_state(repo.root, {**env, "DOC_SEARCH_MCP": " 0 "}, "codex") == {"codex": "off"}
 
 
 def test_check_json_shape(gated, run) -> None:
@@ -429,7 +450,7 @@ def test_check_json_shape(gated, run) -> None:
     assert set(payload) == {f.name for f in fields(Verdict)} | {"exit"}
     assert payload["exit"] == code == 1
     assert payload["version"] == PLUGIN and payload["requires"] is None
-    assert payload["launcher"] == "current" and payload["mcp"] == "not-registered"
+    assert payload["launcher"] == "current" and payload["mcp"] == {"claude": "not-registered", "codex": "not-registered"}
 
 
 @pytest.mark.parametrize("budget", ["0", "601", "x"])
@@ -442,7 +463,7 @@ def test_check_budget_usage(repo, run, budget: str) -> None:
 def test_verdict_line_and_exit_codes() -> None:
     def verdict(state: str, reason: str | None = None, fix: str | None = None) -> Verdict:
         state_: Any = state  # a State literal
-        return Verdict(state_, reason, fix, True, None, "1.2.3", "current", "expected", {}, False)
+        return Verdict(state_, reason, fix, True, None, "1.2.3", "current", {"claude": "expected"}, {}, False)
 
     assert [verdict(s).exit_code() for s in ("ready", "degraded", "not-ready", "not-in-force")] == [0, 0, 1, 4]
     assert verdict("ready").line() == "doc-search: ready"
