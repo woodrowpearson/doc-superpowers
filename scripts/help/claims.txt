@@ -1,0 +1,23 @@
+doc-superpowers help claims: executable spec claims
+
+A claim is one falsifiable statement of a governing doc (an ADR or a spec),
+kept beside it, bound to a check, and judged at the lifecycle gates.
+
+Default:    off. The directory docs/spec-claims/ turns it on; without it
+            every claims verb is inert and the hooks behave as before.
+            Once on, it can block: the git pre-commit claims leg blocks a
+            commit on a finding, whatever DOC_SUPERPOWERS_STRICT says. The
+            pre-push leg only reports. If installed, the CI workflows
+            doc-spec-verify and doc-freshness-schedule re-check.
+Terminal:   doc-superpowers tools claims validate --all
+            doc-superpowers tools claims run|promote|render|gate|attest|rulings
+            doc-superpowers tools claims <verb> --help
+            doc-superpowers setup --set claims=on     (writes the config)
+Skill:      /doc-superpowers spec-generate | spec-inject | spec-verify
+            (with docs/spec-claims/ they inject and check the claims gates)
+Committed:  docs/spec-claims/: config.json, one <DOC-ID>.json per governing
+            doc, and gates/<plan>/ records.
+Local:      nothing.
+Undo:       delete docs/spec-claims/. It is the team's data, so setup never
+            removes it: the item stays ticked and locked until you do.
+Reference:  references/spec-claims.md

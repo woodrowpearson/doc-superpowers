@@ -1,5 +1,34 @@
 # Release Notes
 
+## v3.10.0 (2026-10-26)
+
+This release adds `setup` and `help` (#51, phase 1 of #54). `setup` turns doc-superpowers on in a repository in one pass, with fixed safe defaults, and shows every write before it makes one. `help` is a one-screen map of every feature. Both work from the skill (`/doc-superpowers setup`, `/doc-superpowers help`) and from a terminal (`scripts/doc-superpowers`), with the same text.
+
+The defaults are the same on every repository and host: the doc-index merge driver, the 5 git hooks and the 3 Claude hooks, all report-only. A default run downloads nothing, calls no network, adds no CI and blocks no commit; the hooks suite proves it with recording stubs for every download and network tool, a git wrapper that refuses every remote verb, and a transport trap that catches git run inside hooks. Everything else is opt-in: doc-search (static or the gte model, with consent before any download), the doc-search entries for Codex, Cursor, OpenCode and Gemini CLI, CI workflows, the work ledger, spec claims, and a `~/.local/bin/doc-superpowers` terminal command (asked first).
+
+### Upgrading from 3.9.0
+Nothing changes until someone runs `setup`: a marketplace install still writes nothing to any repository.
+- **A repository already set up by hand:** `setup` starts from the defaults plus what is installed, so a plain run removes nothing. Its first write adds a `setup` object to `.claude/doc-superpowers/installed.json`; `schema_version` stays 2, and 3.8.x / 3.9.0 installers keep the object when they rewrite the file.
+- **Teammates** run `scripts/doc-superpowers setup --apply` (or `/doc-superpowers setup`) to reproduce the recorded setup. It installs the per-user parts and changes no committed file.
+
+### Added
+- **`doc-superpowers setup`** (`references/setup.md`). The flow is Summary → Customize (a tree with a details pane) → Esc back to the summary with changes marked → Review, split into *Committed for the team* and *Local to you*, with the network and downloads named → *Write and build* / *Write only* / *Back*.
+  - A TUI in portable bash 3.2; a numbered-prompt UI when there is no TTY, under `TERM=dumb`, or with `--plain`.
+  - Flags: `--dry-run`, `--yes`, `--apply`, `--build` (the download consent outside the UIs), `--set id=value`, `--list`, `--for-team`, `--link-bin` / `--no-link-bin`. Exit codes 0 done or nothing to do, 1 refused (nothing written), 2 a step failed (re-run finishes), 3 usage.
+  - The team's choices go in `installed.json` (`setup`), each user's in the untracked `installed.local.json`. Per-user items (git hooks, Claude hooks, the ledger hook sets) change only your record unless you choose *for the team* (`--for-team`); adding or removing the merge driver is always the team's.
+  - Host checks only disable an option and say why (no `uv`: no build; gte below macOS 14 on Apple silicon; a global or work-tree `core.hooksPath`: the merge driver alone). Scan hints never change a default.
+  - setup never deletes what it did not write: unticking a harness removes only its `doc-search` key or setup's marked Codex block, and leaves your own entries alone.
+- **`doc-superpowers help [topic]`**: an overview within 24 lines, and the topics setup, search, hooks, ci, ledger, claims, release. `/doc-superpowers help` prints the same file verbatim.
+- **`scripts/doc-superpowers`**: the dispatcher every client runs (`help`, `setup`, `version`, and the `hooks`, `tools`, `search` pass-throughs). A plugin cannot put a command on the terminal's `PATH` (a plugin `bin/` reaches only Claude's Bash tool, and would stop claude.ai and Cowork from installing the plugin), so `setup` offers the `~/.local/bin` shim, which finds the newest plugin version at run time.
+- **The skill's `setup` and `help` actions**, and two evals (`setup-defaults`, `help-topic`).
+
+### Fixes
+- **`references/search.md` → *Other clients*** now says what was checked against each client. Codex (codex-cli 0.163.0) loads a project's `.codex/config.toml` only for a trusted project, and starts servers in its launch directory, not the project root. Gemini CLI 0.65.0 and OpenCode 1.19.4 load and connect from the repository top. The OpenCode entry now `cd`s to the top first, so it also connects from a subdirectory. Cursor stays unverified.
+
+### Other
+- Suite counts are in CLAUDE.md; the full local `check-ci.sh` passed under bash 5.x and `/bin/bash` 3.2 (Actions cannot run on this account: billing lock). The util-linux path of the TUI's terminal-restore test has not run yet: it runs on the ubuntu CI leg.
+- The workflow and architecture diagrams still show the action set before `setup` and `help`; their prose says so.
+
 ## v3.9.0 (2026-10-24)
 
 This release makes two changes. `hooks install --ci` stops writing a personal GitHub URL into a project (#56), and doc-search searches the MCP client's worktree when a call names none (#58).

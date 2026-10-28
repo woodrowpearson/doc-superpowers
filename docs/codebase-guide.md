@@ -77,6 +77,9 @@ doc-superpowers/
 │   ├── test-spec-status-model.sh # Test suite for the canonical Spec Status Model + call sites
 │   ├── test-spec-claims.sh # Test suite for the `claims` verb group: a fixture per check, the gate flows, /bin/sh stub adapters
 │   ├── test-helpers.sh   # Shared test harness (isolated git env, scratch root, pipefail-safe asserts) sourced by every suite
+│   ├── doc-superpowers   # The dispatcher every client runs as "$ROOT/scripts/doc-superpowers": help [topic], setup, version, and the hooks / tools / search pass-throughs (each sub-script under "$BASH")
+│   ├── help/             # The help text (overview, setup, search, hooks, ci, ledger, claims, release): one source for the terminal and the skill's `help` action
+│   ├── setup/            # setup's engine: setup.sh (flags, modes), catalog.json (the items), lib-model.sh lib-probe.sh lib-plan.sh lib-exec.sh lib-harness.sh lib-prompt.sh lib-tui.sh, search-config.json (doc-search init's defaults), shim.sh (the ~/.local/bin template)
 │   ├── search/launch.sh  # doc-search's launcher (POSIX sh): finds doc-superpowers at run time, then uv run --project <root>/search --frozen --no-dev [--extra cloud] [--extra local-transformer] doc-search (the second extra when docs.model starts transformer:; without jq, --all-extras --no-extra local-transformer, or --all-extras when grep finds a transformer: model); install --search copies it to .claude/doc-superpowers/search-mcp.sh
 │   ├── merge-doc-index.sh  # Custom git merge driver for .doc-index.json
 │   ├── test-merge-driver.sh # Test suite for merge driver
@@ -119,6 +122,7 @@ doc-superpowers/
 │   ├── agent-prompt-template.md   # Review agent prompt template + scope focus areas
 │   ├── output-templates.md        # Audit report format (with its Update Tasks) + spec compliance report
 │   ├── release.md                 # `release` action steps 1–12 (SKILL.md points here: REQUIRED)
+│   ├── setup.md                   # `setup` and `help` actions: defaults, flow, items, flags + exit codes, records, env hook, harness entries, terminal command (REQUIRED)
 │   ├── hooks.md                   # `hooks` action: installer routing, consent table, CI templates (REQUIRED)
 │   ├── spec-lifecycle-actions.md  # Detailed procedures for spec-generate/inject/verify + the Spec Status Model
 │   ├── integration-patterns.md  # Code review, commit review, wrapper skill integration
@@ -163,7 +167,7 @@ doc-superpowers/
 
 | File | Purpose | When to Modify |
 |------|---------|---------------|
-| `skills/doc-superpowers/SKILL.md` | Core skill logic: Quick Reference (actions + references), Safety Rules (trust boundary, secrets, confirm before moving docs, never auto-run repository scripts), discovery phase (tool resolution through `${CLAUDE_SKILL_DIR}/../..`, the index-write routing table, scopes, agentic inventory), 12 action handlers (init, audit, review-pr, update, diagram, sync, hooks, release, spec-generate, spec-inject, spec-verify, ledger — `release`, `hooks`, `ledger` and the spec actions hand their procedures to REQUIRED references), verification gates, error handling, common mistakes | Adding/changing actions, modifying agent behavior, updating discovery logic |
+| `skills/doc-superpowers/SKILL.md` | Core skill logic: Quick Reference (actions + references), Safety Rules (trust boundary, secrets, confirm before moving docs, never auto-run repository scripts), discovery phase (tool resolution through `${CLAUDE_SKILL_DIR}/../..`, the index-write routing table, scopes, agentic inventory), 14 action handlers (init, audit, review-pr, update, diagram, sync, setup, help, hooks, release, spec-generate, spec-inject, spec-verify, ledger — `setup`, `help`, `release`, `hooks`, `ledger` and the spec actions hand their procedures to REQUIRED references), verification gates, error handling, common mistakes | Adding/changing actions, modifying agent behavior, updating discovery logic |
 | `scripts/doc-tools.sh` | Bundled freshness tooling with 20 subcommands: `build-index`, `check-freshness`, `update-index` (a baseline reset, never a verification: the only writer of `last_verified`), `add-entry`, `remove-entry`, `move-entry` (re-key an entry after a doc moves, preserving `code_refs`/`code_oids`/`code_commit`/`last_verified`, and repoint other entries' `replaces`/`superseded_by`/`code_refs`/`code_oids` naming it — the lossless alternative to `remove-entry` + `add-entry`; `--stdin` for a batch), `audit-merges` (replay index merges through the driver as an oracle, read-only), `set-code-refs` (change an entry's `code_refs` in place; `--stdin` for a batch, `--null` records for paths holding `,`), `set-doc-type` (change an entry's `doc_type` in place: record or living doc; `--stdin` for a batch), `upgrade-entries` (fill pre-v3 entries' `code_oids` from their `code_commit`, with no baseline reset; `--all` or `--stdin`), `deprecate-entry` (also sets the successor's `replaces`), `status`, `bump-version`, `check-version`, `implementation-status`, `set-implementation`, `fragments {list, validate, merge}`, `tools {install, uninstall, status, version}` (vendors doc-tools.sh + the CI helpers into a consumer repo; prints the plugin's version), `claims {validate, run, promote, render, gate, attest, rulings}` (executable spec claims, inert without `docs/spec-claims/`: `references/spec-claims.md`), `ledger {show, ls, find, related, suggest, sweep, recheck, upkeep, inflight, notices, state-watch, new, assign, link, note, view, validate, publish, finalize, init}` (the work ledger, every verb but `init` inert without `docs/ledger/config.json`: `references/ledger.md`; `doc-tools.sh` holds its dispatch, inert check and verdict helpers, the verbs live in `scripts/ledger/`). Content hashing for docs, content identity for code (each code ref's git object id, `code_oids`, compared with one `git cat-file --batch-check`), SHA-256 hashing for per-PR release-notes fragments. Every write to `docs/.doc-index.json` goes through one locked, atomic writer (`_index_apply`; see Code Flow → "Index write path") | Changing staleness detection, index schema, version sync, fragment parsing, adding subcommands, changing how the index is persisted |
 | `scripts/test-doc-tools.sh` | Comprehensive test suite for doc-tools.sh — tests all subcommands (including `fragments`), edge cases, error handling; plus the static guards over the shipped scripts (no bash-4-only construct, no jq-1.7-only form in a jq program) | Adding tests for new doc-tools features |
 | `scripts/test-doc-pr-release.sh` | Test suite for the CI workflow helpers (on the shared `test-helpers.sh` harness) — covers `extract-context.sh`, `update-pr-body.sh`, `commit-and-push.sh`, the `run:` step scripts in `doc-superpowers-steps/` (run as a workflow step runs them, from an installed fixture), workflow YAML placeholder substitution, template structure/wiring, and the installed templates' rules (fail closed, scalar outputs, timeouts, pins, AI token/plugin/tools, same-repo guard, write group, checked commit) (missing YAML parser = loud SKIP locally, FAIL in CI) | Adding tests for the fragment producer workflow or its helpers |
@@ -183,6 +187,9 @@ doc-superpowers/
 | `references/agent-prompt-template.md` | Review agent prompt template + scope-specific focus areas dispatched to each review agent | Changing agent review instructions, adding scope focus areas |
 | `references/output-templates.md` | Audit report format (with its Update Tasks, the handoff `update --report=<path>` applies) + spec compliance report | Changing report structure |
 | `references/release.md` | The `release` action's steps 1–12 (SKILL.md keeps a summary and a REQUIRED pointer) | Changing the release flow |
+| `scripts/doc-superpowers` | The dispatcher: `help [topic]` prints `scripts/help/<topic>.txt` (unknown topic: exit 3), `setup` runs `scripts/setup/setup.sh`, `version` is `doc-tools.sh tools version`, and `hooks` / `tools` / `search` pass through to `install.sh`, `doc-tools.sh` and doc-search's launcher. `$ROOT` is its directory's parent (file symlinks resolved, the directory taken logically) | Adding a command (with `scripts/help/overview.txt`) |
+| `scripts/setup/` | `setup`'s engine, in layers: the catalog and model (`lib-model.sh`: selection, base, `--set`, requires, locks, host fallbacks), the read-only probe (`lib-probe.sh`: `install.sh status --json` for four tiers, the records, host checks, hints), the plan (`lib-plan.sh`: the selection against what is installed → steps, summary, review), the executor (`lib-exec.sh`: installer steps under `"$BASH"`, and the files setup owns, each written temp-then-`mv`, never through a link, skipped when unchanged), the harness entries (`lib-harness.sh`), and two UIs over the same model (`lib-prompt.sh`, `lib-tui.sh`) | Changing an item, a default, a flag, a record, a harness entry or a UI (tests in `test-hooks.sh`; `references/setup.md`) |
+| `references/setup.md` | The `setup` and `help` actions: what setup does, the defaults, the flow (TUI, prompts, the skill's six steps, per-user items, `--apply`, unticking), the items, flags and exit codes, the records, the env hook, the harness entries, the terminal command, help | Changing anything setup or help users act on |
 | `references/hooks.md` | The `hooks` action: installer routing, the per-user Claude tier, the `--ci` consent table, CI templates and helpers, install state | Changing installer flags, tiers, or workflow templates |
 | `references/spec-lifecycle-actions.md` | Detailed procedures for spec-generate, spec-inject, spec-verify actions | Changing spec action steps or adding new spec actions |
 | `references/spec-claims.md` | Spec claims (opt-in, enabled by `docs/spec-claims/`): sidecar and claim schema, `config.json`, checks V1–V12, exit codes, adapter contracts, gates and records, the direction policy keys (config `policy`), reference pytest/jest helpers | Changing a `claims` verb, check, adapter contract or the claims policy |
@@ -239,6 +246,8 @@ doc-superpowers/
 | Per-PR release-notes fragment helpers | `scripts/hooks/ci/doc-pr-release/` — `extract-context.sh`, `update-pr-body.sh`, `commit-and-push.sh`, the library they share `fragment-lib.sh` (doc-tools.sh keeps byte-identical copies of its hash-line constants and update-pr-body's fence parser; test-doc-pr-release.sh pins both), and `RELEASE-NOTES.next.README.md` (fragment-format spec installed into consuming repos). The `run:` step bodies of `doc-pr-release.yml` and `doc-release.yml` live in `scripts/hooks/ci/doc-superpowers-steps/` |
 | Release-notes fragment parsing | `scripts/doc-tools.sh fragments` — one grammar (`_FRAG_AWK`) for `list` (JSON: hash state, sections, no-notes, the problem that keeps a fragment from being consumed), `validate <path>` (exit 0/1/2), and `merge <start|ROOT> <end> [--paths-out <file>] [--remove]` (markdown sections for insertion under a `## vX.Y.Z` header, from every fragment present at `<end>`; lossless or skipped with a warning; refuses when an earlier release's commit has not reached `<end>`) |
 | Hook test suite | `scripts/test-hooks.sh` |
+| setup and help | `skills/doc-superpowers/SKILL.md` Section 1 "`setup`" / "`help`" → `references/setup.md`; the engine `scripts/setup/setup.sh` (flags) and `scripts/setup/catalog.json` (items); the help text `scripts/help/*.txt`; the design `docs/superpowers/specs/2026-10-22-setup-and-help-design.md` |
+| setup's records | `.claude/doc-superpowers/installed.json` → `.setup` (the team's, written by `op_record_team` in `scripts/setup/lib-exec.sh`), `.claude/doc-superpowers/installed.local.json` (yours, `op_record_local`), read by `lib-probe.sh` |
 | Hooks action routing | `skills/doc-superpowers/SKILL.md` Section 1 "`hooks`" (the non-negotiables) → `references/hooks.md` (the procedure) |
 | This repo's own installed tiers, and the check that they match their templates | `.github/workflows/` + `.github/scripts/` + `.claude/doc-superpowers/installed.json` + `.gitattributes`; `scripts/check-self-install.sh`, run by `.github/workflows/tests.yml` step "Self-installed CI tier matches its templates" (`check-ci.sh self-install`) |
 | Spec lifecycle routing | `skills/doc-superpowers/SKILL.md` "Spec Lifecycle Routing" diagram + Section 1 "Spec Lifecycle Actions" (quick routing, the `:amends` role, `--plan`) → `references/spec-lifecycle-actions.md` (the procedures) |
@@ -397,6 +406,29 @@ User invokes /doc-superpowers release [--from=<ref>]
     → Offer git tag on the release commit — prompt "Create git tag vX.Y.Z?"; push it, then `doc-tools.sh check-version --tag` (exit 1 while vX.Y.Z is not a tag on origin)
       → If older untagged versions exist, offer to backfill
       → The release commit must reach main (merge the release branch, or cherry-pick it); until then the next release refuses
+```
+
+### Typical `setup` flow
+
+```
+User invokes /doc-superpowers setup (or doc-superpowers setup in a terminal)
+  → Action Router → setup (no discovery; Detect Bundled Tooling for $ROOT)
+    → "$ROOT/scripts/doc-superpowers" setup --dry-run → scripts/setup/setup.sh
+      → flags parsed (one mode: --list | --dry-run | --yes | --apply; usage errors exit 3)
+      → model_load_catalog (catalog.json → bash arrays); every --set checked
+      → cd to the repository top; probe_run (status --json --git --claude --ci --search, the records, host checks, hints)
+      → model_base_init (record → defaults ∪ installed → host fallbacks, locks), --set applied (requires closure)
+      → plan_build: the selection against what is installed → steps (switches, installer, harness entries,
+        env hook, exclude block, shim, records, build last), with what each writes (team / local / outside),
+        the network and the downloads
+      → --dry-run: summary + review, nothing written
+  → The skill shows it verbatim; asks Apply these / Customize (--list, --dry-run --set …) / Cancel;
+    then Write and build / Write only / Back (and for you only / for the team when a per-user item changed;
+    for the team: --dry-run --set … --for-team, that review confirmed before the write)
+  → "$ROOT/scripts/doc-superpowers" setup --yes --set … [--for-team] [--build] [--link-bin]
+    → exec_plan: every step checked first (links, shapes, entries of the user's: exit 1, nothing written),
+      then run in order ("<n>. <text>"); a failure stops it (exit 2: re-run finishes)
+    → the records last; then "Then commit:" and the git add line (nothing is committed)
 ```
 
 ### Typical `hooks install` flow
