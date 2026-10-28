@@ -6696,11 +6696,15 @@ test_launcher_check_gate_without_a_root() {
   assert_true "…one JSON object (jq -e .)" srg_is_json
   assert_eq "$(srg_check_json not-in-force 4 "doc-superpowers is not installed for this developer")" "$(srg_compact)" "…the verdict as JSON, fix null"
   for e in session-start prompt; do
+    printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
     srg_run /dev/null PATH="$nouv" -- gate "$e"
     assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate $e, required, no uv: silent, exit 0"
+    assert_true "…and removes the verdict file (not in force)" test ! -e "$vf"
   done
+  printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
   srg_run "$ev" -- gate tool
   assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate tool, a not-ready verdict, rg: silent, exit 0"
+  assert_true "…and leaves the verdict file alone" test -f "$vf"
   srg_run /dev/null -- serve
   assert_eq "2:doc-search: cannot find doc-superpowers (set DOC_SUPERPOWERS_ROOT)" "$RUN_RC:$RUN_ERR" "serve keeps its failure: exit 2, one stderr line"
   teardown
@@ -6730,21 +6734,27 @@ test_launcher_check_gate_without_uv_required() {
   assert_eq "1" "$RUN_RC" "without jq, check --format json: exit 1"
   assert_true "…one JSON object (jq -e .)" srg_is_json
   assert_eq "$(srg_check_json not-ready 1 "$SRG_UV_REASON" "install uv")" "$(srg_compact)" "…the same verdict"
-  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate prompt
-  assert_eq "0" "$RUN_RC" "gate prompt: exit 0"
-  assert_true "…one JSON object (jq -e .)" srg_is_json
-  want="doc-search is required here and not ready: $SRG_UV_REASON. Run: install uv — then send your message again. (Set DOC_SEARCH_GATE=0 to turn the gate off for yourself.)"
-  assert_eq "$(jq -cn --arg r "$want" '{decision: "block", reason: $r}')" "$(srg_compact)" "…blocks the prompt with the reason"
-  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate session-start
-  assert_eq "0" "$RUN_RC" "gate session-start: exit 0"
-  assert_true "…one JSON object (jq -e .)" srg_is_json
-  want="doc-search is required here and not ready: $SRG_UV_REASON. Fix: install uv. Do no work until it is ready: tell the user this line and stop."
-  assert_eq "$(jq -cn --arg r "$want" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $r}}')" "$(srg_compact)" "…adds the reason as context"
   # gate tool: as usual, from the verdict file (none yet: silent).
   ev="$SRG_TMP/rg.json"
   srg_event "$ev" Bash "rg foo"
   srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
   assert_eq "0:" "$RUN_RC:$RUN_OUT" "gate tool, no verdict file: silent"
+  # gate prompt and session-start: doc-search gate's words (Fix:, and the user-only
+  # sentence at session start: install uv is not a command the tool gate allows).
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate prompt
+  assert_eq "0" "$RUN_RC" "gate prompt: exit 0"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  want="doc-search is required here and not ready: $SRG_UV_REASON. Fix: install uv — then send your message again. (Set DOC_SEARCH_GATE=0 to turn the gate off for yourself.)"
+  assert_eq "$(jq -cn --arg r "$want" '{decision: "block", reason: $r}')" "$(srg_compact)" "…blocks the prompt with the reason"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate session-start
+  assert_eq "0" "$RUN_RC" "gate session-start: exit 0"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  want="doc-search is required here and not ready: $SRG_UV_REASON. Fix: install uv. Only the user can run this fix; you may run only sh .claude/doc-superpowers/search-mcp.sh index, status or check. Do no work until it is ready: tell the user this line and stop."
+  assert_eq "$(jq -cn --arg r "$want" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $r}}')" "$(srg_compact)" "…adds the reason as context"
+  # …and both keep the verdict file, as doc-search gate does: two LF lines.
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
+  assert_eq "$(srg_deny "doc-search is required here and not ready: $SRG_UV_REASON; fix: install uv. Stop and report this to the user; do not work around it.")" "$(srg_compact)" \
+    "gate tool after them: rg is denied, the verdict file's reason in the deny"
   printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
   srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
   assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "gate tool, a not-ready verdict: rg is denied (no uv needed)"
@@ -6787,8 +6797,12 @@ test_launcher_check_gate_without_uv_not_required() {
   srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$(make_nojq_path)" -- check --format json
   assert_eq "$(srg_check_json not-in-force 4 "$SRG_UV_REASON")" "$(srg_compact)" "…without jq too (fix null)"
   for e in session-start prompt; do
+    printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
     srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate "$e"
     assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate $e: silent, exit 0"
+    assert_true "…and removes the verdict file (not in force)" test ! -e "$vf"
+    srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate "$e"
+    assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "…again, with no file: silent, exit 0"
   done
   rm -f docs/search/config.json
   srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
@@ -6856,6 +6870,8 @@ test_launcher_gate_tool() {
   printf 'not-ready\r\nindex absent\r\n' > "$vf"
   srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
   assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "a CRLF file: line 1 is not-ready once its CR is dropped, rg denied (fail closed)"
+  assert_eq "$(srg_deny "doc-search is required here and not ready: index absent. Stop and report this to the user; do not work around it.")" "$(srg_compact)" \
+    "…line 2's CR dropped too: none in the reason"
   printf 'not-ready\r\r\nx\n' > "$vf"
   srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
   assert_eq "0:" "$RUN_RC:$RUN_OUT" "…only one CR is dropped: not-ready and two CRs is not not-ready, silent"
@@ -6946,6 +6962,47 @@ test_launcher_gate_tool() {
   teardown
 }
 
+test_launcher_gate_keeps_the_verdict_file() {
+  echo "test: launcher: gate session-start|prompt, required with no uv — the verdict file is two LF lines (not-ready, '<reason>; fix: <fix>'), replaced by a rename, no temp file left; from a subdirectory and in a linked worktree, each worktree's own file"
+  srh_fixture '{"required": true}'
+  local envroot nouv vf want e wt wtvf
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  nouv=$(srg_nouv_path)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  want="$SRG_TMP/want-verdict"
+  printf 'not-ready\n%s; fix: install uv\n' "$SRG_UV_REASON" > "$want"
+  for e in session-start prompt; do
+    printf 'ready\r\nold\r\n' > "$vf"
+    srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate "$e"
+    assert_eq "0" "$RUN_RC" "gate $e: exit 0"
+    assert_true "…the verdict file is exactly the two LF lines (the old file replaced)" cmp -s "$want" "$vf"
+    assert_eq "doc-search-gate" "$(cd "$(dirname "$vf")" && ls -A | grep '^doc-search-gate' || true)" "…no temp file left beside it"
+  done
+  rm -f "$vf"
+  mkdir -p src/deep
+  (cd src/deep && srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate prompt)
+  assert_true "from a subdirectory: the worktree's verdict file" cmp -s "$want" "$vf"
+  # A linked worktree keeps its own file; the main one's is not touched.
+  rm -f "$vf"
+  wt="$SUITE_TMP/srg-linked-$$"
+  git worktree add -q "$wt" -b srg-linked
+  wtvf=$(cd "$wt" && cd "$(dirname "$(git rev-parse --git-path doc-search-gate)")" && pwd -P)/doc-search-gate
+  (cd "$wt" && srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate session-start)
+  assert_true "in a linked worktree: its own verdict file" cmp -s "$want" "$wtvf"
+  assert_true "…and the main worktree's is not written" test ! -e "$vf"
+  git worktree remove --force "$wt"
+  # A verdict file that cannot be written: the answer still goes out (root writes anyway).
+  if [ "$(id -u)" != 0 ]; then
+    chmod 0555 "$(dirname "$vf")"
+    srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate prompt
+    chmod 0755 "$(dirname "$vf")"
+    assert_eq "0:block:" "$RUN_RC:$(jq -r .decision <<<"$RUN_OUT" 2>/dev/null || true):$RUN_ERR" "an unwritable git dir: still blocks, exit 0, nothing on stderr"
+    assert_true "…and writes no file" test ! -e "$vf"
+  fi
+  teardown
+}
+
 test_launcher_gate_reads_the_event() {
   echo "test: launcher: gate takes the event on stdin, never echoes it, and drains it where it does not read it, so a large event's writer never blocks"
   srh_fixture '{"required": true}'
@@ -7009,6 +7066,7 @@ test_launcher_check_gate_without_uv_required
 test_launcher_check_gate_without_uv_not_required
 test_launcher_check_gate_exec_doc_search
 test_launcher_gate_tool
+test_launcher_gate_keeps_the_verdict_file
 test_launcher_gate_reads_the_event
 test_search_install_refused_without_config
 test_search_install_writes_launcher_and_entry
