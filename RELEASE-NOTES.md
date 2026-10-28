@@ -6,12 +6,12 @@ This release lets a repository require doc-search: an agent stops while doc-sear
 
 The decision is mechanical because rule text alone did not hold. Fresh agents under deadline pressure, given a hand-written "search first" rule, carried on past a stale index and an outdated launcher in 2 of 2 runs ("a stale cache isn't one of the listed outages").
 
-### Upgrading from 3.10.0
-Nothing changes until a repository sets `"required": true`. `doc-search init` still writes a config without the new keys, so a 3.10.0 teammate can read it.
+### Upgrading from 3.10.x
+Nothing changes until a repository sets `"required": true`. `doc-search init` still writes a config without the new keys, so a 3.10.x teammate can read it.
 - **`hooks install --search` users:** `scripts/search/launch.sh` changed, so the committed `.claude/doc-superpowers/search-mcp.sh` reads `outdated` in `hooks status --search`. Re-run `hooks install --search` and commit the launcher.
 - **Requiring doc-search** needs every opted-in developer on 3.11.0 or later:
-  - 3.10.0 and older reject the new keys: every tool and CLI verb answers `invalid config: unknown key required` (or `requires`). That message is the cue to update.
-  - 3.10.0 and older have no `check` or `gate` (an unknown verb, exit 3). Run through an older launcher copy, or directly, nothing gates such a developer: the gate is silently absent for them.
+  - 3.10.1 and older reject the new keys: every tool and CLI verb answers `invalid config: unknown key required` (or `requires`). That message is the cue to update.
+  - 3.10.1 and older have no `check` or `gate` (an unknown verb, exit 3). Run through an older launcher copy, or directly, nothing gates such a developer: the gate is silently absent for them.
   - The 3.11.0 launcher answers for an older plugin itself. Where the config is required, `check` exits 1, the session-start hook tells the agent to stop, the prompt hook blocks and the tool hook denies, with `doc-superpowers <version> predates the readiness gate` and the plugin update as the fix (`claude plugin update doc-superpowers`, or `git -C ~/.codex/doc-superpowers pull` for the Codex root).
 - **The gate's hooks:** run `hooks install --search --search-gate` and commit `.claude/settings.json` and `.codex/hooks.json`. The session-start hook carries `--client claude` or `--client codex`; an entry without it reads `partial` in `hooks status --search-gate`, and re-running the install replaces it.
 - **The agent rule:** copy the marked block of `references/search-rule.md` into `AGENTS.md` or `CLAUDE.md` and commit it. `hooks status --search-gate` says whether the copy is current.
@@ -43,6 +43,23 @@ Nothing changes until a repository sets `"required": true`. `doc-search init` st
 - The rule's wording was tried with fresh agents, one fresh context per run, five runs per case: the MCP tools missing while expected, a launcher below the floor, doc-superpowers not installed, a first transformer build only the user can run, and Codex without the MCP entry. Each case got the intended answer in 5 of 5. Without the rule, the tools-missing case halted in 0 of 5.
 - Known limits, left for later: a launcher copy newer than the plugin's is refused by `install --search-gate` with a message that calls it older; for a development checkout set as the root, the fix names `claude plugin update`; the rule's excuses table does not name the client in its `mcp:` row.
 - Suite counts are in CLAUDE.md. The full local `check-ci.sh` passed under bash 5.x and `/bin/bash` 3.2: seven suites, 15524 assertions (from 14896), `test-hooks.sh` 4243, `test-doc-tools.sh` 1656, `test-spec-status-model.sh` 1045, the other four unchanged; doc-search's pytest suite, 863 passed with the 2 live tests skipped. GitHub Actions does not run on this account (billing lock), so this release was verified locally.
+
+## v3.10.1 (2026-10-28)
+
+This patch release fixes `check-ci.sh` for an interpreter at a path with a space. It also makes every test suite run under a spaced path on every run (#61, #62). Before, the suites met a spaced path only on a host whose `TMPDIR` had one. There, `test-hooks.sh`, `test-doc-pr-release.sh` and `test-ledger.sh` failed, and every failure but the `check-ci.sh` one was a test bug.
+
+### Upgrading from 3.10.0
+Nothing to do: no installed file changes. `check-ci.sh` and the test suites ship only in this repository.
+
+### Fixes
+- **`check-ci.sh --bash` with a spaced path.** The interpreter list was space-joined and word-split, so `--bash "/opt/my tools/bin/bash"` stopped with `--bash /opt/my: not an executable bash` (exit 2), and so did a detected interpreter under such a path. The list is now one path per line.
+
+### Other
+- Tests: the harness root (`test-helpers.sh`) is named `doc-sp test`, so every shim, fixture repo, fake `HOME`, scratch file and installed workflow in all seven suites sits under a spaced path on every run, whatever `TMPDIR` is. The test bugs this surfaced are fixed:
+  - `test-hooks.sh` passed an unquoted `GIT_EDITOR` (git runs it through `sh`), wrote unquoted assignments into the doc-search env hook, and cut a logged `BASH_BIN=` path at its first space.
+  - `test-doc-pr-release.sh` word-split a workflow file list, and rejected any step output whose value held a space. A `$RUNNER_TEMP` report path can hold one; the check is now one `key=` line of at most 4,096 bytes.
+  - `test-ledger.sh` (#61) counted cache paths from an unquoted list, set an unquoted `remote.origin.receivepack`, and expected a raw link where the views percent-encode it. A new test runs `ledger view` from a worktree at a spaced path.
+- The `check-ci.sh` self-tests now pass a spaced `--bash` path on every run. Suite counts are in CLAUDE.md. The local `check-ci.sh` run of the seven suites passed under bash 5.3 and `/bin/bash` 3.2, under a spaced `TMPDIR` too. Actions cannot run on this account (billing lock).
 
 ## v3.10.0 (2026-10-26)
 

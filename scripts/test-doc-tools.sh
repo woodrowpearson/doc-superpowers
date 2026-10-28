@@ -57,7 +57,7 @@ test_harness_int_stops_suite_and_cleans_up() {
   probe=$(harness_mktemp int-probe)
   cat > "$probe" <<EOF
 source "$SCRIPT_DIR/test-helpers.sh"
-echo "root=\$_HARNESS_TMP"
+echo "root=\$_HARNESS_BASE"
 kill -INT \$\$
 echo "STILL-RUNNING"
 EOF

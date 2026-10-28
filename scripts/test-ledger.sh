@@ -1784,7 +1784,7 @@ lg_ix_hash() {
 
 # shellcheck disable=SC2031  # lg_in runs this body where lg_source set the _LG_*/_SCRATCH globals
 lg_t_index_cache() {
-  local p0 p1 h0 err="$_SCRATCH/t.err" names="" p n
+  local p0 p1 h0 err="$_SCRATCH/t.err" names="$_SCRATCH/names" p n
   p0=$(_lg_index)
   h0=$(lg_ix_hash "$p0")
   p1=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
@@ -1792,23 +1792,25 @@ lg_t_index_cache() {
   assert_eq "$h0" "$(lg_ix_hash "$p1")" "…with the same content"
   assert_contains "$(cat "$err")" "index-hit" "…served from the cache"
   assert_not_contains "$(cat "$err")" "parse-miss" "…without parsing"
-  names="$p0"
+  # One cache path per line: the paths hold the fixture's directory, which
+  # may hold a space (a spaced TMPDIR), so never a space-joined list.
+  printf '%s\n' "$p0" > "$names"
   lg_registry '{"schema":"ledger-registry/1","ledgers":[{"id":"app","title":"App 2","kind":"service","status":"active"}]}'
-  p=$(_lg_index); names="$names $p"
+  p=$(_lg_index); printf '%s\n' "$p" >> "$names"
   lg_enable '{"views":{"recent_days":7}}'
   _lg_init ls
-  p=$(_lg_index); names="$names $p"
+  p=$(_lg_index); printf '%s\n' "$p" >> "$names"
   printf '{"app#1":{"key":"app-1"}}\n' > docs/ledger/legacy.json
-  p=$(_lg_index); names="$names $p"
+  p=$(_lg_index); printf '%s\n' "$p" >> "$names"
   assert_json_field "$(cat "$p")" '.legacy | tojson' '{"app#1":{"key":"app-1"}}' "legacy: legacy.json's map"
   lg_doc_index '{"docs":{"docs/plans/p.md":{"doc_type":"plan","last_verified":null}}}'
-  p=$(_lg_index); names="$names $p"
+  p=$(_lg_index); printf '%s\n' "$p" >> "$names"
   printf 'more\n' >> docs/issues/a.md
-  p=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err"); names="$names $p"
+  p=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err"); printf '%s\n' "$p" >> "$names"
   assert_eq "parse-miss docs/issues/a.md" "$(grep '^parse-miss' "$err")" "an item edit: only that item is parsed again"
   printf 'An uncommitted line.\n' >> docs/plans/p.md
-  p=$(_lg_index); names="$names $p"
-  n=$(printf '%s\n' $names | sort -u | wc -l | tr -d ' ')
+  p=$(_lg_index); printf '%s\n' "$p" >> "$names"
+  n=$(sort -u "$names" | wc -l | tr -d ' ')
   assert_eq "7" "$n" "registry, config, legacy.json, doc-index, an item, an uncommitted plan edit: each a new cache file"
   git checkout -q -- docs/plans/p.md
   p1=$(DOC_TOOLS_LEDGER_TRACE=1 _lg_index 2> "$err")
@@ -2842,11 +2844,13 @@ test_lg_alloc_exhausted_rc2() {
   echo "test: a remote that always answers 'stale info' → rc 2 after 8 retries, no key, no provisional"
   lg_keys_fixture
   local rp log
-  rp=$(harness_mktemp rp)
+  # In a directory with a space, whatever TMPDIR is: git runs receivepack
+  # with sh, so the value is single-quoted ('\'' for a quote in the path).
+  rp="$(harness_mktemp_d 'rp dir')/receive-pack"
   log=$(harness_mktemp rplog)
   : > "$log"
   lg_stale_receive_pack "$rp" "$log"
-  git config remote.origin.receivepack "$rp"
+  git config remote.origin.receivepack "'$(printf '%s' "$rp" | sed "s/'/'\\\\''/g")'"
   lg_call _lg_alloc x 1 docs/issues/n.md
   assert_eq "2" "$LG_RC" "exhausted → rc 2"
   assert_eq "" "$LG_OUT" "no key printed"
@@ -4235,7 +4239,7 @@ test_lg_view_writes_files() {
   assert_contains "$(cat "$out/app.md")" "[app-8](" "closed, committed today: recently closed"
   assert_contains "$(cat "$out/app.md")" "[app-6](" "closed in the working tree (untracked): recently closed"
   assert_not_contains "$(cat "$out/app.md")" "app-7" "closed by a 2020 commit: dropped"
-  assert_contains "$(cat "$out/app.md")" "($(git rev-parse --show-toplevel)/docs/issues/a.md)" "links: absolute paths into the work tree"
+  assert_contains "$(cat "$out/app.md")" "($(lg_uri_path "$(git rev-parse --show-toplevel)")/docs/issues/a.md)" "links: absolute paths into the work tree"
   rm -f docs/issues/x.md
   # The working tree, uncommitted edits included.
   lg_item docs/issues/c.md "key: app-2" "ledger: app" "status: Open" "severity: P2" "summary: Not committed yet"
@@ -4269,6 +4273,30 @@ test_lg_view_writes_files() {
   PATH="$bin:$PATH" lg view all --html --open --out "$out"
   assert_eq "0" "$LG_RC" "--open: exit 0"
   assert_eq "$out/ledger.html" "$(cat "$bin/opened" 2>/dev/null)" "--open opens the HTML file"
+  teardown
+}
+
+# lg_uri_path <path>: the path as a view link target — each "/"-separated
+# segment percent-encoded (a space is %20), as the views write it.
+lg_uri_path() {
+  jq -nr --arg p "$1" '$p | split("/") | map(@uri) | join("/")'
+}
+
+test_lg_view_spaced_work_tree() {
+  echo "test: ledger view from a work tree whose path has a space — links percent-encode it"
+  lg_view_fixture
+  local wt out
+  wt="$(harness_mktemp_d 'spaced wt')/work tree"
+  out=$(harness_mktemp_d view-out)
+  git worktree add -q --detach "$wt"
+  cd "$wt"
+  wt=$(git rev-parse --show-toplevel) # resolved, as the views see it (/tmp → /private/tmp)
+  lg view app --out "$out"
+  cd "$TEST_DIR"
+  assert_eq "0" "$LG_RC" "view app: exit 0"
+  assert_contains "$(lg_uri_path "$wt")" "/work%20tree" "the encoded work tree has %20 for its space"
+  assert_contains "$(cat "$out/app.md")" "($(lg_uri_path "$wt")/docs/issues/a.md)" "the item link: the work tree's path, encoded"
+  assert_not_contains "$(cat "$out/app.md")" "($wt/" "…never the raw path (a space ends a markdown link target)"
   teardown
 }
 
@@ -15130,6 +15158,7 @@ run_tests() {
   test_lg_render_readme_rollup
   test_lg_html_self_contained
   test_lg_view_writes_files
+  test_lg_view_spaced_work_tree
   test_lg_publish_orphan_branch
   test_lg_publish_rejects_non_ff
   test_lg_publish_base_without_config
