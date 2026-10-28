@@ -6683,6 +6683,38 @@ test_search_gate_refuses_unreadable_files() {
   teardown
 }
 
+test_search_gate_unreadable_rule_copy() {
+  echo "test: search-gate: an AGENTS.md or CLAUDE.md that cannot be read is reported as unreadable (a ⚠ line; .search_rule_copies state unreadable, version null), with no awk error and no false 'no end marker'; the readable copy decides search_rule"
+  sgt_fixture
+  local tpl="$SCRIPT_DIR/../references/search-rule.md"
+  sed -n '/^<!-- doc-superpowers:search-rule v[0-9]/,/^<!-- \/doc-superpowers:search-rule -->$/p' "$tpl" > CLAUDE.md
+  cp CLAUDE.md AGENTS.md
+  chmod 000 AGENTS.md
+  if [ -r AGENTS.md ]; then
+    chmod 644 AGENTS.md
+    record_skip "search-gate: an unreadable rule copy — chmod 000 does not stop this user reading it (root)"
+    teardown
+    return 0
+  fi
+  inst status --search-gate
+  assert_eq "0" "$IRC" "status: exit 0"
+  assert_contains "$IOUT" "⚠ AGENTS.md cannot be read: its search rule is not checked (fix its permissions)" "a ⚠ line naming the file"
+  assert_contains "$IOUT" "✓ search rule: current (CLAUDE.md: v" "…the readable copy decides"
+  assert_not_contains "$IOUT" "awk" "…no awk error"
+  assert_not_contains "$IOUT" "no end marker" "…no false 'no end marker'"
+  assert_not_contains "$IOUT" "AGENTS.md: v" "…no empty version"
+  inst status --search-gate --json
+  assert_eq "0" "$IRC" "status --json: exit 0"
+  assert_eq "json" "$(jq -e . >/dev/null 2>&1 <<<"$IOUT" && echo json)" "…stdout and stderr together are one JSON object (no awk error)"
+  assert_eq "current" "$(srh_json .tiers.search_gate.search_rule)" "JSON: the readable copy decides"
+  assert_eq '{"state":"unreadable","version":null}' "$(srh_json '.tiers.search_gate.search_rule_copies["AGENTS.md"] | tojson')" "JSON: AGENTS.md unreadable, version null"
+  rm -f CLAUDE.md
+  inst status --search-gate --json
+  assert_eq "absent unreadable" "$(srh_json '.tiers.search_gate | "\(.search_rule) \(.search_rule_copies["AGENTS.md"].state)"')" "only an unreadable copy: absent, the copy unreadable"
+  chmod 644 AGENTS.md
+  teardown
+}
+
 test_search_gate_never_writes_through_links() {
   echo "test: search-gate: a symbolic link at .claude/settings.json, .codex or .codex/hooks.json is refused (exit 1, nothing written, nothing through it) — install and uninstall"
   sgt_fixture
@@ -7510,6 +7542,7 @@ test_search_gate_install_writes_entries
 test_search_gate_install_idempotent
 test_search_gate_uninstall_removes_only_ours
 test_search_gate_refuses_unreadable_files
+test_search_gate_unreadable_rule_copy
 test_search_gate_never_writes_through_links
 test_search_gate_not_in_all
 test_search_gate_status_and_json
