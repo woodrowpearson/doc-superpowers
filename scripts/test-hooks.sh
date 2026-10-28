@@ -6794,41 +6794,89 @@ test_search_gate_status_and_json() {
   assert_contains "$IOUT" "⚠ docs/search/config.json is missing: doc-search is not enabled here, so the hooks allow everything" "installed without the config: ⚠"
   inst status --search-gate --json
   assert_eq "installed" "$(srh_json .tiers.search_gate.claude_settings)" "…and JSON still reports the files"
-  # A marked rule block, but the plugin ships no template yet: absent.
+  # A marked rule block, but a plugin without references/search-rule.md: absent.
+  local plug
+  plug=$(harness_mktemp_d sgtnotpl)
+  plugin_copy "$plug"
   printf '# Agents\n<!-- doc-superpowers:search-rule v1.2.3 -->\nrule\n<!-- /doc-superpowers:search-rule -->\n' > AGENTS.md
-  inst status --search-gate --json
+  inst --from "$plug/scripts/hooks/install.sh" status --search-gate --json
   assert_eq "absent" "$(srh_json .tiers.search_gate.search_rule)" "a marked block, no references/search-rule.md in the plugin: absent"
+  inst --from "$plug/scripts/hooks/install.sh" status --search-gate
+  assert_contains "$IOUT" "✗ search rule: absent (this plugin has no references/search-rule.md to compare with)" "…as text"
   teardown
 }
 
 test_search_gate_rule_drift() {
-  echo "test: search-gate: with the plugin's references/search-rule.md, status compares the marked block in AGENTS.md or CLAUDE.md with it: current, outdated, absent"
+  echo "test: search-gate: status compares the body of the marked block in AGENTS.md or CLAUDE.md (the lines between the markers) with the plugin's references/search-rule.md: current, outdated (a changed line, no end marker), absent; the marker version is shown, not judged; CRLF is the same text"
   sgt_fixture
   local plug ish
   plug=$(harness_mktemp_d sgtplug)
   plugin_copy "$plug"
   ish="$plug/scripts/hooks/install.sh"
   mkdir -p "$plug/references"
-  printf '# The rule\n\nCopy the block below.\n\n<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\nUse doc-search.\n<!-- /doc-superpowers:search-rule -->\n' > "$plug/references/search-rule.md"
+  printf '# The rule\n\nCopy the block below.\n\n<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\n\nUse doc-search.\n<!-- /doc-superpowers:search-rule -->\n' > "$plug/references/search-rule.md"
+  # Absent: no file, or no opening marker.
   inst --from "$ish" status --search-gate --json
-  assert_eq "absent" "$(srh_json .tiers.search_gate.search_rule)" "no AGENTS.md or CLAUDE.md block: absent"
-  printf '# Agents\n\nintro\n<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\nUse doc-search.\n<!-- /doc-superpowers:search-rule -->\nafter\n' > AGENTS.md
+  assert_eq "absent" "$(srh_json .tiers.search_gate.search_rule)" "no AGENTS.md or CLAUDE.md: absent"
+  assert_eq "{}" "$(srh_json '.tiers.search_gate.search_rule_copies | tojson')" "…no copies"
+  printf '# Agents\n\n## Searching\n\nUse doc-search.\n<!-- /doc-superpowers:search-rule -->\n' > AGENTS.md
   inst --from "$ish" status --search-gate --json
-  assert_eq "current" "$(srh_json .tiers.search_gate.search_rule)" "AGENTS.md's block is the template's: current"
+  assert_eq "absent" "$(srh_json .tiers.search_gate.search_rule)" "a closing marker with no opening marker: absent"
   inst --from "$ish" status --search-gate
-  assert_contains "$IOUT" "✓ search rule: current (AGENTS.md)" "…as text"
-  printf '<!-- doc-superpowers:search-rule v9.9.8 -->\n## Searching\nUse doc-search.\n<!-- /doc-superpowers:search-rule -->\n' > CLAUDE.md
+  assert_contains "$IOUT" "✗ search rule: absent (no marked doc-superpowers:search-rule block in AGENTS.md or CLAUDE.md)" "…as text"
+  # Current: the body is the template's; the marker version is shown, not judged.
+  printf '# Agents\n\nintro\n<!-- doc-superpowers:search-rule v1.0.0 -->\n## Searching\n\nUse doc-search.\n<!-- /doc-superpowers:search-rule -->\nafter\n' > AGENTS.md
   inst --from "$ish" status --search-gate --json
-  assert_eq "outdated" "$(srh_json .tiers.search_gate.search_rule)" "CLAUDE.md's block another version: outdated (the worse of the two)"
+  assert_eq "current" "$(srh_json .tiers.search_gate.search_rule)" "AGENTS.md's body is the template's, another marker version: current"
+  assert_eq '{"AGENTS.md":{"state":"current","version":"1.0.0"}}' "$(srh_json '.tiers.search_gate.search_rule_copies | tojson')" "…the copy and its marker version"
   inst --from "$ish" status --search-gate
-  assert_contains "$IOUT" "⚠ search rule: outdated (CLAUDE.md): differs from the plugin's references/search-rule.md" "…as text, naming the file"
+  assert_contains "$IOUT" "✓ search rule: current (AGENTS.md: v1.0.0)" "…as text, with the copy's version"
+  # Outdated: one changed line.
+  printf '<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\n\nUse rg.\n<!-- /doc-superpowers:search-rule -->\n' > CLAUDE.md
+  inst --from "$ish" status --search-gate --json
+  assert_eq "outdated" "$(srh_json .tiers.search_gate.search_rule)" "CLAUDE.md's body has one changed line, its version the template's: outdated (the worse of the two)"
+  assert_eq "current outdated 9.9.9" "$(srh_json '.tiers.search_gate.search_rule_copies | "\(.["AGENTS.md"].state) \(.["CLAUDE.md"].state) \(.["CLAUDE.md"].version)"')" "…each copy's state and version"
+  inst --from "$ish" status --search-gate
+  assert_contains "$IOUT" "⚠ search rule: outdated (CLAUDE.md: v9.9.9): differs from the plugin's references/search-rule.md (copy its marked block again)" "…as text, naming the file"
+  rm -f AGENTS.md
+  # The block in CLAUDE.md only.
+  printf '# Claude\n<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\n\nUse doc-search.\n<!-- /doc-superpowers:search-rule -->\n' > CLAUDE.md
+  inst --from "$ish" status --search-gate --json
+  assert_eq "current" "$(srh_json .tiers.search_gate.search_rule)" "the block in CLAUDE.md only: current"
+  inst --from "$ish" status --search-gate
+  assert_contains "$IOUT" "✓ search rule: current (CLAUDE.md: v9.9.9)" "…as text"
   rm -f CLAUDE.md
-  printf '<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\nUse rg.\n<!-- /doc-superpowers:search-rule -->\n' > AGENTS.md
+  # Outdated: no closing marker, even with the whole body there.
+  printf '<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\n\nUse doc-search.\n' > AGENTS.md
   inst --from "$ish" status --search-gate --json
-  assert_eq "outdated" "$(srh_json .tiers.search_gate.search_rule)" "an edited body: outdated"
-  printf '<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\nUse doc-search.\n' > AGENTS.md
+  assert_eq "outdated" "$(srh_json .tiers.search_gate.search_rule)" "the body with no closing marker: outdated"
+  inst --from "$ish" status --search-gate
+  assert_contains "$IOUT" "⚠ search rule: outdated (AGENTS.md: v9.9.9, no end marker)" "…as text, saying why"
+  # A blank line added before the closing marker is a changed body.
+  printf '<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\n\nUse doc-search.\n\n<!-- /doc-superpowers:search-rule -->\n' > AGENTS.md
   inst --from "$ish" status --search-gate --json
-  assert_eq "outdated" "$(srh_json .tiers.search_gate.search_rule)" "a block with no end marker: outdated"
+  assert_eq "outdated" "$(srh_json .tiers.search_gate.search_rule)" "a trailing blank line added inside the block: outdated"
+  # CRLF line endings: the same text.
+  printf '# Agents\r\n<!-- doc-superpowers:search-rule v9.9.9 -->\r\n## Searching\r\n\r\nUse doc-search.\r\n<!-- /doc-superpowers:search-rule -->\r\n' > AGENTS.md
+  inst --from "$ish" status --search-gate --json
+  assert_eq "current 9.9.9" "$(srh_json '.tiers.search_gate | "\(.search_rule) \(.search_rule_copies["AGENTS.md"].version)"')" "a CRLF copy of the block: current (line endings are not text)"
+  teardown
+}
+
+test_search_gate_shipped_rule_is_current() {
+  echo "test: search-gate: the shipped references/search-rule.md, its block copied as is into AGENTS.md, is current; a copy with one changed line is outdated"
+  sgt_fixture
+  local tpl="$SCRIPT_DIR/../references/search-rule.md"
+  assert_file_exists "$tpl" "the plugin ships references/search-rule.md"
+  sed -n '/^<!-- doc-superpowers:search-rule v[0-9]/,/^<!-- \/doc-superpowers:search-rule -->$/p' "$tpl" > AGENTS.md
+  assert_eq "<!-- /doc-superpowers:search-rule -->" "$(tail -n 1 AGENTS.md)" "…its block ends with the closing marker"
+  assert_eq "<!-- /doc-superpowers:search-rule -->" "$(tail -n 1 "$tpl")" "…and nothing follows it in the template"
+  inst status --search-gate --json
+  assert_eq "current" "$(srh_json .tiers.search_gate.search_rule)" "the shipped block copied as is: current"
+  assert_eq "$(jq -r .version "$SCRIPT_DIR/../package.json")" "$(srh_json '.tiers.search_gate.search_rule_copies["AGENTS.md"].version')" "…its marker version is the plugin's"
+  sed 's/^### Halt$/### Stop/' AGENTS.md > a.tmp && mv a.tmp AGENTS.md
+  inst status --search-gate --json
+  assert_eq "outdated" "$(srh_json .tiers.search_gate.search_rule)" "one heading changed: outdated"
   teardown
 }
 
@@ -7466,6 +7514,7 @@ test_search_gate_never_writes_through_links
 test_search_gate_not_in_all
 test_search_gate_status_and_json
 test_search_gate_rule_drift
+test_search_gate_shipped_rule_is_current
 test_search_gate_hooks_run_the_launcher
 
 # --- Maintainer tooling (#27): scripts/check-ci.sh and the opt-in pre-push ---

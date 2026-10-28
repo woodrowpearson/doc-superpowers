@@ -254,9 +254,10 @@ Tiers:
             rewritten. uninstall --search-gate removes our entries, and a file
             left {} or {"hooks":{}}. status reports each file (installed,
             partial, absent) and the marked doc-superpowers:search-rule block
-            in AGENTS.md or CLAUDE.md (current, outdated, absent);
-            status --json reports it under .tiers.search_gate, only when
-            --search-gate is named.
+            in AGENTS.md or CLAUDE.md, its body against the plugin's
+            references/search-rule.md (current, outdated, absent; each
+            copy's marker version shown, not judged); status --json reports
+            it under .tiers.search_gate, only when --search-gate is named.
 
 Machine-readable:
   status --json       the git, Claude and CI tiers (all, or those named) as one
@@ -2085,45 +2086,73 @@ gate_state() {
   fi
 }
 
-# rule_block <file>: the first marked search-rule block, its marker lines
-# included. Exit 1: no begin marker; 2: no end marker after it.
+# rule_block <file>: the first marked search-rule block. Line 1 is its
+# opening marker's version; then its body, the lines strictly between the
+# markers; then a "." line, so a trailing blank line in the body survives the
+# command substitution that reads it. A CR ending a line is dropped first: a
+# CRLF copy is the same text. Exit 1: no opening marker; 2: no closing marker
+# after it (the body runs to the end of the file).
 rule_block() {
   awk '
-    !s && /^<!-- doc-superpowers:search-rule v[0-9]+\.[0-9]+\.[0-9]+ -->$/ { s = 1 }
-    s { print }
+    { sub(/\r$/, "") }
+    !s && /^<!-- doc-superpowers:search-rule v[0-9]+\.[0-9]+\.[0-9]+ -->$/ {
+      s = 1
+      v = $0
+      sub(/^<!-- doc-superpowers:search-rule v/, "", v)
+      sub(/ -->$/, "", v)
+      print v
+      next
+    }
     s && $0 == "<!-- /doc-superpowers:search-rule -->" { e = 1; exit }
-    END { exit s ? (e ? 0 : 2) : 1 }' "$1"
+    s { print }
+    END {
+      if (s) print "."
+      exit s ? (e ? 0 : 2) : 1
+    }' "$1"
 }
 
-# search_rule_state: SRULE — current (every marked block in AGENTS.md and
-# CLAUDE.md is the template's, byte for byte, version line included) |
-# outdated (one is not, or has no end marker) | absent (no marked block, or
-# the plugin has no template with one) — and SRULE_IN, the files that decide.
+# search_rule_state: SRULE — current (the body of every marked block in
+# AGENTS.md and CLAUDE.md is the template's; the marker versions are not
+# compared) | outdated (one body differs, or a block has no closing marker) |
+# absent (no opening marker in either file, or the plugin has no template
+# with a block) — SRULE_IN, the files that decide with their marker versions
+# ("AGENTS.md: v3.10.0"), and SRULE_COPIES, one "<file> <state> <version>"
+# line per file with a block.
 search_rule_state() {
-  local f tpl blk rc cur_in="" out_in=""
-  SRULE=absent SRULE_IN=""
+  local f tpl blk rc ver cur_in="" out_in=""
+  SRULE=absent SRULE_IN="" SRULE_COPIES=""
   [ -f "$SEARCH_RULE_SRC" ] || return 0
   tpl=$(rule_block "$SEARCH_RULE_SRC") || return 0
+  tpl="${tpl#*$'\n'}"
   for f in $SEARCH_RULE_FILES; do
     [ -f "$f" ] || continue
     rc=0
     blk=$(rule_block "$f") || rc=$?
-    case "$rc" in
-      1) ;;
-      0) if [ "$blk" = "$tpl" ]; then cur_in="$cur_in, $f"; else out_in="$out_in, $f"; fi ;;
-      *) out_in="$out_in, $f" ;;
-    esac
+    [ "$rc" != 1 ] || continue
+    ver="${blk%%$'\n'*}"
+    if [ "$rc" = 0 ] && [ "${blk#*$'\n'}" = "$tpl" ]; then
+      cur_in="$cur_in; $f: v$ver"
+      SRULE_COPIES="$SRULE_COPIES$f current $ver"$'\n'
+    else
+      if [ "$rc" = 0 ]; then
+        out_in="$out_in; $f: v$ver"
+      else
+        out_in="$out_in; $f: v$ver, no end marker"
+      fi
+      SRULE_COPIES="$SRULE_COPIES$f outdated $ver"$'\n'
+    fi
   done
   if [ -n "$out_in" ]; then
-    SRULE=outdated SRULE_IN="${out_in#, }"
+    SRULE=outdated SRULE_IN="${out_in#; }"
   elif [ -n "$cur_in" ]; then
-    SRULE=current SRULE_IN="${cur_in#, }"
+    SRULE=current SRULE_IN="${cur_in#; }"
   fi
 }
 
-# status_search_gate: the human lines, or (--json) one search_gate.state record.
+# status_search_gate: the human lines, or (--json) one search_gate.state record
+# and one search_gate.rule record per file holding a marked block.
 status_search_gate() {
-  local cl cx f who st
+  local cl cx f who st ver
   gate_state "$GATE_CLAUDE_FILE" claude
   cl="$GT_STATE"
   gate_state "$GATE_CODEX_FILE" codex
@@ -2133,6 +2162,9 @@ status_search_gate() {
     [ "$cl" != unreadable ] || cl=absent
     [ "$cx" != unreadable ] || cx=absent
     st_rec search_gate.state "$cl" "$cx" "$SRULE"
+    while read -r f st ver; do
+      if [ -n "$f" ]; then st_rec search_gate.rule "$f" "$st" "$ver"; fi
+    done <<<"$SRULE_COPIES"
     return 0
   fi
   echo "doc-search gate (the opt-in --search-gate set):"
@@ -2174,7 +2206,7 @@ status_search_gate() {
   done
   case "$SRULE" in
     current) echo "  ✓ search rule: current ($SRULE_IN)" ;;
-    outdated) echo "  ⚠ search rule: outdated ($SRULE_IN): differs from the plugin's references/search-rule.md" ;;
+    outdated) echo "  ⚠ search rule: outdated ($SRULE_IN): differs from the plugin's references/search-rule.md (copy its marked block again)" ;;
     *)
       if [ -f "$SEARCH_RULE_SRC" ]; then
         echo "  ✗ search rule: absent (no marked doc-superpowers:search-rule block in AGENTS.md or CLAUDE.md)"
@@ -2912,7 +2944,9 @@ _STATUS_JSON_JQ='
     elif $r[0] == "ci.removable" then .tiers.ci.removable_vendored += [$r[1]]
     elif $r[0] == "ci.vendored" then .tiers.ci.doc_tools_vendored = $r[1]
     elif $r[0] == "search.state" then .tiers.search = {launcher: $r[1], mcp_entry: $r[2]}
-    elif $r[0] == "search_gate.state" then .tiers.search_gate = {claude_settings: $r[1], codex_hooks: $r[2], search_rule: $r[3]}
+    elif $r[0] == "search_gate.state" then .tiers.search_gate = {claude_settings: $r[1], codex_hooks: $r[2], search_rule: $r[3],
+                                                                 search_rule_copies: {}}
+    elif $r[0] == "search_gate.rule" then .tiers.search_gate.search_rule_copies[$r[1]] = {state: $r[2], version: $r[3]}
     else . end)
   | .env = {DOC_SUPERPOWERS_STRICT: ($strict | n), DOC_SUPERPOWERS_SKIP: ($skip | n),
             DOC_SUPERPOWERS_QUIET: ($quiet | n), DOC_SUPERPOWERS_HOOK_BUDGET: ($budget | n),
