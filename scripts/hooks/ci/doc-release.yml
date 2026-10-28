@@ -109,7 +109,8 @@ jobs:
               one is given below) and approve your own draft.
             - Do not commit, push, tag or open pull requests. After you finish, the
               workflow commits RELEASE-NOTES.md, RELEASE-NOTES.next/, the version
-              manifests, CLAUDE.md and README.md to a new branch and opens a pull
+              manifests (with the version stamps bump-version keeps in the
+              doc-superpowers tree), CLAUDE.md and README.md to a new branch and opens a pull
               request; a change anywhere else fails the run.
 
             Run /doc-superpowers release to draft release notes from git history.
@@ -131,4 +132,4 @@ jobs:
         # prepare-agent.sh's pre-agent copy of the checker: an integrity check
         # against agent mistakes, not a sandbox (a steered agent reaches the
         # job's secrets and its token's permissions — references/hooks.md).
-        run: '"$RUNNER_TEMP"/doc-superpowers-steps/commit-changes.sh --allow RELEASE-NOTES.md --allow RELEASE-NOTES.next/ --allow CLAUDE.md --allow README.md --allow package.json --allow .claude-plugin/plugin.json --allow .claude-plugin/marketplace.json --allow .cursor-plugin/plugin.json --allow gemini-extension.json --message "[doc-superpowers] draft release notes" --push-to "$BRANCH" --open-pr "$BASE"'
+        run: '"$RUNNER_TEMP"/doc-superpowers-steps/commit-changes.sh --allow RELEASE-NOTES.md --allow RELEASE-NOTES.next/ --allow CLAUDE.md --allow README.md --allow package.json --allow .claude-plugin/plugin.json --allow .claude-plugin/marketplace.json --allow .cursor-plugin/plugin.json --allow gemini-extension.json --allow scripts/search/launch.sh --allow references/search-rule.md --message "[doc-superpowers] draft release notes" --push-to "$BRANCH" --open-pr "$BASE"'

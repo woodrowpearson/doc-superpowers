@@ -2246,7 +2246,9 @@ bump-version|cmd_bump_version|deps|
   stamp, the first "# doc-search launcher vX.Y.Z" line in the first 5 lines
   of scripts/search/launch.sh; and into the search-rule stamp, the first
   "<!-- doc-superpowers:search-rule vX.Y.Z -->" line of
-  references/search-rule.md; each stamp when its file exists.
+  references/search-rule.md; each stamp when its file exists in the
+  doc-superpowers tree (search/pyproject.toml and scripts/doc-tools.sh
+  present: a project's own files of those names are skipped).
   RELEASE-NOTES.md is the canonical version: check-version reads it, and it
   is never written. All or nothing: every file found is read first, and a
   manifest that is not valid JSON, or a stamp file without its stamp,
@@ -2255,7 +2257,9 @@ bump-version|cmd_bump_version|deps|
 check-version|cmd_check_version|deps|tag warn remote=
   [--tag [--remote <name>] [--warn]]
   Verify that every manifest, and the stamps of scripts/search/launch.sh
-  and references/search-rule.md when those files exist, carry
+  and references/search-rule.md when those files exist in the
+  doc-superpowers tree (search/pyproject.toml and scripts/doc-tools.sh
+  present), carry
   RELEASE-NOTES.md's version: its first release heading, a line
   "## vMAJOR.MINOR.PATCH …" outside code fences (a pre-release suffix is
   refused, not skipped). Exits 1 on a mismatch, a manifest that is not
@@ -5772,8 +5776,10 @@ VERSION_FILES=(
 # each: the stamp is the first line of <file> that is <form> with a version
 # in place of X.Y.Z, within its first <lines> lines (0: anywhere in it). Not
 # JSON, so not in VERSION_FILES: bump-version rewrites the line with sed,
-# check-version reads it with grep. A tree without the file (a project that
-# vendors doc-tools.sh) has no stamp to keep.
+# check-version reads it with grep. They are kept only in the doc-superpowers
+# tree (_in_ds_tree: search/pyproject.toml and scripts/doc-tools.sh, the
+# launcher's own test for it): a project that vendors doc-tools.sh may have
+# files of those names of its own, and has no stamp to keep.
 #   - The launcher's: line 2 of scripts/search/launch.sh.
 #   - The search rule's: the opening marker of the block a project copies from
 #     references/search-rule.md into AGENTS.md or CLAUDE.md (install.sh status
@@ -5785,6 +5791,11 @@ STAMP_FILES=(
   "$LAUNCHER_STAMP_FILE|launcher stamp|# doc-search launcher vX.Y.Z|5"
   "$SEARCH_RULE_STAMP_FILE|search-rule stamp|<!-- doc-superpowers:search-rule vX.Y.Z -->|0"
 )
+
+# _in_ds_tree: the cwd is the doc-superpowers tree.
+_in_ds_tree() {
+  [ -f search/pyproject.toml ] && [ -f scripts/doc-tools.sh ]
+}
 
 # _stamp <file> <form> <lines>: prints "<line number> <version>" for its
 # stamp; returns 1 when there is none.
@@ -5867,7 +5878,9 @@ cmd_bump_version() {
   for entry in "${STAMP_FILES[@]}"; do
     IFS='|' read -r file name form lines <<<"$entry"
     stamp_what[$i]=skip stamp_tmps[$i]="" stamp_currents[$i]=""
-    if [ -f "$file" ]; then
+    if [ -f "$file" ] && ! _in_ds_tree; then
+      stamp_what[i]=foreign
+    elif [ -f "$file" ]; then
       if ! stamp=$(_stamp "$file" "$form" "$lines"); then
         echo "ERROR: $file has no $name (a line \"$form\"$(_stamp_where "$lines")); nothing was written." >&2
         exit 1
@@ -5906,6 +5919,7 @@ cmd_bump_version() {
     file="${entry%%|*}"
     case "${stamp_what[$i]}" in
       skip) echo "  skip: $file (not found)" ;;
+      foreign) echo "  skip: $file (not the doc-superpowers tree)" ;;
       ok) echo "  ok:   $file (already $new_version)" ;;
       bump)
         _replace_file "${stamp_tmps[$i]}" "$file"
@@ -5960,7 +5974,7 @@ cmd_check_version() {
   local name form lines
   for entry in "${STAMP_FILES[@]}"; do
     IFS='|' read -r file name form lines <<<"$entry"
-    [ -f "$file" ] || continue
+    if [ ! -f "$file" ] || ! _in_ds_tree; then continue; fi
     checked=$((checked + 1))
     if ! actual=$(_stamp "$file" "$form" "$lines"); then
       echo "  MISMATCH: $file has no $name (expected \"${form/X.Y.Z/$canonical}\"$(_stamp_where "$lines"))"
