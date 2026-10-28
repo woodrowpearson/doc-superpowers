@@ -1584,6 +1584,110 @@ test_check_version_checks_launcher_stamp() {
   teardown
 }
 
+# setup_rule_stamp <marker line>: references/search-rule.md (mode 644): a
+# preamble, then <marker line> as the block's opening marker on line 5, its
+# body and closing marker, and a later stamp-shaped line: only the first one
+# in the file is the stamp.
+setup_rule_stamp() {
+  mkdir -p references
+  printf '# The rule\n\nCopy the block.\n\n%s\n## Rule\n<!-- /doc-superpowers:search-rule -->\n<!-- doc-superpowers:search-rule v0.0.1 -->\n' "$1" > references/search-rule.md
+  chmod 644 references/search-rule.md
+}
+
+test_bump_version_rewrites_search_rule_stamp() {
+  echo "test: bump-version also rewrites the search-rule stamp (references/search-rule.md, its first '<!-- doc-superpowers:search-rule vX.Y.Z -->' line), with sed, all or nothing"
+  setup
+  setup_version_files
+  setup_launcher_stamp "# doc-search launcher v1.0.0"
+  setup_rule_stamp "<!-- doc-superpowers:search-rule v1.0.0 -->"
+  local output exit_code expected
+  set +e
+  output=$("$DOC_TOOLS" bump-version 9.8.7 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "exits 0"
+  assert_contains "$output" "bump: references/search-rule.md (1.0.0 → 9.8.7)" "reports the stamp bump"
+  assert_contains "$output" "Updated 7 file(s) to v9.8.7" "the five manifests and both stamps"
+  expected=$(printf '# The rule\n\nCopy the block.\n\n<!-- doc-superpowers:search-rule v9.8.7 -->\n## Rule\n<!-- /doc-superpowers:search-rule -->\n<!-- doc-superpowers:search-rule v0.0.1 -->')
+  assert_eq "$expected" "$(cat references/search-rule.md)" "line 5 is v9.8.7; every other line, the later stamp-shaped one too, is unchanged"
+  assert_eq "# doc-search launcher v9.8.7" "$(sed -n 2p scripts/search/launch.sh)" "the launcher stamp is bumped with it"
+  assert_eq "644" "$(_test_file_mode references/search-rule.md)" "the template keeps its mode"
+  assert_eq "search-rule.md" "$(ls -A references)" "no backup or temp file is left beside it"
+  output=$("$DOC_TOOLS" bump-version 9.8.7 2>&1)
+  assert_contains "$output" "ok:   references/search-rule.md (already 9.8.7)" "again: the stamp is already current"
+  assert_contains "$output" "Updated 0 file(s)" "…and nothing is written"
+  # All or nothing: a template without a stamp writes nothing, the launcher included.
+  printf '# The rule\n<!-- doc-superpowers:search-rule v<NEXT-RELEASE> -->\n' > references/search-rule.md
+  set +e
+  output=$("$DOC_TOOLS" bump-version 9.9.9 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "no stamp: exits 1"
+  assert_contains "$output" "ERROR: references/search-rule.md has no search-rule stamp (a line \"<!-- doc-superpowers:search-rule vX.Y.Z -->\"); nothing was written." "…naming the template and the line it needs"
+  assert_eq "9.8.7" "$(jq -r .version package.json)" "…package.json is not bumped"
+  assert_eq "# doc-search launcher v9.8.7" "$(sed -n 2p scripts/search/launch.sh)" "…nor the launcher"
+  assert_eq "launch.sh" "$(ls -A scripts/search)" "…whose rendered temp file is removed"
+  # …and a launcher without a stamp leaves the template's alone.
+  setup_rule_stamp "<!-- doc-superpowers:search-rule v9.8.7 -->"
+  printf '#!/bin/sh\necho launched\n' > scripts/search/launch.sh
+  set +e
+  "$DOC_TOOLS" bump-version 9.9.9 >/dev/null 2>&1
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "a launcher without a stamp: exits 1"
+  assert_eq "<!-- doc-superpowers:search-rule v9.8.7 -->" "$(sed -n 5p references/search-rule.md)" "…and the search-rule stamp is not bumped"
+  # A tree without the template skips it.
+  rm -rf references scripts
+  output=$("$DOC_TOOLS" bump-version 9.9.9 2>&1)
+  assert_contains "$output" "skip: references/search-rule.md (not found)" "no template: skipped"
+  teardown
+}
+
+test_check_version_checks_search_rule_stamp() {
+  echo "test: check-version also checks the search-rule stamp against RELEASE-NOTES.md, naming references/search-rule.md"
+  setup
+  setup_version_files
+  local output exit_code
+  setup_rule_stamp "<!-- doc-superpowers:search-rule v1.0.0 -->"
+  set +e
+  output=$("$DOC_TOOLS" check-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "the stamp matches: exits 0"
+  assert_contains "$output" "ok:       references/search-rule.md" "…listing the template"
+  assert_contains "$output" "PASS: all 6 file(s) match v1.0.0" "…six files checked"
+  setup_rule_stamp "<!-- doc-superpowers:search-rule v0.9.0 -->"
+  set +e
+  output=$("$DOC_TOOLS" check-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "a different stamp: exits 1"
+  assert_contains "$output" "MISMATCH: references/search-rule.md has 0.9.0 (expected 1.0.0)" "…naming the template and both versions"
+  assert_contains "$output" "Run: doc-tools.sh bump-version 1.0.0" "…and the fix"
+  setup_rule_stamp "<!-- doc-superpowers:search-rule v<NEXT-RELEASE> -->"
+  set +e
+  output=$("$DOC_TOOLS" check-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "the first marker is not a stamp: exits 1"
+  assert_contains "$output" "MISMATCH: references/search-rule.md has 0.0.1 (expected 1.0.0)" "…the first stamp-shaped line in the file is the stamp"
+  printf '# The rule\n' > references/search-rule.md
+  set +e
+  output=$("$DOC_TOOLS" check-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "1" "$exit_code" "a template with no stamp at all: exits 1"
+  assert_contains "$output" "MISMATCH: references/search-rule.md has no search-rule stamp (expected \"<!-- doc-superpowers:search-rule v1.0.0 -->\")" "…naming the template and the line it needs"
+  rm -f references/search-rule.md
+  set +e
+  output=$("$DOC_TOOLS" check-version 2>&1)
+  exit_code=$?
+  set -e
+  assert_eq "0" "$exit_code" "no template (a project that vendors doc-tools.sh): not checked, exits 0"
+  assert_not_contains "$output" "search-rule.md" "…and not mentioned"
+  teardown
+}
+
 # --- fragments subcommand ---
 
 _write_fragment() {
@@ -4276,6 +4380,7 @@ test_i4_help_lists_every_dispatchable_verb() {
   assert_eq "" "$wrong" "bump-version --help names every VERSION_FILES entry"
   assert_contains "$bump" "never written" "bump-version --help says RELEASE-NOTES.md is never written"
   assert_contains "$bump" "scripts/search/launch.sh" "bump-version --help names the launcher stamp it also writes"
+  assert_contains "$bump" "references/search-rule.md" "bump-version --help names the search-rule stamp it also writes"
 }
 
 test_i4_flags_anywhere_and_unknown_flags_exit_2() {
@@ -8126,6 +8231,8 @@ run_tests() {
   test_check_version_passes_when_synced
   test_bump_version_rewrites_launcher_stamp
   test_check_version_checks_launcher_stamp
+  test_bump_version_rewrites_search_rule_stamp
+  test_check_version_checks_search_rule_stamp
   test_fragments_list_empty
   test_fragments_list_valid
   test_fragments_validate_drifted

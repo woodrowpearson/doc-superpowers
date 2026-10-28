@@ -132,6 +132,7 @@ doc-superpowers/
 │   ├── ledger.md                  # Work ledger (opt-in): config, verbs + exit codes, keys, adapters, in-flight, hooks, init (REQUIRED for the ledger)
 │   ├── ledger-index.schema.json   # The ledger index's shape (ledger-index/1)
 │   ├── search.md                  # doc-search (opt-in): turning it on, config, CLI + exit codes, tools, cloud leg, other clients (REQUIRED with docs/search/config.json)
+│   ├── search-rule.md             # The search rule: the marked block a project that requires doc-search copies into AGENTS.md or CLAUDE.md
 │   └── tool-mappings.md           # The one capability matrix: per-client tool names + capabilities, tool resolution
 ├── docs/                 # Documentation about this skill (you are here)
 │   ├── architecture/
@@ -197,6 +198,7 @@ doc-superpowers/
 | `references/spec-lifecycle-protocol.md` | Wrapper author integration guide — input/output contracts for spec-generate, spec-inject, spec-verify; integration patterns for calling skills; the claims **Direction protocol** (`CODE-DIVERGES`, `DOC-STALE`, `RETIRE`, its policy keys and their defaults) | Adding integration patterns, changing action contracts, changing the direction protocol |
 | `search/` | doc-search, the opt-in MCP server over docs and code: a uv package (`src/doc_search/`, `tests/`), its own Python toolchain, never needed by the rest of doc-superpowers. Inert without `docs/search/config.json` | Changing the server, a tool, the CLI, the config, the fusion, the cloud leg or the local transformer (with `references/search.md`; tests: `bash scripts/check-ci.sh search`) |
 | `scripts/search/launch.sh` | doc-search's POSIX-sh launcher, vendored byte for byte to `.claude/doc-superpowers/search-mcp.sh` by `install --search`; it picks the uv extras from the config (`cloud`, `local-transformer`) | Changing how the server is found or started, or which extras it adds (installed copies then read `outdated`) |
+| `references/search-rule.md` | The search rule a project that requires doc-search copies into `AGENTS.md` or `CLAUDE.md`: a preamble, then the marked block (`check`'s exit codes, the two things `check` cannot see, the halt, the excuses table). Its opening marker's version is a release stamp (`bump-version`, `check-version`); `install.sh status --search-gate` compares a copy by the lines between the markers | Changing the rule's wording (re-run its micro-tests; projects then read `outdated`) |
 | `references/search.md` | doc-search's reference: inert contract, config keys and environment, CLI verbs and exit codes, the four tools, the cloud leg's setup and write-path guards, other clients' snippets, performance, privacy, troubleshooting | Changing any of those (pinned by `test-spec-status-model.sh`: its ten sections, the inert line, the verbs) |
 | `references/tool-mappings.md` | The one capability matrix — per-client tool names and capabilities (INSTALL files, AGENTS.md and GEMINI.md link here), tool resolution | Adding framework support, tool name or capability changes |
 | `AGENTS.md` | Cross-client agent instructions | Adding commands, changing project orientation |
@@ -401,7 +403,7 @@ User invokes /doc-superpowers release [--from=<ref>]
     → Prepend new version entry to RELEASE-NOTES.md (after header, before previous entry)
     → `doc-tools.sh fragments merge <start|ROOT> HEAD --remove`: `git rm` exactly the consumed fragments (never a glob)
     → Bump version in the manifests the project has — never hand-edit individual version strings
-      → `doc-tools.sh bump-version X.Y.Z`, then `doc-tools.sh check-version` to confirm every manifest, and the launcher stamp in a tree with `scripts/search/launch.sh`, matches (skipped when the project has none of the five manifests)
+      → `doc-tools.sh bump-version X.Y.Z`, then `doc-tools.sh check-version` to confirm every manifest, and the stamps in a tree with `scripts/search/launch.sh` or `references/search-rule.md`, matches (skipped when the project has none of the five manifests)
     → Sync CLAUDE.md and README.md per references/doc-spec.md rules
       → Catches drift accumulated across the released commits
     → Commit the release: entry + fragment deletions + manifests + CLAUDE.md/README.md in ONE commit
@@ -496,7 +498,8 @@ User invokes /doc-superpowers hooks install --search-gate (never part of --all o
   → Per event (SessionStart, UserPromptSubmit, PreToolUse), merge the group running the launcher's gate into
     .claude/settings.json and .codex/hooks.json (others' handlers kept; a file already exact is not rewritten)
   → Not recorded in installed.json; status --search-gate [--json] reports each file and the search-rule block
-    (.tiers.search_gate)
+    (.tiers.search_gate): its body, the lines between the markers, against references/search-rule.md's —
+    current, outdated (or no closing marker), absent; each copy's marker version shown, not judged
 ```
 
 ### Work ledger (every `ledger` verb)

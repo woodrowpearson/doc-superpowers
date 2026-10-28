@@ -2242,22 +2242,24 @@ bump-version|cmd_bump_version|deps|
   <MAJOR.MINOR.PATCH>
   Write the version into the 5 manifest files: package.json,
   .claude-plugin/plugin.json, .claude-plugin/marketplace.json,
-  .cursor-plugin/plugin.json, gemini-extension.json; and into the launcher
+  .cursor-plugin/plugin.json, gemini-extension.json; into the launcher
   stamp, the first "# doc-search launcher vX.Y.Z" line in the first 5 lines
-  of scripts/search/launch.sh, when that file exists. RELEASE-NOTES.md is
-  the canonical version: check-version reads it, and it is never written.
-  All or nothing: every file found is read first, and a manifest that is
-  not valid JSON, or a launcher without a stamp, writes nothing (exit 1);
-  so does finding no manifest (run it from the repo root). Each file keeps
-  its mode.
+  of scripts/search/launch.sh; and into the search-rule stamp, the first
+  "<!-- doc-superpowers:search-rule vX.Y.Z -->" line of
+  references/search-rule.md; each stamp when its file exists.
+  RELEASE-NOTES.md is the canonical version: check-version reads it, and it
+  is never written. All or nothing: every file found is read first, and a
+  manifest that is not valid JSON, or a stamp file without its stamp,
+  writes nothing (exit 1); so does finding no manifest (run it from the
+  repo root). Each file keeps its mode.
 check-version|cmd_check_version|deps|tag warn remote=
   [--tag [--remote <name>] [--warn]]
-  Verify that every manifest, and the launcher stamp of
-  scripts/search/launch.sh when that file exists, carries RELEASE-NOTES.md's
-  version: its first release heading, a line "## vMAJOR.MINOR.PATCH …"
-  outside code fences (a pre-release suffix is refused, not skipped). Exits
-  1 on a mismatch, a manifest that is not valid JSON, a launcher without a
-  stamp, or no manifest found.
+  Verify that every manifest, and the stamps of scripts/search/launch.sh
+  and references/search-rule.md when those files exist, carry
+  RELEASE-NOTES.md's version: its first release heading, a line
+  "## vMAJOR.MINOR.PATCH …" outside code fences (a pre-release suffix is
+  refused, not skipped). Exits 1 on a mismatch, a manifest that is not
+  valid JSON, a stamp file without its stamp, or no manifest found.
   --tag also requires the tag v<version> on the remote (--remote, default
   origin), read with git ls-remote: a local tag is not enough, since a
   consumer's AI workflows clone the tag of the version they installed. The
@@ -5766,21 +5768,41 @@ VERSION_FILES=(
   "gemini-extension.json:.version"
 )
 
-# The launcher's version stamp: the first line "# doc-search launcher vX.Y.Z"
-# within the first 5 lines of scripts/search/launch.sh (its line 2). Not JSON,
-# so not in VERSION_FILES: bump-version rewrites it with sed, check-version
-# reads it with grep. A tree without the launcher (a project that vendors
-# doc-tools.sh) has no stamp to keep.
+# Version stamps outside the manifests, one "<file>|<name>|<form>|<lines>"
+# each: the stamp is the first line of <file> that is <form> with a version
+# in place of X.Y.Z, within its first <lines> lines (0: anywhere in it). Not
+# JSON, so not in VERSION_FILES: bump-version rewrites the line with sed,
+# check-version reads it with grep. A tree without the file (a project that
+# vendors doc-tools.sh) has no stamp to keep.
+#   - The launcher's: line 2 of scripts/search/launch.sh.
+#   - The search rule's: the opening marker of the block a project copies from
+#     references/search-rule.md into AGENTS.md or CLAUDE.md (install.sh status
+#     --search-gate shows a copy's version but compares only its body).
+# A <form> holds no character special to grep -E or to sed's s|…|…|.
 LAUNCHER_STAMP_FILE="scripts/search/launch.sh"
+SEARCH_RULE_STAMP_FILE="references/search-rule.md"
+STAMP_FILES=(
+  "$LAUNCHER_STAMP_FILE|launcher stamp|# doc-search launcher vX.Y.Z|5"
+  "$SEARCH_RULE_STAMP_FILE|search-rule stamp|<!-- doc-superpowers:search-rule vX.Y.Z -->|0"
+)
 
-# _launcher_stamp <file>: prints "<line number> <version>" for its stamp;
-# returns 1 when the first 5 lines hold none.
-_launcher_stamp() {
-  local hit line
-  hit=$(head -n 5 "$1" 2>/dev/null | grep -nE '^# doc-search launcher v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1) || true
+# _stamp <file> <form> <lines>: prints "<line number> <version>" for its
+# stamp; returns 1 when there is none.
+_stamp() {
+  local pre="${2%%X.Y.Z*}" suf="${2#*X.Y.Z}" hit line
+  hit=$({ if [ "$3" -gt 0 ]; then head -n "$3" "$1"; else cat "$1"; fi; } 2>/dev/null |
+    grep -nE "^${pre}[0-9]+\.[0-9]+\.[0-9]+${suf}\$" | head -n 1) || true
   [ -n "$hit" ] || return 1
   line="${hit#*:}"
-  printf '%s %s\n' "${hit%%:*}" "${line#'# doc-search launcher v'}"
+  line="${line#"$pre"}"
+  printf '%s %s\n' "${hit%%:*}" "${line%"$suf"}"
+}
+
+# _stamp_where <lines>: where the stamp is looked for, for a message:
+# " in its first <lines> lines", or nothing for 0.
+_stamp_where() {
+  [ "$1" -gt 0 ] && printf ' in its first %s lines' "$1"
+  return 0
 }
 
 _no_manifest_error() {
@@ -5838,24 +5860,31 @@ cmd_bump_version() {
     exit 1
   fi
 
-  # The launcher stamp, rendered the same way before anything is replaced.
-  local stamp stamp_line stamp_current="" stamp_what=skip stamp_tmp=""
-  if [ -f "$LAUNCHER_STAMP_FILE" ]; then
-    if ! stamp=$(_launcher_stamp "$LAUNCHER_STAMP_FILE"); then
-      echo "ERROR: $LAUNCHER_STAMP_FILE has no launcher stamp (a line \"# doc-search launcher vX.Y.Z\" in its first 5 lines); nothing was written." >&2
-      exit 1
+  # The stamps, rendered the same way before anything is replaced.
+  local name form lines stamp stamp_line
+  local stamp_what=() stamp_tmps=() stamp_currents=()
+  i=0
+  for entry in "${STAMP_FILES[@]}"; do
+    IFS='|' read -r file name form lines <<<"$entry"
+    stamp_what[$i]=skip stamp_tmps[$i]="" stamp_currents[$i]=""
+    if [ -f "$file" ]; then
+      if ! stamp=$(_stamp "$file" "$form" "$lines"); then
+        echo "ERROR: $file has no $name (a line \"$form\"$(_stamp_where "$lines")); nothing was written." >&2
+        exit 1
+      fi
+      stamp_line="${stamp%% *}"
+      stamp_currents[$i]="${stamp#* }"
+      if [ "${stamp_currents[$i]}" = "$new_version" ]; then
+        stamp_what[$i]=ok
+      else
+        _tmp_beside "$file"
+        sed "${stamp_line}s|.*|${form/X.Y.Z/$new_version}|" "$file" > "$_TMP" ||
+          _die "cannot render the stamp of $file; nothing was written."
+        stamp_what[$i]=bump stamp_tmps[$i]="$_TMP"
+      fi
     fi
-    stamp_line="${stamp%% *}"
-    stamp_current="${stamp#* }"
-    if [ "$stamp_current" = "$new_version" ]; then
-      stamp_what=ok
-    else
-      _tmp_beside "$LAUNCHER_STAMP_FILE"
-      sed "${stamp_line}s/.*/# doc-search launcher v${new_version}/" "$LAUNCHER_STAMP_FILE" > "$_TMP" ||
-        _die "cannot render the stamp of $LAUNCHER_STAMP_FILE; nothing was written."
-      stamp_what=bump stamp_tmp="$_TMP"
-    fi
-  fi
+    i=$((i + 1))
+  done
 
   local updated=0
   i=0
@@ -5872,15 +5901,20 @@ cmd_bump_version() {
     esac
     i=$((i + 1))
   done
-  case "$stamp_what" in
-    skip) echo "  skip: $LAUNCHER_STAMP_FILE (not found)" ;;
-    ok) echo "  ok:   $LAUNCHER_STAMP_FILE (already $new_version)" ;;
-    bump)
-      _replace_file "$stamp_tmp" "$LAUNCHER_STAMP_FILE"
-      echo "  bump: $LAUNCHER_STAMP_FILE ($stamp_current → $new_version)"
-      updated=$((updated + 1))
-      ;;
-  esac
+  i=0
+  for entry in "${STAMP_FILES[@]}"; do
+    file="${entry%%|*}"
+    case "${stamp_what[$i]}" in
+      skip) echo "  skip: $file (not found)" ;;
+      ok) echo "  ok:   $file (already $new_version)" ;;
+      bump)
+        _replace_file "${stamp_tmps[$i]}" "$file"
+        echo "  bump: $file (${stamp_currents[$i]} → $new_version)"
+        updated=$((updated + 1))
+        ;;
+    esac
+    i=$((i + 1))
+  done
 
   echo "Updated $updated file(s) to v$new_version"
 }
@@ -5923,18 +5957,21 @@ cmd_check_version() {
 
   [ "$checked" -gt 0 ] || _no_manifest_error check-version
 
-  if [ -f "$LAUNCHER_STAMP_FILE" ]; then
+  local name form lines
+  for entry in "${STAMP_FILES[@]}"; do
+    IFS='|' read -r file name form lines <<<"$entry"
+    [ -f "$file" ] || continue
     checked=$((checked + 1))
-    if ! actual=$(_launcher_stamp "$LAUNCHER_STAMP_FILE"); then
-      echo "  MISMATCH: $LAUNCHER_STAMP_FILE has no launcher stamp (expected \"# doc-search launcher v$canonical\" in its first 5 lines)"
+    if ! actual=$(_stamp "$file" "$form" "$lines"); then
+      echo "  MISMATCH: $file has no $name (expected \"${form/X.Y.Z/$canonical}\"$(_stamp_where "$lines"))"
       mismatched=$((mismatched + 1))
     elif [ "${actual#* }" != "$canonical" ]; then
-      echo "  MISMATCH: $LAUNCHER_STAMP_FILE has ${actual#* } (expected $canonical)"
+      echo "  MISMATCH: $file has ${actual#* } (expected $canonical)"
       mismatched=$((mismatched + 1))
     else
-      echo "  ok:       $LAUNCHER_STAMP_FILE"
+      echo "  ok:       $file"
     fi
-  fi
+  done
 
   local tag_fail=0
   [ "$tag" != 1 ] || _check_version_tag "v$canonical" "$remote" "$warn_only" || tag_fail=1

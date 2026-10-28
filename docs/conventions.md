@@ -60,13 +60,13 @@ Each scan pattern carries a planted sample it must match, so a pattern that stop
 
 Version consistency is managed via `doc-tools.sh`:
 
-- **`bump-version VERSION`** — updates the version string in all 5 manifest files and the launcher stamp simultaneously (all or nothing)
-- **`check-version`** — verifies that each manifest and the launcher stamp carry `RELEASE-NOTES.md`'s version (exit 1 on any mismatch, invalid JSON, a launcher without a stamp, or no manifest)
+- **`bump-version VERSION`** — updates the version string in all 5 manifest files and the two stamps simultaneously (all or nothing)
+- **`check-version`** — verifies that each manifest and both stamps carry `RELEASE-NOTES.md`'s version (exit 1 on any mismatch, invalid JSON, a stamp file without its stamp, or no manifest)
 - **`check-version --tag`** — also requires the tag `v<version>` on origin (`git ls-remote`; `--remote <name>`, `--warn` to only warn), on the release commit: the commit it points at (an annotated tag peeled) must have that version as its RELEASE-NOTES.md first release heading, so a tag left on the pre-bump commit fails (`MISPLACED`). A tag whose commit the clone does not hold (a shallow CI checkout past it) is a warning, not a failure. A release is tagged and the tag pushed before the release commit reaches `main`: `tests.yml` runs it on every push to `main`, because the AI workflow templates clone the plugin at `v<installed version>`
 
 Manifest files managed: `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.cursor-plugin/plugin.json`, `gemini-extension.json`.
 
-The launcher stamp is line 2 of `scripts/search/launch.sh`, `# doc-search launcher vX.Y.Z` (the first such line in the first 5 lines). It is not JSON, so `bump-version` rewrites it with `sed` rather than `jq`; a tree without the launcher skips it.
+The launcher stamp is line 2 of `scripts/search/launch.sh`, `# doc-search launcher vX.Y.Z` (the first such line in the first 5 lines). The search-rule stamp is the opening marker of the block in `references/search-rule.md`, `<!-- doc-superpowers:search-rule vX.Y.Z -->` (the first such line in the file). Neither is JSON, so `bump-version` rewrites them with `sed` rather than `jq`; a tree without the file skips its stamp.
 
 `RELEASE-NOTES.md` is not one of them. It is the canonical version source that `check-version` reads and compares the manifests against, and its `## vX.Y.Z` heading is written by the `release` action — never by `bump-version`.
 
