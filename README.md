@@ -244,6 +244,7 @@ Install opt-in hooks for automated freshness monitoring. `setup` (*Set up a repo
 
 # doc-search's MCP server (needs docs/search/config.json; never part of --all)
 /doc-superpowers hooks install --search        # .claude/doc-superpowers/search-mcp.sh + the .mcp.json entry (commit both)
+/doc-superpowers hooks install --search-gate   # its readiness gate: hooks in .claude/settings.json + .codex/hooks.json (commit both; gates where the config sets "required": true)
 
 # Claude-powered workflows are opt-in by name
 /doc-superpowers hooks install --ci --workflows=doc-pr-release,doc-review-pr
@@ -269,7 +270,7 @@ $DOC_TOOLS tools status                        # present? matches the plugin? wh
 $DOC_TOOLS tools uninstall                     # removes only files identical to the plugin's
 
 # Check what's installed (optionally one tier: --git / --claude / --ci, or --all; the opt-in
-# sets with --ledger / --ledger-claude / --search, each in its own section after the tiers);
+# sets with --ledger / --ledger-claude / --search / --search-gate, each in its own section after the tiers);
 # "⚠ … outdated: re-run install --git|--claude|--ledger|--ledger-claude|--search" marks another version's install
 /doc-superpowers hooks status
 
@@ -278,6 +279,7 @@ $DOC_TOOLS tools uninstall                     # removes only files identical to
 /doc-superpowers hooks uninstall --ci --workflows=doc-release  # remove ONE workflow
 /doc-superpowers hooks uninstall --ledger --ledger-claude      # the ledger sets (--all removes neither)
 /doc-superpowers hooks uninstall --search                      # doc-search's launcher and .mcp.json entry
+/doc-superpowers hooks uninstall --search-gate                 # its hook entries (--search removes neither)
 ```
 
 The installer works from anywhere in the repository (it acts on the top level; a linked worktree or submodule is its own top level) and puts git hooks where git runs them (`git rev-parse --git-path hooks`). It refuses, writing nothing, when `core.hooksPath` comes from your global/system git config, or when a file it would write — or a directory on the way — is a symbolic link. It owns only what it marks: a hook of yours is kept, with a marked POSIX block after its `#!` line that runs ours (skipped if the hook is not a shell script); its `.gitattributes` and `info/exclude` entries are marked blocks; in `.claude/settings.local.json` it touches only the entries that run its own scripts. The work ledger's sets mark theirs `# ledger-superpowers:begin` … `:end` (a hook the set created holds only `#!/bin/sh` and that block), and neither set's markers match the other's. `uninstall` puts all of that back as it was. The Claude tier is **per-user**: its settings file and scripts are excluded from git through `.git/info/exclude`, and its commands run `"$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/…`.

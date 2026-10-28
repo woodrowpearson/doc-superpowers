@@ -22,6 +22,7 @@ The main skill definition is `skills/doc-superpowers/SKILL.md`. Activate it when
 | `hooks status` | Show installed hooks |
 | `hooks uninstall` | Remove installed hooks |
 | `hooks install --search` | Register doc-search, the opt-in MCP server over docs and code (`docs/search/config.json`, `references/search.md`; the server is the `search/` uv package) |
+| `hooks install --search-gate` | Register doc-search's readiness gate as Claude Code and Codex hooks (`.claude/settings.json`, `.codex/hooks.json`; needs the `--search` launcher; `references/hooks.md`) |
 | `release` | Draft release notes |
 | `spec-generate` | Generate formal specs from design doc |
 | `spec-inject` | Inject spec tasks or track drift |

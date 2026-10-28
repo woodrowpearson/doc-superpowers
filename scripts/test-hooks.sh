@@ -6480,6 +6480,383 @@ test_search_status_and_json() {
   teardown
 }
 
+# --- doc-search: the opt-in --search-gate set ---------------------------------
+#
+# install --search-gate merges three hook entries, each running the committed
+# launcher's gate, into .claude/settings.json (Claude Code) and .codex/hooks.json
+# (Codex), both committed. Per event an entry is identified by its command.
+
+# shellcheck disable=SC2016  # the command is literal text
+SGT_CMD_PREFIX='sh "$(git rev-parse --show-toplevel)/.claude/doc-superpowers/search-mcp.sh" gate'
+SGT_CLAUDE=".claude/settings.json"
+SGT_CODEX=".codex/hooks.json"
+
+# sgt_want <claude|codex>: the hooks object install --search-gate writes, compact.
+sgt_want() {
+  jq -cn --arg p "$SGT_CMD_PREFIX" --arg who "$1" '
+    def h($e; $t): [{type: "command", command: "\($p) \($e)", timeout: $t}];
+    {SessionStart: [{matcher: "startup|resume|clear|compact", hooks: h("session-start"; 45)}],
+     UserPromptSubmit: [{hooks: h("prompt"; 45)}],
+     PreToolUse: [(if $who == "claude" then {matcher: "*"} else {} end) + {hooks: h("tool"; 10)}]}'
+}
+
+# sgt_fixture [config]: srh_fixture, then install --search (the launcher the
+# gate needs), its files left out of the commits.
+sgt_fixture() {
+  srh_fixture "$@"
+  inst install --search
+  printf '.claude/doc-superpowers/\n.mcp.json\n' >> .git/info/exclude
+}
+
+# sgt_jq <file> <filter>: a compact value of <file> ("ERR" when unreadable).
+sgt_jq() {
+  jq -c "$2" "$1" 2>/dev/null || echo "ERR"
+}
+
+test_search_gate_preflight() {
+  echo "test: search-gate: install --search-gate needs docs/search/config.json and the --search launcher (exit 1, the message, nothing written, with another set too); install --search --search-gate installs both; uninstall needs neither"
+  setup
+  local before
+  before=$(_tree_state)
+  inst install --search-gate
+  assert_eq "1" "$IRC" "no config: exit 1"
+  assert_eq "ERROR: install --search-gate needs docs/search/config.json, which this repository does not have: doc-search is not enabled here (doc-search init sets it up). Nothing was changed." \
+    "$IOUT" "…the message, whole"
+  assert_eq "$before" "$(_tree_state)" "…nothing written"
+  inst uninstall --search-gate
+  assert_eq "0" "$IRC" "uninstall --search-gate without the config: exit 0"
+  assert_contains "$IOUT" "nothing to uninstall" "…nothing to uninstall"
+  teardown
+  srh_fixture '{"required": true}'
+  before=$(_tree_state)
+  inst install --search-gate
+  assert_eq "1" "$IRC" "config, no launcher: exit 1"
+  assert_eq "ERROR: install --search-gate needs the doc-search launcher .claude/doc-superpowers/search-mcp.sh, which the hooks run: install --search first (or with it). Nothing was changed." \
+    "$IOUT" "…the message, whole"
+  assert_eq "$before" "$(_tree_state)" "…nothing written"
+  inst install --git --search-gate
+  assert_eq "1" "$IRC" "install --git --search-gate, no launcher: exit 1"
+  assert_eq "$before" "$(_tree_state)" "…the git tier not written either (every check runs first)"
+  inst install --search --search-gate
+  assert_eq "0" "$IRC" "install --search --search-gate: exit 0"
+  assert_file_exists "$SRH_LAUNCHER" "…the launcher"
+  assert_eq "$(sgt_want claude)" "$(sgt_jq "$SGT_CLAUDE" .hooks)" "…and the Claude Code entries"
+  assert_eq "$(sgt_want codex)" "$(sgt_jq "$SGT_CODEX" .hooks)" "…and the Codex entries"
+  inst install --search-gate --json
+  assert_eq "2" "$IRC" "install --search-gate --json: exit 2 (--json is status's)"
+  teardown
+}
+
+test_search_gate_install_writes_entries() {
+  echo "test: search-gate: install --search-gate creates .claude/settings.json and .codex/hooks.json with the three entries; into existing files it keeps every other key, entry and handler, and appends its own per event"
+  sgt_fixture
+  inst install --search-gate
+  assert_eq "0" "$IRC" "install --search-gate (no files): exit 0"
+  assert_eq "{\"hooks\":$(sgt_want claude)}" "$(sgt_jq "$SGT_CLAUDE" .)" ".claude/settings.json: the three entries, nothing else"
+  assert_eq "{\"hooks\":$(sgt_want codex)}" "$(sgt_jq "$SGT_CODEX" .)" ".codex/hooks.json: the same, PreToolUse without a matcher"
+  assert_eq "?? .claude/settings.json
+?? .codex/hooks.json" "$(git status --porcelain -uall)" "…those two files are all it wrote"
+  assert_eq "$(cat "$SGT_CLAUDE")" "$(jq . "$SGT_CLAUDE")" "…pretty-printed as jq prints it"
+  assert_not_contains "$(cat "$SGT_CLAUDE" "$SGT_CODEX")" "$TEST_DIR" "…no machine path in either"
+  rm -f "$SGT_CLAUDE" "$SGT_CODEX"
+  # Existing files: other keys, events, groups and handlers survive, in their order.
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls)"]},"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"echo hi"}]}],"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"mine.sh","timeout":5}]}],"Stop":[{"hooks":[{"type":"command","command":"stop.sh"}]}]},"model":"x"}' | jq . > "$SGT_CLAUDE"
+  printf '%s\n' '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"p.sh"}]}]},"other":1}' > "$SGT_CODEX"
+  inst install --search-gate
+  assert_eq "0" "$IRC" "install into existing files: exit 0"
+  assert_eq '{"allow":["Bash(ls)"]}' "$(sgt_jq "$SGT_CLAUDE" .permissions)" "another key kept"
+  assert_eq '"x"' "$(sgt_jq "$SGT_CLAUDE" .model)" "…and another"
+  assert_eq '["permissions","hooks","model"]' "$(sgt_jq "$SGT_CLAUDE" 'keys_unsorted')" "…in their order"
+  assert_eq '[{"hooks":[{"type":"command","command":"stop.sh"}]}]' "$(sgt_jq "$SGT_CLAUDE" .hooks.Stop)" "another event untouched"
+  assert_eq '{"matcher":"startup","hooks":[{"type":"command","command":"echo hi"}]}' "$(sgt_jq "$SGT_CLAUDE" '.hooks.SessionStart[0]')" "another SessionStart group first, untouched"
+  assert_eq "$(jq -c '.SessionStart[0]' <<<"$(sgt_want claude)")" "$(sgt_jq "$SGT_CLAUDE" '.hooks.SessionStart[1]')" "…ours after it"
+  assert_eq '{"matcher":"Bash","hooks":[{"type":"command","command":"mine.sh","timeout":5}]}' "$(sgt_jq "$SGT_CLAUDE" '.hooks.PreToolUse[0]')" "another PreToolUse group first"
+  assert_eq "$(jq -c '.PreToolUse[0]' <<<"$(sgt_want claude)")" "$(sgt_jq "$SGT_CLAUDE" '.hooks.PreToolUse[1]')" "…ours after it"
+  assert_eq "$(jq -c '.UserPromptSubmit' <<<"$(sgt_want claude)")" "$(sgt_jq "$SGT_CLAUDE" '.hooks.UserPromptSubmit')" "an event it lacked: added"
+  assert_eq '[{"hooks":[{"type":"command","command":"p.sh"}]},'"$(jq -c '.UserPromptSubmit[0]' <<<"$(sgt_want codex)")"']' "$(sgt_jq "$SGT_CODEX" '.hooks.UserPromptSubmit')" "Codex: another UserPromptSubmit entry kept, ours after it"
+  assert_eq '1' "$(sgt_jq "$SGT_CODEX" .other)" "…and another key"
+  # An entry of ours in another shape (an edited timeout, a handler beside another's): set right.
+  jq '.hooks.PreToolUse[1].hooks[0].timeout = 99 | .hooks.SessionStart[1].hooks += [{"type":"command","command":"x.sh"}]' "$SGT_CLAUDE" > s.tmp && mv s.tmp "$SGT_CLAUDE"
+  inst install --search-gate
+  assert_eq "$(jq -c '.PreToolUse[0]' <<<"$(sgt_want claude)")" "$(sgt_jq "$SGT_CLAUDE" '.hooks.PreToolUse[1]')" "an edited timeout: restored"
+  assert_eq "2" "$(sgt_jq "$SGT_CLAUDE" '.hooks.PreToolUse | length')" "…not duplicated"
+  assert_eq '[{"matcher":"startup","hooks":[{"type":"command","command":"echo hi"}]},{"matcher":"startup|resume|clear|compact","hooks":[{"type":"command","command":"x.sh"}]},'"$(jq -c '.SessionStart[0]' <<<"$(sgt_want claude)")"']' \
+    "$(sgt_jq "$SGT_CLAUDE" '.hooks.SessionStart')" "a group holding ours and another handler: that handler kept in its group, ours its own group again"
+  teardown
+}
+
+test_search_gate_install_idempotent() {
+  echo "test: search-gate: install --search-gate twice changes nothing (byte for byte, mtimes too); a hand-formatted file already holding the entries is never rewritten"
+  sgt_fixture
+  local a m1 m2 c
+  inst install --search-gate
+  a=$(_tree_state)
+  m1=$(stat -c %Y "$SGT_CLAUDE" 2>/dev/null || stat -f %m "$SGT_CLAUDE")
+  sleep 1
+  inst install --search-gate
+  assert_eq "0" "$IRC" "second install: exit 0"
+  m2=$(stat -c %Y "$SGT_CLAUDE" 2>/dev/null || stat -f %m "$SGT_CLAUDE")
+  assert_eq "$a" "$(_tree_state)" "the tree is byte for byte the same"
+  assert_eq "$m1" "$m2" "….claude/settings.json was not even rewritten"
+  # Hand-formatted, keys reordered, others' entries around ours: untouched.
+  jq -cn --argjson w "$(sgt_want claude)" '{hooks: {Stop: [{hooks: [{command: "s.sh", type: "command"}]}],
+      PreToolUse: ([{matcher: "Bash", hooks: [{type: "command", command: "b.sh"}]}] + $w.PreToolUse),
+      SessionStart: $w.SessionStart, UserPromptSubmit: $w.UserPromptSubmit}, env: {A: "1"}}' > "$SGT_CLAUDE"
+  printf '\n\n' >> "$SGT_CLAUDE"
+  jq -n --argjson w "$(sgt_want codex)" '.hooks = $w' | sed 's/^/  /' > "$SGT_CODEX"
+  c=$(cksum < "$SGT_CLAUDE")$(cksum < "$SGT_CODEX")
+  inst install --search-gate
+  assert_eq "0" "$IRC" "install over files already holding the entries: exit 0"
+  assert_eq "$c" "$(cksum < "$SGT_CLAUDE")$(cksum < "$SGT_CODEX")" "…both untouched, byte for byte"
+  teardown
+}
+
+test_search_gate_uninstall_removes_only_ours() {
+  echo "test: search-gate: uninstall --search-gate removes its three entries and nothing else; a file left {} or {\"hooks\":{}} is removed, and .codex/ when it is then empty"
+  sgt_fixture
+  local before
+  before=$(_tree_state)
+  inst install --search-gate
+  inst uninstall --search-gate
+  assert_eq "0" "$IRC" "uninstall --search-gate: exit 0"
+  assert_contains "$IOUT" "doc-search gate: removed" "…saying so"
+  assert_eq "$before" "$(_tree_state)" "…the tree as before the install (both files gone, .codex/ gone)"
+  # Others' entries and keys, in both files.
+  printf '%s\n' '{"permissions":{"allow":["x"]},"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"mine.sh"}]}],"Stop":[{"hooks":[{"type":"command","command":"stop.sh"}]}]}}' | jq . > "$SGT_CLAUDE"
+  mkdir -p .codex
+  printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"s.sh"}]}]}}' | jq . > "$SGT_CODEX"
+  printf 'x = 1\n' > .codex/config.toml
+  before=$(_tree_state)
+  inst install --search-gate
+  inst uninstall --search-gate
+  assert_eq "0" "$IRC" "uninstall beside others' entries: exit 0"
+  assert_eq "$before" "$(_tree_state)" "…every other entry, key and file exactly as before (jq's formatting)"
+  # A handler of ours sharing a group with another's: only ours goes.
+  jq --argjson w "$(sgt_want claude)" '.hooks.PreToolUse[0].hooks += $w.PreToolUse[0].hooks' "$SGT_CLAUDE" > s.tmp && mv s.tmp "$SGT_CLAUDE"
+  inst uninstall --search-gate
+  assert_eq '[{"matcher":"Bash","hooks":[{"type":"command","command":"mine.sh"}]}]' "$(sgt_jq "$SGT_CLAUDE" .hooks.PreToolUse)" "a shared group: our handler removed, the group kept"
+  # Left {"hooks":{}} or {}: removed.
+  jq -n --argjson w "$(sgt_want claude)" '{hooks: $w}' > "$SGT_CLAUDE"
+  rm -f "$SGT_CODEX" .codex/config.toml
+  jq -n --argjson w "$(sgt_want codex)" '{hooks: ($w + {Stop: []})}' > "$SGT_CODEX"
+  inst uninstall --search-gate
+  assert_file_not_exists "$SGT_CLAUDE" "only ours: .claude/settings.json removed"
+  assert_eq '{"hooks":{"Stop":[]}}' "$(sgt_jq "$SGT_CODEX" .)" "an event array of someone else's, empty: kept, so the file is kept"
+  printf '{"hooks":{}}\n' > "$SGT_CODEX"
+  jq -n --argjson w "$(sgt_want claude)" '{hooks: $w}' > "$SGT_CLAUDE"
+  inst uninstall --search-gate
+  assert_file_not_exists "$SGT_CLAUDE" "removed again"
+  assert_eq '{"hooks":{}}' "$(sgt_jq "$SGT_CODEX" .)" "a file of {\"hooks\":{}} holding nothing of ours: not touched"
+  rm -f "$SGT_CODEX"
+  # Twice, and with nothing installed.
+  inst uninstall --search-gate
+  assert_eq "0" "$IRC" "uninstall again: exit 0"
+  assert_contains "$IOUT" "doc-search gate: nothing to uninstall" "…saying so"
+  # A gate command under another event, or another gate event under ours, is not ours.
+  printf '%s\n' "{\"hooks\":{\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":$(jq -n --arg c "$SGT_CMD_PREFIX tool" '$c')}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":$(jq -n --arg c "$SGT_CMD_PREFIX prompt" '$c')}]}]}}" > "$SGT_CLAUDE"
+  before=$(cksum < "$SGT_CLAUDE")
+  inst uninstall --search-gate
+  assert_eq "$before" "$(cksum < "$SGT_CLAUDE")" "per event, an entry is ours by its command: others' uses are kept"
+  teardown
+}
+
+test_search_gate_refuses_unreadable_files() {
+  echo "test: search-gate: a hook file that is not one JSON object, or whose hooks (or an event of it) has the wrong type, is refused, exit 1, nothing changed — install and uninstall alike"
+  sgt_fixture
+  local before c f
+  for f in "$SGT_CLAUDE" "$SGT_CODEX"; do
+    mkdir -p "${f%/*}"
+    for c in '[]' 'null' '3' '{} {}' 'not json' '' '{"hooks":[]}' '{"hooks":null}' '{"hooks":{"PreToolUse":{}}}'; do
+      rm -f "$SGT_CLAUDE" "$SGT_CODEX"
+      printf '%s' "$c" > "$f"
+      before=$(_tree_state)
+      inst install --search-gate
+      assert_eq "1" "$IRC" "install, $f '$c': exit 1"
+      assert_contains "$IOUT" "$f" "…naming it"
+      assert_contains "$IOUT" "Nothing was changed" "…saying nothing was"
+      assert_eq "$before" "$(_tree_state)" "…the other file not written either"
+      inst uninstall --search-gate
+      assert_eq "1" "$IRC" "uninstall, $f '$c': exit 1"
+      assert_eq "$before" "$(_tree_state)" "…nothing changed"
+    done
+  done
+  teardown
+}
+
+test_search_gate_never_writes_through_links() {
+  echo "test: search-gate: a symbolic link at .claude/settings.json, .codex or .codex/hooks.json is refused (exit 1, nothing written, nothing through it) — install and uninstall"
+  sgt_fixture
+  local before elsewhere
+  elsewhere=$(harness_mktemp_d sgtelse)
+  printf '{}\n' > "$elsewhere/s.json"
+  ln -s "$elsewhere/s.json" "$SGT_CLAUDE"
+  before=$(_tree_state)
+  inst install --search-gate
+  assert_eq "1" "$IRC" ".claude/settings.json a link: install exit 1"
+  assert_contains "$IOUT" "symbolic link" "…named as one"
+  assert_eq "$before" "$(_tree_state)" "…nothing written (no .codex/hooks.json either)"
+  assert_eq "{}" "$(cat "$elsewhere/s.json")" "…nothing through it"
+  inst uninstall --search-gate
+  assert_eq "1" "$IRC" "…uninstall exit 1"
+  rm "$SGT_CLAUDE"
+  ln -s "$elsewhere" .codex
+  inst install --search-gate
+  assert_eq "1" "$IRC" ".codex a link: install exit 1"
+  assert_file_not_exists "$SGT_CLAUDE" "….claude/settings.json not written first"
+  assert_eq "s.json" "$(ls -A "$elsewhere")" "…nothing through it"
+  rm .codex
+  mkdir .codex
+  ln -s "$elsewhere/s.json" "$SGT_CODEX"
+  inst install --search-gate
+  assert_eq "1" "$IRC" ".codex/hooks.json a link: install exit 1"
+  assert_eq "{}" "$(cat "$elsewhere/s.json")" "…nothing through it"
+  inst uninstall --search-gate
+  assert_eq "1" "$IRC" "…uninstall exit 1"
+  teardown
+}
+
+test_search_gate_not_in_all() {
+  echo "test: search-gate: neither --all nor --search includes the --search-gate set (install adds none of it, uninstall keeps it); status --json reports it only when named"
+  sgt_fixture
+  inst install --all
+  assert_file_not_exists "$SGT_CLAUDE" "install --all: no .claude/settings.json"
+  assert_file_not_exists "$SGT_CODEX" "…no .codex/hooks.json"
+  inst install --search
+  assert_file_not_exists "$SGT_CODEX" "install --search: none of it either"
+  inst install --search-gate
+  inst uninstall --all
+  assert_file_exists "$SGT_CLAUDE" "uninstall --all keeps it"
+  inst uninstall --search
+  assert_file_exists "$SGT_CODEX" "uninstall --search keeps it"
+  inst status --json
+  assert_eq "null" "$(srh_json '.tiers.search_gate')" "status --json: not in it"
+  inst status --search --json
+  assert_eq "search" "$(srh_json '.tiers | keys | join(",")')" "status --search --json: only the --search set"
+  inst status --search-gate --json
+  assert_eq "search_gate" "$(srh_json '.tiers | keys | join(",")')" "status --search-gate --json: it alone"
+  inst status --all
+  assert_not_contains "$IOUT" "doc-search gate" "status --all: no gate section"
+  inst status
+  assert_contains "$IOUT" "doc-search gate (the opt-in --search-gate set):" "plain status: its section"
+  teardown
+}
+
+test_search_gate_status_and_json() {
+  echo "test: search-gate: status reports each file installed / partial / absent and the search-rule block (absent without the plugin's template), as text and as .tiers.search_gate"
+  setup
+  inst status --search-gate
+  assert_eq "0" "$IRC" "status --search-gate: exit 0"
+  assert_contains "$IOUT" "doc-search gate (the opt-in --search-gate set):" "its header"
+  assert_contains "$IOUT" "not enabled (no docs/search/config.json); nothing of this set is installed" "no config, nothing installed: one plain line"
+  assert_not_contains "$IOUT" "⚠" "…no warning"
+  teardown
+  sgt_fixture
+  inst status --search-gate
+  assert_contains "$IOUT" "✗ .claude/settings.json: not registered (install --search-gate)" "nothing installed: Claude Code"
+  assert_contains "$IOUT" "✗ .codex/hooks.json: not registered (install --search-gate)" "…Codex"
+  assert_contains "$IOUT" "search rule: absent" "…the rule"
+  inst status --search-gate --json
+  assert_eq "absent absent absent" "$(srh_json '.tiers.search_gate | "\(.claude_settings) \(.codex_hooks) \(.search_rule)"')" "JSON: all absent"
+  assert_eq "doc-superpowers-hooks-status/1" "$(srh_json .schema)" "…the schema unchanged"
+  inst install --search-gate
+  inst status --search-gate
+  assert_contains "$IOUT" "✓ .claude/settings.json: installed (SessionStart, UserPromptSubmit, PreToolUse)" "installed: Claude Code"
+  assert_contains "$IOUT" "✓ .codex/hooks.json: installed (SessionStart, UserPromptSubmit, PreToolUse; Codex runs them once the project is trusted and they are approved in /hooks)" "…Codex, with its two conditions"
+  assert_not_contains "$IOUT" "⚠" "…no warning"
+  inst status --search-gate --json
+  assert_eq "installed installed absent" "$(srh_json '.tiers.search_gate | "\(.claude_settings) \(.codex_hooks) \(.search_rule)"')" "JSON: installed"
+  inst status --git --search --search-gate --json
+  assert_eq "git,search,search_gate" "$(srh_json '.tiers | keys | join(",")')" "--git --search --search-gate --json: the three named"
+  # Partial: one event gone, or another timeout.
+  jq 'del(.hooks.UserPromptSubmit)' "$SGT_CLAUDE" > s.tmp && mv s.tmp "$SGT_CLAUDE"
+  jq '.hooks.PreToolUse[0].hooks[0].timeout = 3' "$SGT_CODEX" > s.tmp && mv s.tmp "$SGT_CODEX"
+  inst status --search-gate
+  assert_contains "$IOUT" "⚠ .claude/settings.json: partial: missing or changed: UserPromptSubmit (re-run install --search-gate)" "an event removed: partial, naming it"
+  assert_contains "$IOUT" "⚠ .codex/hooks.json: partial: missing or changed: PreToolUse (re-run install --search-gate)" "a timeout changed: partial"
+  inst status --search-gate --json
+  assert_eq "partial partial" "$(srh_json '.tiers.search_gate | "\(.claude_settings) \(.codex_hooks)"')" "JSON: partial"
+  # Unreadable: absent, with a warning.
+  printf '[1]' > "$SGT_CODEX"
+  inst status --search-gate
+  assert_eq "0" "$IRC" "an unreadable file: status still exits 0"
+  assert_contains "$IOUT" "⚠ .codex/hooks.json cannot be read as hook settings" "…warned"
+  inst status --search-gate --json
+  assert_eq "absent" "$(srh_json .tiers.search_gate.codex_hooks)" "JSON: absent"
+  rm -f "$SGT_CODEX"
+  inst install --search-gate
+  # The launcher gone, or the config.
+  rm -f "$SRH_LAUNCHER"
+  inst status --search-gate
+  assert_contains "$IOUT" "⚠ the hooks run .claude/doc-superpowers/search-mcp.sh, which is not installed (install --search)" "registered without the launcher: ⚠"
+  inst install --search
+  rm -f docs/search/config.json
+  inst status --search-gate
+  assert_contains "$IOUT" "⚠ docs/search/config.json is missing: doc-search is not enabled here, so the hooks allow everything" "installed without the config: ⚠"
+  inst status --search-gate --json
+  assert_eq "installed" "$(srh_json .tiers.search_gate.claude_settings)" "…and JSON still reports the files"
+  # A marked rule block, but the plugin ships no template yet: absent.
+  printf '# Agents\n<!-- doc-superpowers:search-rule v1.2.3 -->\nrule\n<!-- /doc-superpowers:search-rule -->\n' > AGENTS.md
+  inst status --search-gate --json
+  assert_eq "absent" "$(srh_json .tiers.search_gate.search_rule)" "a marked block, no references/search-rule.md in the plugin: absent"
+  teardown
+}
+
+test_search_gate_rule_drift() {
+  echo "test: search-gate: with the plugin's references/search-rule.md, status compares the marked block in AGENTS.md or CLAUDE.md with it: current, outdated, absent"
+  sgt_fixture
+  local plug ish
+  plug=$(harness_mktemp_d sgtplug)
+  plugin_copy "$plug"
+  ish="$plug/scripts/hooks/install.sh"
+  mkdir -p "$plug/references"
+  printf '# The rule\n\nCopy the block below.\n\n<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\nUse doc-search.\n<!-- /doc-superpowers:search-rule -->\n' > "$plug/references/search-rule.md"
+  inst --from "$ish" status --search-gate --json
+  assert_eq "absent" "$(srh_json .tiers.search_gate.search_rule)" "no AGENTS.md or CLAUDE.md block: absent"
+  printf '# Agents\n\nintro\n<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\nUse doc-search.\n<!-- /doc-superpowers:search-rule -->\nafter\n' > AGENTS.md
+  inst --from "$ish" status --search-gate --json
+  assert_eq "current" "$(srh_json .tiers.search_gate.search_rule)" "AGENTS.md's block is the template's: current"
+  inst --from "$ish" status --search-gate
+  assert_contains "$IOUT" "✓ search rule: current (AGENTS.md)" "…as text"
+  printf '<!-- doc-superpowers:search-rule v9.9.8 -->\n## Searching\nUse doc-search.\n<!-- /doc-superpowers:search-rule -->\n' > CLAUDE.md
+  inst --from "$ish" status --search-gate --json
+  assert_eq "outdated" "$(srh_json .tiers.search_gate.search_rule)" "CLAUDE.md's block another version: outdated (the worse of the two)"
+  inst --from "$ish" status --search-gate
+  assert_contains "$IOUT" "⚠ search rule: outdated (CLAUDE.md): differs from the plugin's references/search-rule.md" "…as text, naming the file"
+  rm -f CLAUDE.md
+  printf '<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\nUse rg.\n<!-- /doc-superpowers:search-rule -->\n' > AGENTS.md
+  inst --from "$ish" status --search-gate --json
+  assert_eq "outdated" "$(srh_json .tiers.search_gate.search_rule)" "an edited body: outdated"
+  printf '<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\nUse doc-search.\n' > AGENTS.md
+  inst --from "$ish" status --search-gate --json
+  assert_eq "outdated" "$(srh_json .tiers.search_gate.search_rule)" "a block with no end marker: outdated"
+  teardown
+}
+
+test_search_gate_hooks_run_the_launcher() {
+  echo "test: search-gate: the registered PreToolUse command, run as a client runs it (sh -c, from a subdirectory, the event on stdin), reaches the committed launcher: with a not-ready verdict it denies rg and allows the fix command"
+  sgt_fixture '{"required": true}'
+  local envroot cmd f ev vf
+  envroot=$(harness_mktemp_d sgtroot)
+  srl_root "$envroot"
+  inst install --search-gate
+  vf=$(git rev-parse --git-path doc-search-gate)
+  printf 'not-ready\nindex absent; fix: sh .claude/doc-superpowers/search-mcp.sh index\n' > "$vf"
+  mkdir -p sub/dir
+  ev="$SRG_TMP/sgt-ev.json"
+  for f in "$SGT_CLAUDE" "$SGT_CODEX"; do
+    cmd=$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$f")
+    srg_event "$ev" Bash "rg foo"
+    RUN_RC=0
+    RUN_OUT=$(cd sub/dir && env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= PATH="$SRL_BIN:$REAL_PATH" sh -c "$cmd" < "$ev" 2>&1) || RUN_RC=$?
+    assert_eq "0" "$RUN_RC" "$f: exit 0"
+    assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "$f: rg denied"
+    srg_event "$ev" Bash "sh .claude/doc-superpowers/search-mcp.sh index"
+    RUN_OUT=$(cd sub/dir && env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= PATH="$SRL_BIN:$REAL_PATH" sh -c "$cmd" < "$ev" 2>&1) || true
+    assert_eq "" "$RUN_OUT" "$f: the fix command allowed (silent)"
+  done
+  teardown
+}
+
 test_launcher_client_cwd() {
   echo "test: launcher: serve exports the parent process's cwd as DOC_SEARCH_CLIENT_CWD (the client's worktree becomes the server's default); a value already set is kept; other verbs do not set it"
   setup
@@ -7077,6 +7454,19 @@ test_search_never_writes_through_links
 test_search_not_in_all
 test_search_uninstall_removes_only_ours
 test_search_status_and_json
+
+echo ""
+echo "=== doc-search: the opt-in --search-gate set ==="
+test_search_gate_preflight
+test_search_gate_install_writes_entries
+test_search_gate_install_idempotent
+test_search_gate_uninstall_removes_only_ours
+test_search_gate_refuses_unreadable_files
+test_search_gate_never_writes_through_links
+test_search_gate_not_in_all
+test_search_gate_status_and_json
+test_search_gate_rule_drift
+test_search_gate_hooks_run_the_launcher
 
 # --- Maintainer tooling (#27): scripts/check-ci.sh and the opt-in pre-push ---
 #
