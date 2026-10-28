@@ -6563,31 +6563,34 @@ Fixes #12"
 }
 
 test_lg_ifl_plan_claims_follow_links() {
-  echo "test: a plan claims what it links (references/ledger.md, Merge-time upkeep → plan-link) — a Related work row marked include, a frontmatter value or list element (a key in any case, or an item path, ./ dropped); never an excluded row, another cell, the body's key words, a plan with no table, or an unterminated frontmatter"
+  echo "test: a plan claims what it links (references/ledger.md, Merge-time upkeep → plan-link) — a Related work row marked include, a frontmatter value or list element (a key in any case, or an item path, ./ dropped); never an excluded row, an unmarked row, another cell, a table in a fenced block, the body's key words, a plan with no table, or an unterminated frontmatter"
   lg_ifl_fixture
   git checkout -q -b linked main
   # shellcheck disable=SC2016  # literal backticks: a code span in a cell
-  printf -- '---\nissue: ./docs/issues/a.md\nitems: [CORE-1]\nnotes:\n  - not-a-key-7\n---\n# Plan\n\nThis plan mentions app-5 in prose.\n\n## Related work\n\n| Item | Why related | Mark |\n|---|---|---|\n| `app-3` | lists src/order/total.js; see app-4 | **include** |\n| app-2 | lists src/order/total.js | exclude: shares only total.js |\n| core-2 | lists server/create.js | Exclude |\n\n## Chunk 1\n\nTouches app-2 and core-2 again.\n' > docs/plans/linked.md
+  printf -- '---\nissue: ./docs/issues/a.md\nitems: [CORE-1]\nnotes:\n  - not-a-key-7\n---\n# Plan\n\nThis plan mentions app-5 in prose.\n\n```md\n## Related work\n\n| Item | Why related | Mark |\n|---|---|---|\n| app-7 | an example, fenced | include |\n```\n\n## Related work\n\n| Item | Why related | Mark |\n|---|---|---|\n| `app-3` | lists src/order/total.js; see app-4 | **include** |\n| app-2 | lists src/order/total.js | exclude: shares only total.js |\n| core-2 | lists server/create.js | Exclude |\n| app-6 | a candidate not yet marked |  |\n\n## Chunk 1\n\nTouches app-2 and core-2 again.\n' > docs/plans/linked.md
   git add -A && git commit -qm "a plan with a marked table"
   git checkout -q -b prose main
   printf '# Plan\n\nCovers app-5 and core-2 (no table, no frontmatter).\n' > docs/plans/prose.md
   printf -- '---\nissue: app-4\n# Plan with an unterminated frontmatter\n' > docs/plans/open.md
   git add -A && git commit -qm "plans that link nothing"
   git checkout -q -b aliased main
-  printf '# Plan\n\n## Related work\n\n| Item | Mark |\n|---|---|\n| OLD-7 | include |\n' > docs/plans/aliased.md
-  git add -A && git commit -qm "a plan linking an alias"
+  printf '# Plan\n\n## Related work\n\n| Item | Mark |\n|---|---|\n| OLD-7 | include |\n| ./docs/issues/b.md | Include |\n' > docs/plans/aliased.md
+  git add -A && git commit -qm "a plan linking an alias and a path"
   git checkout -q main
+  # app-6 and app-7, in the working tree's index only (the join reads it there).
+  lg_item docs/issues/h.md "key: app-6" "ledger: app" "status: Open" "severity: P3" "summary: Unmarked in the plan's table"
+  lg_item docs/issues/i.md "key: app-7" "ledger: app" "status: Open" "severity: P3" "summary: Included only inside a fenced block"
   lg_call _lg_branch_facts "$(git rev-parse linked)"
   assert_eq "0" "$LG_RC" "rc 0"
   assert_json_field "$LG_OUT" '.claims | join(",")' "app-1,app-3,core-1" \
-    "claims: the include row (code span and bold mark stripped), the frontmatter path and the list's key in another case — never app-2 or core-2 (excluded rows, then named in the body), app-4 (another cell), app-5 (prose)"
+    "claims: the include row (code span and bold mark stripped), the frontmatter path and the list's key in another case — never app-2 or core-2 (excluded rows, then named in the body), app-4 (another cell), app-5 (prose), app-6 (an unmarked row) or app-7 (a fenced table)"
   lg_call _lg_branch_facts "$(git rev-parse prose)"
   assert_eq "0|" "$LG_RC|$(printf '%s' "$LG_OUT" | jq -r '.claims | join(",")')" \
     "no claims: key words in a plan with no table, and a frontmatter block that never closes (read as body text)"
   # app-5's old key, in the working tree's index (the join reads it there).
   awk '{ print } /^key: app-5$/ { print "aliases: [old-7]" }' docs/issues/g.md > docs/issues/g.md.new && mv docs/issues/g.md.new docs/issues/g.md
   lg_call _lg_branch_facts "$(git rev-parse aliased)"
-  assert_eq "0|app-5" "$LG_RC|$(printf '%s' "$LG_OUT" | jq -r '.claims | join(",")')" "an include row naming an alias (in another case) claims its item"
+  assert_eq "0|app-2,app-5" "$LG_RC|$(printf '%s' "$LG_OUT" | jq -r '.claims | join(",")')" "include rows naming an alias (in another case) and an item path (./ dropped) claim their items"
   lg inflight --branch linked
   assert_eq "linked local no PR claims:app-1,app-3,core-1 contracts:— files:1" "$LG_OUT" "inflight --branch linked: the linked items only"
   lg_ifl_teardown
