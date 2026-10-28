@@ -403,7 +403,7 @@ User invokes /doc-superpowers release [--from=<ref>]
     → Prepend new version entry to RELEASE-NOTES.md (after header, before previous entry)
     → `doc-tools.sh fragments merge <start|ROOT> HEAD --remove`: `git rm` exactly the consumed fragments (never a glob)
     → Bump version in the manifests the project has — never hand-edit individual version strings
-      → `doc-tools.sh bump-version X.Y.Z`, then `doc-tools.sh check-version` to confirm every manifest, and the stamps in a tree with `scripts/search/launch.sh` or `references/search-rule.md`, matches (skipped when the project has none of the five manifests)
+      → `doc-tools.sh bump-version X.Y.Z`, then `doc-tools.sh check-version` to confirm that every manifest, and the stamp of each of `scripts/search/launch.sh` and `references/search-rule.md` that exists, match (skipped when the project has none of the five manifests)
     → Sync CLAUDE.md and README.md per references/doc-spec.md rules
       → Catches drift accumulated across the released commits
     → Commit the release: entry + fragment deletions + manifests + CLAUDE.md/README.md in ONE commit

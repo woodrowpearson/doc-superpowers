@@ -2091,7 +2091,8 @@ gate_state() {
 # markers; then a "." line, so a trailing blank line in the body survives the
 # command substitution that reads it. A CR ending a line is dropped first: a
 # CRLF copy is the same text. Exit 1: no opening marker; 2: no closing marker
-# after it (the body runs to the end of the file).
+# after it (the body runs to the end of the file). Callers check that <file>
+# is readable first (awk would exit 2 for that too).
 rule_block() {
   awk '
     { sub(/\r$/, "") }
@@ -2117,15 +2118,20 @@ rule_block() {
 # absent (no opening marker in either file, or the plugin has no template
 # with a block) — SRULE_IN, the files that decide with their marker versions
 # ("AGENTS.md: v3.10.0"), and SRULE_COPIES, one "<file> <state> <version>"
-# line per file with a block.
+# line per file with a block. A file that cannot be read is not judged: its
+# line is "<file> unreadable" (no version), and the readable files decide.
 search_rule_state() {
   local f tpl blk rc ver cur_in="" out_in=""
   SRULE=absent SRULE_IN="" SRULE_COPIES=""
-  [ -f "$SEARCH_RULE_SRC" ] || return 0
+  [ -f "$SEARCH_RULE_SRC" ] && [ -r "$SEARCH_RULE_SRC" ] || return 0
   tpl=$(rule_block "$SEARCH_RULE_SRC") || return 0
   tpl="${tpl#*$'\n'}"
   for f in $SEARCH_RULE_FILES; do
     [ -f "$f" ] || continue
+    if [ ! -r "$f" ]; then
+      SRULE_COPIES="$SRULE_COPIES$f unreadable"$'\n'
+      continue
+    fi
     rc=0
     blk=$(rule_block "$f") || rc=$?
     [ "$rc" != 1 ] || continue
@@ -2163,7 +2169,7 @@ status_search_gate() {
     [ "$cx" != unreadable ] || cx=absent
     st_rec search_gate.state "$cl" "$cx" "$SRULE"
     while read -r f st ver; do
-      if [ -n "$f" ]; then st_rec search_gate.rule "$f" "$st" "$ver"; fi
+      if [ -n "$f" ]; then st_rec search_gate.rule "$f" "$st" "${ver:-}"; fi
     done <<<"$SRULE_COPIES"
     return 0
   fi
@@ -2215,6 +2221,11 @@ status_search_gate() {
       fi
       ;;
   esac
+  while read -r f st ver; do
+    if [ "$st" = unreadable ]; then
+      echo "  ⚠ $f cannot be read: its search rule is not checked (fix its permissions)"
+    fi
+  done <<<"$SRULE_COPIES"
 }
 
 # --- CI tier -------------------------------------------------------------------------
@@ -2946,7 +2957,7 @@ _STATUS_JSON_JQ='
     elif $r[0] == "search.state" then .tiers.search = {launcher: $r[1], mcp_entry: $r[2]}
     elif $r[0] == "search_gate.state" then .tiers.search_gate = {claude_settings: $r[1], codex_hooks: $r[2], search_rule: $r[3],
                                                                  search_rule_copies: {}}
-    elif $r[0] == "search_gate.rule" then .tiers.search_gate.search_rule_copies[$r[1]] = {state: $r[2], version: $r[3]}
+    elif $r[0] == "search_gate.rule" then .tiers.search_gate.search_rule_copies[$r[1]] = {state: $r[2], version: ($r[3] // "" | n)}
     else . end)
   | .env = {DOC_SUPERPOWERS_STRICT: ($strict | n), DOC_SUPERPOWERS_SKIP: ($skip | n),
             DOC_SUPERPOWERS_QUIET: ($quiet | n), DOC_SUPERPOWERS_HOOK_BUDGET: ($budget | n),
