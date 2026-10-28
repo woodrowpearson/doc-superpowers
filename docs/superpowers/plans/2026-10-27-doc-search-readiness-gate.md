@@ -93,7 +93,7 @@ while doc-search cannot answer. Nothing changes for everyone else.
   add them as the last two `Config` fields. Put `parse_version` in `config.py`.
 - [ ] **Step 4: Run** the same command. Expected: PASS (the whole file).
 - [ ] **Step 5: Document.** Add the two rows to *Configuration* in `references/search.md`, including the
-  note that a plugin older than 3.10.0 answers `invalid config: unknown key required`.
+  note that a plugin older than 3.11.0 answers `invalid config: unknown key required`.
 - [ ] **Step 6: Commit** `feat(search): required and requires config keys`.
 
 ### Task 2: Launcher stamp and Codex root
@@ -388,25 +388,25 @@ The launcher's behavior, after the env hook:
 - [ ] **Step 6: Commit** `docs(search): the shipped search-rule template, keyed to check`. Record the
   micro-test tallies in the commit body.
 
-### Task 8: Release 3.10.0
+### Task 8: Release 3.11.0
 
 **Files:** `RELEASE-NOTES.md`, the five manifests and the launcher stamp (via `bump-version`), README and
 CLAUDE.md (suite counts and command lists), `docs/.doc-index.json`.
 
-- [ ] **Step 1: Write** the `RELEASE-NOTES.md` 3.10.0 entry: the new keys, `check`, `gate`, `--search-gate`,
+- [ ] **Step 1: Write** the `RELEASE-NOTES.md` 3.11.0 entry: the new keys, `check`, `gate`, `--search-gate`,
   the template, the Codex root, and the 3.9.0 "unknown key" behavior.
-- [ ] **Step 2: Run** `bash scripts/doc-tools.sh bump-version 3.10.0`, then `bash scripts/doc-tools.sh
+- [ ] **Step 2: Run** `bash scripts/doc-tools.sh bump-version 3.11.0`, then `bash scripts/doc-tools.sh
   check-version`. Expected: exit 0.
 - [ ] **Step 3: Re-baseline the doc-index** for the changed docs, in this repository's usual way: a
   `docs(index): re-baseline …` commit.
 - [ ] **Step 4: Run** `bash scripts/check-ci.sh` (every suite, pytest, self-install drift,
   `check-version`) and `bash scripts/leak-scan.sh`. Expected: all exit 0. Record the counts.
-- [ ] **Step 5: Commit** `chore(release): v3.10.0`.
+- [ ] **Step 5: Commit** `chore(release): v3.11.0`.
 
 ### Task 9: GREEN, end to end
 
 - [ ] **Step 1: Run the hooks for real.** In a throwaway repository with
-  `{"required": true, "requires": ">=3.10.0"}`, `install --search --search-gate` and
+  `{"required": true, "requires": ">=3.11.0"}`, `install --search --search-gate` and
   `DOC_SUPERPOWERS_ROOT` set to this checkout:
   - feed each hook a recorded event on stdin;
   - capture block, deny and allow outputs for ready, not-ready (index absent) and not-in-force (no root).

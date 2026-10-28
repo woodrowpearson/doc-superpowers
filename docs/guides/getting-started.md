@@ -298,7 +298,7 @@ For code review and commit review integration, see `references/integration-patte
 | `/doc-superpowers update [scope] [--report=<path>]` | Execute doc updates from an audit report (default: this session's audit, else the freshness check) |
 | `/doc-superpowers diagram [scope]` | Regenerate architecture and workflow diagrams |
 | `/doc-superpowers sync` | Sync doc index with filesystem |
-| `/doc-superpowers hooks install [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--workflows=<csv\|all\|none>] [--force] [--base-branch NAME] [--cron EXPR] [--ci-strict[=true\|false]] [--marketplace-url URL]` | Install workflow hooks (CI: the shell workflows by default, the rest by name; choices recorded; the ledger sets and doc-search's `--search` opt-in, never in `--all`) |
+| `/doc-superpowers hooks install [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--workflows=<csv\|all\|none>] [--force] [--base-branch NAME] [--cron EXPR] [--ci-strict[=true\|false]] [--marketplace-url URL]` | Install workflow hooks (CI: the shell workflows by default, the rest by name; choices recorded; the ledger sets and doc-search's `--search` and `--search-gate` opt-ins, never in `--all`) |
 | `/doc-superpowers hooks status [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate]` | Show installed hooks |
 | `/doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--workflows=<csv\|all\|none>] [--transient]` | Remove installed hooks (granular CI uninstall; `--transient` keeps state non-intentional) |
 | `/doc-superpowers spec-generate --design-doc=<path>` | Generate formal specs from design doc |
