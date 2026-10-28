@@ -35,7 +35,7 @@ doc-search is opt-in per repository: `docs/search/config.json` turns it on, and 
 
 With an invalid config, every tool answers `doc-search: invalid config: <message>` (the message names the key) and the CLI exits 2. Outside a git work tree, the CLI exits 2.
 
-**Turning it off:** `install.sh uninstall --search` removes the `.mcp.json` entry (and `.mcp.json` itself when nothing else is left in it) and the launcher; deleting `docs/search/config.json` makes a server that is still registered inert. Nothing doc-search builds is a source of truth: semble's cache can be deleted at any time.
+**Turning it off:** `install.sh uninstall --search` removes the `.mcp.json` entry (and `.mcp.json` itself when nothing else is left in it) and the launcher (refused while the `--search-gate` hooks, which run the launcher, are registered: `uninstall --search --search-gate` removes both); deleting `docs/search/config.json` makes a server that is still registered inert. Nothing doc-search builds is a source of truth: semble's cache can be deleted at any time.
 
 ## Modes
 

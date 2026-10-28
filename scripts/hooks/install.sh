@@ -233,13 +233,16 @@ Tiers:
                                   project's mcpServers (the rest is kept; a file
                                   that is not one JSON object is refused)
             uninstall --search removes that key and the launcher, and .mcp.json
-            itself when it is left as {"mcpServers":{}}. Nothing of it is
+            itself when it is left as {"mcpServers":{}}; while the
+            --search-gate hooks are registered it is refused (they run the
+            launcher): name --search-gate too. Nothing of it is
             recorded in installed.json. status --json reports it, under
             .tiers.search, only when --search is named.
   --search-gate
             doc-search's readiness gate, an opt-in set of its own (never part
             of --all or --search) that needs docs/search/config.json and the
-            --search launcher. Three hook entries, each running
+            --search launcher, the plugin's own copy (install --search
+            refreshes it, in the same run too). Three hook entries, each running
             sh "\$(git rev-parse --show-toplevel)/.claude/doc-superpowers/search-mcp.sh" gate <event>,
             merged into two files to commit:
               .claude/settings.json  Claude Code: SessionStart (startup|resume|
@@ -1796,6 +1799,27 @@ preflight_search() {
   fi
   why=$(mcp_problem)
   [ -z "$why" ] || die "$MCP_FILE $why: fix it by hand, then re-run. Nothing was changed."
+  if [ "$COMMAND" = uninstall ] && ! $DO_SEARCH_GATE; then
+    preflight_search_uninstall_gated
+  fi
+}
+
+# preflight_search_uninstall_gated: uninstall --search without --search-gate
+# would leave the gate's hooks running a deleted launcher: refused while
+# either hook file holds the gate's entries (a file that cannot be read is
+# not judged).
+preflight_search_uninstall_gated() {
+  local f who held=""
+  for f in "$GATE_CLAUDE_FILE" "$GATE_CODEX_FILE"; do
+    who=claude
+    [ "$f" = "$GATE_CLAUDE_FILE" ] || who=codex
+    gate_state "$f" "$who"
+    case "$GT_STATE" in
+      installed | partial) held="${held:+$held and }$f" ;;
+    esac
+  done
+  [ -z "$held" ] \
+    || die "uninstall --search would remove the launcher $SEARCH_LAUNCHER_DEST, which the doc-search gate's hooks run ($held): uninstall --search-gate first, or both together (uninstall --search --search-gate). Nothing was changed."
 }
 
 # search_state: SR_LAUNCHER — installed (the plugin's copy, byte for byte) |
@@ -1844,7 +1868,7 @@ install_search() {
     commit_tmp "$MCP_FILE" 644
   fi
   echo "doc-search MCP: launcher $SEARCH_LAUNCHER_DEST and the \"$SEARCH_SERVER\" server in $MCP_FILE installed"
-  echo "  Commit both: a teammate with uv gets the server (the launcher finds doc-superpowers through DOC_SUPERPOWERS_ROOT, this checkout, or the plugin cache)"
+  echo "  Commit both: a teammate with uv gets the server (the launcher finds doc-superpowers through DOC_SUPERPOWERS_ROOT, this checkout, the Codex install \${CODEX_HOME:-~/.codex}/doc-superpowers, or the plugin cache)"
 }
 
 uninstall_search() {
@@ -1958,15 +1982,19 @@ gate_refuse() {
 }
 
 # preflight_search_gate_config: installing the set needs the config and the
-# launcher its hooks run (install --search writes it first in the same run).
+# launcher its hooks run, the plugin's own copy (install --search writes it
+# first in the same run).
 preflight_search_gate_config() {
   [ "$COMMAND" = install ] || return 0
   if [ ! -f "$SEARCH_CONFIG" ]; then
     echo "ERROR: install --search-gate needs $SEARCH_CONFIG, which this repository does not have: doc-search is not enabled here (doc-search init sets it up). Nothing was changed." >&2
     exit 1
   fi
-  [ -f "$SEARCH_LAUNCHER_DEST" ] || $DO_SEARCH \
+  $DO_SEARCH && return 0
+  [ -f "$SEARCH_LAUNCHER_DEST" ] \
     || die "install --search-gate needs the doc-search launcher $SEARCH_LAUNCHER_DEST, which the hooks run: install --search first (or with it). Nothing was changed."
+  cmp -s "$SEARCH_LAUNCHER_DEST" "$SEARCH_LAUNCHER_SRC" \
+    || die "install --search-gate needs the doc-search launcher $SEARCH_LAUNCHER_DEST to be the plugin's (it differs, and a copy from before the readiness gate cannot answer the hooks): re-run install --search first (or with it). Nothing was changed."
 }
 
 # Every check before the first write; the new content of each file, computed
@@ -2205,6 +2233,8 @@ status_search_gate() {
       installed | partial)
         if [ ! -f "$SEARCH_LAUNCHER_DEST" ]; then
           echo "  ⚠ the hooks run $SEARCH_LAUNCHER_DEST, which is not installed (install --search)"
+        elif ! cmp -s "$SEARCH_LAUNCHER_DEST" "$SEARCH_LAUNCHER_SRC"; then
+          echo "  ⚠ the hooks run $SEARCH_LAUNCHER_DEST, which differs from the plugin's scripts/search/launch.sh: a copy from before the readiness gate cannot answer them (re-run install --search)"
         fi
         break
         ;;

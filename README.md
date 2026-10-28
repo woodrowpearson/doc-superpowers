@@ -278,8 +278,8 @@ $DOC_TOOLS tools uninstall                     # removes only files identical to
 /doc-superpowers hooks uninstall --all
 /doc-superpowers hooks uninstall --ci --workflows=doc-release  # remove ONE workflow
 /doc-superpowers hooks uninstall --ledger --ledger-claude      # the ledger sets (--all removes neither)
-/doc-superpowers hooks uninstall --search                      # doc-search's launcher and .mcp.json entry
-/doc-superpowers hooks uninstall --search-gate                 # its hook entries (--search removes neither)
+/doc-superpowers hooks uninstall --search                      # doc-search's launcher and .mcp.json entry (refused while the gate's hooks run it)
+/doc-superpowers hooks uninstall --search-gate                 # the gate's hook entries (--search --search-gate removes both)
 ```
 
 The installer works from anywhere in the repository (it acts on the top level; a linked worktree or submodule is its own top level) and puts git hooks where git runs them (`git rev-parse --git-path hooks`). It refuses, writing nothing, when `core.hooksPath` comes from your global/system git config, or when a file it would write — or a directory on the way — is a symbolic link. It owns only what it marks: a hook of yours is kept, with a marked POSIX block after its `#!` line that runs ours (skipped if the hook is not a shell script); its `.gitattributes` and `info/exclude` entries are marked blocks; in `.claude/settings.local.json` it touches only the entries that run its own scripts. The work ledger's sets mark theirs `# ledger-superpowers:begin` … `:end` (a hook the set created holds only `#!/bin/sh` and that block), and neither set's markers match the other's. `uninstall` puts all of that back as it was. The Claude tier is **per-user**: its settings file and scripts are excluded from git through `.git/info/exclude`, and its commands run `"$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/…`.
