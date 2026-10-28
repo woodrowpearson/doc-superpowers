@@ -20,10 +20,12 @@ from semble.cache import find_index_from_cache_folder
 
 from doc_search.check import LAUNCHER_REL, Verdict, config_says_required
 from doc_search.config import CONFIG_REL
+from doc_search.engines import IndexPool
 from doc_search.transformer import TransformerSpec
 from doc_search.version import plugin_root, plugin_version
-from conftest import SHIPPING_PATH
-from test_cli import build_held_elsewhere, touch
+from conftest import CODE_PATH, SHIPPING_PATH
+from test_cli import BuildSpy, build_held_elsewhere, build_threads, touch
+from fakes_transformer import fake_encoder
 
 INDEX_FIX = "sh .claude/doc-superpowers/search-mcp.sh index"
 PLUGIN = ".".join(str(part) for part in plugin_version(plugin_root()) or (0, 0, 0))
@@ -141,6 +143,16 @@ def test_check_refresh_that_fails_is_not_ready(gated, run, monkeypatch: pytest.M
     assert payload["fix"] == INDEX_FIX and payload["refreshed"] is True
 
 
+def test_check_with_code_off_is_ready(gated, run) -> None:
+    configure(gated, code={"enabled": False})
+    assert run("index").code == 0
+
+    code, payload = check(run)
+
+    assert code == 0 and payload["state"] == "ready"
+    assert payload["cache"] == {"docs": "valid", "code": "off", "docs_fallback": None}
+
+
 def test_check_absent_index_is_not_ready_with_fix(gated, run) -> None:
     text = run("check")
     code, payload = check(run)
@@ -204,6 +216,39 @@ def test_check_refreshes_a_stale_transformer_index(tx_gated, spec: TransformerSp
 
     assert code == 0 and payload["state"] == "ready" and payload["refreshed"] is True
     assert payload["cache"] == {"docs": "valid", "code": "valid", "docs_fallback": "absent"}
+
+
+def test_check_stale_code_beside_the_static_fallback_starts_no_transformer_build(
+    tx_gated, spec: TransformerSpec, run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No transformer index, the static one valid and code stale: the refresh runs on the static config."""
+    build_held_elsewhere(tx_gated, spec)  # the other process's transformer build is held mid-encode
+    touch(tx_gated.root / CODE_PATH)
+    started: list[object] = []
+    real = IndexPool._run_transformer
+
+    def spy(self, *args, **kwargs):
+        started.append(self)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(IndexPool, "_run_transformer", spy)
+    code, payload = check(run, "--budget", "5")
+
+    assert code == 0 and payload["state"] == "degraded" and payload["refreshed"] is True
+    assert payload["cache"] == {"docs": "absent", "code": "valid", "docs_fallback": "valid"}
+    assert started == [], "check started a transformer docs build"
+
+
+def test_check_stale_transformer_refresh_over_budget_is_not_ready(tx_gated, spec: TransformerSpec, run) -> None:
+    """A saved transformer index serves, so no static fallback does: a refresh that overruns stays not-ready."""
+    assert run("index").code == 0
+    touch(tx_gated.root / SHIPPING_PATH)
+    fake_encoder(spec).gate.clear()  # the incremental encode holds (the spec fixture lets it go)
+
+    code, payload = check(run, "--budget", "1")
+
+    assert code == 1 and payload["state"] == "not-ready"
+    assert payload["reason"] == "refresh did not finish within 1s" and payload["refreshed"] is True
 
 
 def test_check_transformer_nothing_built_is_not_ready(tx_gated, run) -> None:
@@ -292,9 +337,24 @@ def test_check_not_required_is_not_in_force(repo, run) -> None:
     assert payload["reason"] == "not required here (not-ready: docs index absent)"
 
     assert run("index").code == 0
-    touch(repo.root / SHIPPING_PATH)
     text = run("check")
     assert text.code == 4 and text.lines[0] == "doc-search: not in force: not required here (ready)"
+
+
+def test_check_not_required_and_stale_builds_nothing(repo, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not required: a stale index is reported from the cache states alone, with no refresh and no wait."""
+    install_launcher(repo)
+    assert run("index").code == 0
+    touch(repo.root / SHIPPING_PATH)
+    spy = BuildSpy(monkeypatch)
+
+    code, payload = check(run)
+
+    assert code == 4 and payload["state"] == "not-in-force" and payload["refreshed"] is False
+    assert payload["reason"] == "not required here (stale: docs index stale)"
+    assert payload["cache"]["docs"] == "stale"
+    assert spy.calls == [] and build_threads() == [], "check built or loaded an index"
+    assert json.loads(run("status", "--format", "json").out)["cache"]["docs"] == "stale", "nothing was written"
 
 
 def test_check_no_config_is_not_in_force(repo, run) -> None:
@@ -322,6 +382,7 @@ def test_check_invalid_required_config_is_not_ready(repo, run) -> None:
 
     assert code == 1 and payload["state"] == "not-ready" and payload["required"] is True
     assert payload["reason"] == "invalid config: unknown key bogus"
+    assert payload["fix"] == "edit docs/search/config.json, then run sh .claude/doc-superpowers/search-mcp.sh check"
 
 
 def test_check_invalid_config_without_required_is_not_in_force(repo, run) -> None:
