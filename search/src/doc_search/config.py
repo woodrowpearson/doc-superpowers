@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,7 +51,14 @@ DEFAULTS: dict[str, Any] = {
         "terminal_statuses": ["deprecated", "superseded", "archived"],
         "rescan_seconds": 5,
     },
+    "required": False,  # true: doc-search is a gate in this repository (it must be ready)
+    "requires": None,  # ">=X.Y.Z": the version floor for the plugin and the committed launcher copy
 }
+
+_VERSION = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)")
+
+# `requires`'s one form: a floor, `>=` and a version.
+_REQUIRES_PREFIX = ">="
 
 # What `cloud` merges over when the config gives an object.
 CLOUD_DEFAULTS: dict[str, Any] = {
@@ -73,6 +81,15 @@ CLOUD_DEFAULTS: dict[str, Any] = {
 
 class ConfigError(ValueError):
     """The config exists but is invalid. The message names the offending key."""
+
+
+def parse_version(text: str) -> tuple[int, int, int] | None:
+    """`X.Y.Z` (three runs of ASCII digits, nothing around them) as a tuple; None for anything else."""
+    match = _VERSION.fullmatch(text)
+    if match is None:
+        return None
+    major, minor, patch = (int(part) for part in match.groups())
+    return (major, minor, patch)
 
 
 @dataclass(frozen=True)
@@ -134,6 +151,8 @@ class Config:
     code: CodeCfg
     cloud: CloudCfg | None
     search: SearchCfg
+    required: bool  # doc-search is a gate in this repository
+    requires: tuple[int, int, int] | None  # the version floor, from `">=X.Y.Z"`
 
 
 def load_config(top: Path, env: Mapping[str, str] = os.environ) -> Config | None:
@@ -167,7 +186,12 @@ def load_config(top: Path, env: Mapping[str, str] = os.environ) -> Config | None
     cloud = _cloud(merged["cloud"], env.get("GOOGLE_CLOUD_PROJECT") or None)
     if env.get("DOC_SEARCH_CLOUD", "").strip() == "0":
         cloud = None
-    return Config(docs=docs, code=code, cloud=cloud, search=search)
+    required = merged["required"]
+    if not isinstance(required, bool):
+        raise ConfigError("required must be true or false")
+    return Config(
+        docs=docs, code=code, cloud=cloud, search=search, required=required, requires=_requires(merged["requires"])
+    )
 
 
 def _merge(base: Mapping[str, Any], over: Mapping[str, Any]) -> dict[str, Any]:
@@ -303,6 +327,17 @@ def _search(section: Mapping[str, Any]) -> SearchCfg:
         terminal_statuses=_str_list(section["terminal_statuses"], "search.terminal_statuses"),
         rescan_seconds=_seconds(section["rescan_seconds"], "search.rescan_seconds", zero=True),
     )
+
+
+def _requires(value: Any) -> tuple[int, int, int] | None:
+    if value is None:
+        return None
+    floor = None
+    if isinstance(value, str) and value.startswith(_REQUIRES_PREFIX):
+        floor = parse_version(value[len(_REQUIRES_PREFIX) :])
+    if floor is None:
+        raise ConfigError('requires must be ">=X.Y.Z" or null')
+    return floor
 
 
 def _cloud(value: Any, env_project: str | None) -> CloudCfg | None:

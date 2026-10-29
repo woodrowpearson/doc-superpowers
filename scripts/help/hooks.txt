@@ -20,7 +20,7 @@ Local:      the git hooks and the merge.doc-index.* git config;
             both kept out of git: each contributor installs their own.
 Undo:       doc-superpowers hooks uninstall --git --claude
 Opt-in sets (never in --all): --ledger and --ledger-claude (help ledger),
-            --search (help search).
+            --search and --search-gate (help search).
 Quiet or skip: DOC_SUPERPOWERS_QUIET=1 hides output, DOC_SUPERPOWERS_SKIP=1
             bypasses every hook.
 Reference:  references/hooks.md

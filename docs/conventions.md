@@ -60,11 +60,13 @@ Each scan pattern carries a planted sample it must match, so a pattern that stop
 
 Version consistency is managed via `doc-tools.sh`:
 
-- **`bump-version VERSION`** — updates the version string in all 5 manifest files simultaneously
-- **`check-version`** — verifies that each manifest carries `RELEASE-NOTES.md`'s version (exit 1 on any mismatch, invalid JSON, or no manifest)
+- **`bump-version VERSION`** — updates the version string in all 5 manifest files and the two stamps simultaneously (all or nothing)
+- **`check-version`** — verifies that each manifest and both stamps carry `RELEASE-NOTES.md`'s version (exit 1 on any mismatch, invalid JSON, a stamp file without its stamp, or no manifest)
 - **`check-version --tag`** — also requires the tag `v<version>` on origin (`git ls-remote`; `--remote <name>`, `--warn` to only warn), on the release commit: the commit it points at (an annotated tag peeled) must have that version as its RELEASE-NOTES.md first release heading, so a tag left on the pre-bump commit fails (`MISPLACED`). A tag whose commit the clone does not hold (a shallow CI checkout past it) is a warning, not a failure. A release is tagged and the tag pushed before the release commit reaches `main`: `tests.yml` runs it on every push to `main`, because the AI workflow templates clone the plugin at `v<installed version>`
 
 Manifest files managed: `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.cursor-plugin/plugin.json`, `gemini-extension.json`.
+
+The launcher stamp is line 2 of `scripts/search/launch.sh`, `# doc-search launcher vX.Y.Z` (the first such line in the first 5 lines). The search-rule stamp is the opening marker of the block in `references/search-rule.md`, `<!-- doc-superpowers:search-rule vX.Y.Z -->` (the first such line in the file). Neither is JSON, so `bump-version` rewrites them with `sed` rather than `jq`. Both are kept only in the doc-superpowers tree (`search/pyproject.toml` and `scripts/doc-tools.sh` present): a tree without the file, or a project with files of those names of its own, skips the stamp.
 
 `RELEASE-NOTES.md` is not one of them. It is the canonical version source that `check-version` reads and compares the manifests against, and its `## vX.Y.Z` heading is written by the `release` action — never by `bump-version`.
 
@@ -289,9 +291,10 @@ Search-enabled projects only: `docs/search/config.json` turns doc-search on, and
 | The package | `search/` (uv project; module `doc_search`, console script `doc-search`) |
 | The launcher | `scripts/search/launch.sh`, committed in a project as `.claude/doc-superpowers/search-mcp.sh` by `install.sh install --search` |
 | The MCP server and its tools | server `doc-search` (the `.mcp.json` key); tools `search`, `fetch`, `related`, `status` |
-| CLI verbs | `doc-search serve`, `init`, `index` (`--cloud` for the cloud write path), `query`, `status`, `eval` |
+| CLI verbs | `doc-search serve`, `init`, `index` (`--cloud` for the cloud write path), `query`, `status`, `eval`, `check`, `gate` |
 | The local transformer | `docs.model: "transformer:<name>"` (one registry entry, `gte-modernbert-base`), `docs.threads`; the uv extra `local-transformer`; the encode cache `<cache root>/encode/<name>.sqlite` and its lock `<name>.lock` |
-| Environment | `DOC_SEARCH_CLOUD=0` (turns the cloud leg off on one machine; nothing turns it on), `DOC_SEARCH_CACHE_LOCATION` (the cache root for the encode cache, the host lock and build progress; an absolute path), `DOC_SEARCH_LIVE=1` (live tests only) |
+| Environment | `DOC_SEARCH_CLOUD=0` (turns the cloud leg off on one machine; nothing turns it on), `DOC_SEARCH_CACHE_LOCATION` (the cache root for the encode cache, the host lock and build progress; an absolute path), `DOC_SEARCH_LIVE=1` (live tests only), `DOC_SEARCH_MCP=0` (this developer's client cannot run the MCP server: `check` reports `mcp` `off`), `DOC_SEARCH_GATE=0` (the gate hooks allow everything for this developer) |
+| The readiness gate | config keys `required` (`true` makes doc-search a gate) and `requires` (`">=X.Y.Z"`, the version floor); the verdict file `$(git rev-parse --git-path doc-search-gate)`; the hooks `gate session-start --client claude\|codex`, `gate prompt`, `gate tool`; the launcher stamp `# doc-search launcher vX.Y.Z`; the agent rule `references/search-rule.md`, copied between `<!-- doc-superpowers:search-rule vX.Y.Z -->` and `<!-- /doc-superpowers:search-rule -->` |
 | Cloud corpus | Firestore collection `doc_chunks` and meta collection `corpus_meta` (both configurable: `cloud.firestore.collection`, `cloud.firestore.meta_collection`); in the meta collection, the stamp document `index` and the lease document `catch_up_lease` (fixed ids) |
 
 ### This repo's exemptions from the Scope → Generated Docs Matrix
@@ -322,8 +325,9 @@ Hooks are organized into three tiers, each independently installable, plus the w
 | Work-ledger git legs | `--ledger` | ledger-pre-commit, ledger-pre-push, ledger-post-commit, installed as `# ledger-superpowers:begin` … `:end` blocks in pre-commit, pre-push and post-commit |
 | Work-ledger Claude events | `--ledger-claude` | ledger-session-notices.sh (SessionStart), ledger-state-watch.sh (PostToolUse, matcher `Write\|Edit\|MultiEdit`), with hook-lib.sh |
 | doc-search MCP server | `--search` | `.claude/doc-superpowers/search-mcp.sh` (a byte copy of `scripts/search/launch.sh`) and the `doc-search` entry in the project's `.mcp.json`, both committed |
+| doc-search readiness gate | `--search-gate` | the launcher's `gate session-start --client claude\|codex` (SessionStart), `gate prompt` (UserPromptSubmit) and `gate tool` (PreToolUse) entries in `.claude/settings.json` and `.codex/hooks.json`, both committed |
 
-Use `--all` to install all three tiers at once. The ledger sets are never part of `--all`, each refuses to install without `docs/ledger/config.json` (exit 1, nothing written), and like the git and Claude tiers they are per-clone / per-user and their state is never recorded in `installed.json` (`doc-superpowers setup` records the team's *choice* of them in its `setup` object, `references/setup.md`). doc-search's `--search` set is never part of `--all` either, refuses to install without `docs/search/config.json`, and is not recorded in `installed.json`; its two files are committed, so every contributor gets the server.
+Use `--all` to install all three tiers at once. The ledger sets are never part of `--all`, each refuses to install without `docs/ledger/config.json` (exit 1, nothing written), and like the git and Claude tiers they are per-clone / per-user and their state is never recorded in `installed.json` (`doc-superpowers setup` records the team's *choice* of them in its `setup` object, `references/setup.md`). doc-search's `--search` set is never part of `--all` either, refuses to install without `docs/search/config.json`, and is not recorded in `installed.json`; its two files are committed, so every contributor gets the server. `--search-gate` follows the same rules, and also needs the plugin's own launcher in place (`--search`); its two hook files are committed, and they gate only where the config sets `"required": true`.
 
 ### Installation Rules
 

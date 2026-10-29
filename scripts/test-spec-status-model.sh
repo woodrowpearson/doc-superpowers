@@ -1698,7 +1698,7 @@ assert_contains "$_ds" "$_ds_inert" "search.md: the inert line is config.py's"
 # The CLI verbs: the keys of cli.py's _VERBS table.
 _ds_verbs=$(awk '/^_VERBS = \{/ { s = 1; next } s && /^\}/ { exit } s { gsub(/[" :,]/, " "); print $1 }' "$_ds_src/cli.py" \
   | tr '\n' ' ' | sed 's/ $//')
-assert_eq "serve init index query status eval" "$_ds_verbs" "cli.py: the six verbs"
+assert_eq "serve init index query status eval check gate" "$_ds_verbs" "cli.py: the eight verbs"
 for _v in $_ds_verbs; do
   assert_contains "$(_section "$_ds" '## CLI')" "\`$_v" "search.md: CLI names \`$_v\`"
 done

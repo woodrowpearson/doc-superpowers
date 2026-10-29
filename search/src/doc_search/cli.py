@@ -1,8 +1,10 @@
-"""The `doc-search` command line (design section 9): serve, init, index, query, status, eval.
+"""The `doc-search` command line (design section 9): serve, init, index, query, status, eval, check, gate.
 
 Exit codes: 0 ok (inert included), 1 findings, 2 could not run, 3 usage. When several apply, 1 wins over 2,
-and 2 over 0. Without `docs/search/config.json` every verb but `init` prints the inert line and exits 0; with
-an invalid one it prints `doc-search: invalid config: <message>` on stderr and exits 2.
+and 2 over 0. Without `docs/search/config.json` every verb but `init`, `check` and `gate` (silent) prints the inert
+line and exits 0; with an invalid one it prints `doc-search: invalid config: <message>` on stderr and exits 2. `check`
+has exits of its own (check.py): 0 ready or degraded, 1 not-ready, 3 usage, 4 not-in-force. `gate` (gate.py), the
+client hooks' entry, always exits 0 (3 for usage): its decision is the JSON it prints.
 
 The verbs that search (`query`, `status`, `eval`) use the same `Runtime` as the MCP tools. `index`, `query` and
 `eval` are foreground work and wait for a build without a bound (a build that is cached once is fast the next
@@ -10,7 +12,9 @@ time). With a transformer docs model a first build takes hours, so these verbs p
 stderr every PROGRESS_EVERY_S seconds. `status` is the readiness probe: it never builds, loads or waits, and says
 whether semble's saved index of each kind is `valid`, `stale` or `absent` on disk (for a transformer docs model also
 the static index that serves while it builds), and, from the progress file a live build publishes, how that build
-is getting on.
+is getting on. `check` is the gating probe: it runs the incremental refresh a stale index needs, bounded by
+`--budget`, and never starts a first build. `check` and `gate` keep the verdict file the tool gate reads (gate.py),
+unless `DOC_SEARCH_GATE=0`.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import threading
 from collections.abc import Iterator, Sequence
@@ -28,6 +33,7 @@ from typing import Any, NoReturn
 
 from semble.utils import resolve_model_name
 
+from .check import CLIENTS, Verdict, assess, mcp_line, outside
 from .cloud import CloudUnavailable, describe
 from .cloud.vertex import VertexEmbedder
 from .cloud.write import BaseRefError, CloudIndexer, CorpusRefused, IndexReport, LeaseHeld, LeaseLost
@@ -37,6 +43,7 @@ from .docindex import DocIndex
 from .encode_cache import cache_size, encode_cache_path
 from .engines import FOREGROUND_WAIT_S, Building, IndexPool, WorktreeIndexes
 from .evaluate import EvalFileError, run_eval
+from .gate import EVENTS, gate_off, hook_output, judge, verdict_path, write_verdict
 from .progress import ProgressView, read_progress
 from .render import render_search
 from .repo import GitError, NotARepo, RepoInfo, resolve_worktree
@@ -51,6 +58,9 @@ EXIT_USAGE = 3
 
 # How often a foreground verb prints the progress of a transformer docs build, in seconds.
 PROGRESS_EVERY_S = 30.0
+
+# How long `check` may spend refreshing stale indexes by default, in seconds.
+CHECK_BUDGET_S = 20
 
 INVALID_REQUEST = "doc-search: invalid request:"
 ORPHAN_LIST = 10
@@ -131,6 +141,25 @@ def _build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argumen
 
     status = verb("status", "How doc-search is set up here and whether the saved indexes are valid (builds nothing).")
     status.add_argument("--format", choices=("text", "json"), default="text")
+
+    def budget(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument(
+            "--budget",
+            type=lambda t: int(_number(t, name="--budget", low=1, high=600, whole=True)),
+            default=CHECK_BUDGET_S,
+            help="seconds the refresh may take, 1-600 (default: 20)",
+        )
+
+    probe = verb("check", "Whether doc-search can answer here now, refreshing stale indexes within --budget (a gate).")
+    probe.add_argument("--format", choices=("text", "json"), default="text")
+    budget(probe)
+
+    hook = verb("gate", "The client hooks' entry: check, keep the verdict file, print the hook's JSON (always exit 0).")
+    hook.add_argument("event", choices=EVENTS, help="the hook event (the launcher answers `tool` itself)")
+    hook.add_argument(
+        "--client", choices=CLIENTS, default=None, help="the client whose MCP registration counts (default: each)"
+    )
+    budget(hook)
 
     ev = verb("eval", "Known-answer evaluation: recall@k and MRR per leg, and the semble-single decision.")
     ev.add_argument("file", help='JSON lines: {"query", "expect": [paths], "kind"?}')
@@ -241,6 +270,16 @@ def _serve(args: argparse.Namespace) -> int:
 
 # -- init ----------------------------------------------------------------------------------------------------
 
+# Top-level keys `init` leaves out of the file it writes: absent, they take their defaults. A plugin older
+# than 3.11.0 rejects them as unknown, so a repository that never opted into the gate must not carry them.
+INIT_OMITS = ("required", "requires")
+
+
+def init_config() -> dict[str, Any]:
+    """The config `init` writes: DEFAULTS without INIT_OMITS (setup's copy, scripts/setup/search-config.json, is
+    this, byte for byte)."""
+    return {key: value for key, value in DEFAULTS.items() if key not in INIT_OMITS}
+
 
 def _init(args: argparse.Namespace) -> int:
     top = RepoInfo.from_cwd(Path.cwd()).top
@@ -248,7 +287,7 @@ def _init(args: argparse.Namespace) -> int:
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         with open(target, "x", encoding="utf-8") as handle:  # exclusive: it never overwrites
-            handle.write(json.dumps(DEFAULTS, indent=2) + "\n")
+            handle.write(json.dumps(init_config(), indent=2) + "\n")
     except FileExistsError:
         print(f"doc-search: {CONFIG_REL} exists; not changed")
         return 0
@@ -506,6 +545,67 @@ def _kind_status(rt: Any, got: WorktreeIndexes | Building | None, kind: str) -> 
     }
 
 
+# -- check ---------------------------------------------------------------------------------------------------
+
+
+def _check(args: argparse.Namespace) -> int:
+    """The gating probe (check.py): the verdict line, `mcp:` and `launcher:`, or the verdict as JSON with `exit`. In a
+    repository it keeps the verdict file as `gate` does, so `check` after a fix lifts the tool gate."""
+    try:
+        top: Path | None = RepoInfo.from_cwd(Path.cwd()).top
+    except NotARepo:
+        top = None
+    verdict = assess(top, budget_s=args.budget, env=os.environ) if top else outside(os.environ, Path.cwd())
+    if top is not None and not gate_off(os.environ):
+        _keep_verdict(top, verdict)
+    if args.format == "json":
+        print(json.dumps({**asdict(verdict), "exit": verdict.exit_code()}, indent=2, ensure_ascii=False))
+    else:
+        print(verdict.line())
+        print(f"mcp: {mcp_line(verdict.mcp)}")
+        print(f"launcher: {verdict.launcher}")
+    return verdict.exit_code()
+
+
+# -- gate ----------------------------------------------------------------------------------------------------
+
+
+def _gate(args: argparse.Namespace) -> int:
+    """The hook entry (gate.py): read and drop the event on stdin, judge, keep the verdict file, print the JSON."""
+    _drain_stdin()
+    if gate_off(os.environ):
+        return 0
+    try:
+        top = RepoInfo.from_cwd(Path.cwd()).top
+    except (NotARepo, GitError):
+        return 0
+    verdict = judge(top, budget_s=args.budget, env=os.environ, client=args.client)
+    _keep_verdict(top, verdict, "gate")
+    output = hook_output(args.event, verdict)
+    if output is not None:
+        print(json.dumps(output))
+    return 0
+
+
+def _keep_verdict(top: Path, verdict: Verdict, verb: str = "check") -> None:
+    """Write or remove the verdict file the tool gate reads (gate.py); a failure is one stderr line."""
+    try:
+        write_verdict(verdict_path(top), verdict)
+    except (GitError, OSError) as err:
+        print(" ".join(f"doc-search: {verb}: cannot keep the verdict file: {err}".split()), file=sys.stderr)
+
+
+def _drain_stdin() -> None:
+    """Read the hook event to its end and drop it, so the client's write never blocks (not from a terminal)."""
+    stream = sys.stdin
+    try:
+        if stream is None or stream.isatty():
+            return
+        getattr(stream, "buffer", stream).read()
+    except (OSError, ValueError):
+        pass
+
+
 # -- eval ----------------------------------------------------------------------------------------------------
 
 
@@ -545,6 +645,8 @@ _VERBS = {
     "query": _query,
     "status": _status,
     "eval": _eval,
+    "check": _check,
+    "gate": _gate,
 }
 
 

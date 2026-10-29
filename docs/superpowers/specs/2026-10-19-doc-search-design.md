@@ -398,7 +398,7 @@ The meta document `<meta_collection>/index` (default `corpus_meta`) holds `{buil
 | Verb | What |
 |---|---|
 | `serve` | The MCP server over stdio. |
-| `init` | Writes `docs/search/config.json` when it is absent. *(rev 3)* It writes the defaults verbatim, with no widening (the default `*.md` already matches at any depth, §5), prints what they are and how many corpus files would be indexed. Never overwrites. |
+| `init` | Writes `docs/search/config.json` when it is absent. *(rev 3)* It writes the defaults verbatim, with no widening, except that it leaves out `required` and `requires` (readiness-gate design, 2026-10-27: absent, they keep their defaults, and an older plugin would reject them as unknown keys) (the default `*.md` already matches at any depth, §5), prints what they are and how many corpus files would be indexed. Never overwrites. |
 | `index [--cloud [--catch-up\|--full\|--prune-orphans] [--allow-off-base] [--force]]` | Without `--cloud`: builds or refreshes both semble indexes for the current worktree in the foreground. With `--cloud`: the write path in §8 (`--force`: rev 3). |
 | `query <text> [--scope] [--limit] [--doc-type] [--path-prefix] [--include-terminal] [--worktree] [--format text\|json]` | The `search` tool from a shell. |
 | `status [--format json]` | The `status` tool. JSON is meant for probes. *(rev 3)* It never builds, loads or waits: it reports whether semble's saved index of each kind is `valid`, `stale` or `absent` on disk (`off` for a disabled code index), and `ready` (the docs cache valid and the code cache valid or off) for a readiness probe. |

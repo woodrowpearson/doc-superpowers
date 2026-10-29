@@ -135,7 +135,7 @@ Scopes:  all | one scope from Detect Scopes (application, api-contracts, data-la
 | `sync` | Sync doc index with filesystem, check CLAUDE.md and README.md currency | After adding/removing doc files |
 | `setup` | Choose what to turn on in this repository, in one pass: fixed safe defaults, every write shown first, the team's choice recorded (`references/setup.md`) | Once per repository; `setup --apply` in a teammate's clone |
 | `help` | Print the one-screen help, or one topic, exactly as a terminal's `doc-superpowers help` does | Finding a feature or a command |
-| `hooks` | Install workflow hooks (git, Claude Code, CI/CD), and the opt-in sets (the work ledger's, doc-search's MCP server) | Setting up automated freshness monitoring |
+| `hooks` | Install workflow hooks (git, Claude Code, CI/CD), and the opt-in sets (the work ledger's, doc-search's MCP server and readiness gate) | Setting up automated freshness monitoring |
 | `release` | Draft release notes entry from git history | Cutting a new version |
 | `spec-generate` | Generate formal specs from design doc; scans overlapping specs for stale content | After brainstorming produces a design spec |
 | `spec-inject` | Inject spec tasks into plans, track during execution | During plan writing and after each chunk executes |
@@ -223,7 +223,9 @@ sh .claude/doc-superpowers/search-mcp.sh index              # optional: build bo
 sh .claude/doc-superpowers/search-mcp.sh query "how are refunds rounded" --scope docs
 ```
 
-It is **inert without `docs/search/config.json`**: every tool answers `doc-search: not enabled (no docs/search/config.json)`, and every CLI verb but `init` prints it and exits 0. Configuration, the CLI and its exit codes, the tools, the cloud leg's setup and write-path guards, snippets for Cursor, Codex, Gemini CLI and OpenCode, hardware and measured performance, privacy and troubleshooting are in [`references/search.md`](references/search.md).
+It is **inert without `docs/search/config.json`**: every tool answers `doc-search: not enabled (no docs/search/config.json)`, and every CLI verb but `init`, `check` and `gate` prints it and exits 0. Configuration, the CLI and its exit codes, the tools, the cloud leg's setup and write-path guards, snippets for Cursor, Codex, Gemini CLI and OpenCode, hardware and measured performance, privacy and troubleshooting are in [`references/search.md`](references/search.md).
+
+A repository can also **require** doc-search, so agents stop while it cannot answer instead of working around it: `"required": true` in the config (and optionally `"requires": ">=X.Y.Z"`, a version floor), the gate's hooks (`hooks install --search-gate`, for Claude Code and Codex), and the agent rule `references/search-rule.md` copied into `AGENTS.md` or `CLAUDE.md`. `sh .claude/doc-superpowers/search-mcp.sh check` gives the verdict (`0` ready, `1` not ready, with one fix command, `4` not in force). The hooks gate only a developer who has doc-superpowers installed, and `DOC_SEARCH_GATE=0` turns them off for one developer.
 
 ### Workflow Integration
 
@@ -244,6 +246,7 @@ Install opt-in hooks for automated freshness monitoring. `setup` (*Set up a repo
 
 # doc-search's MCP server (needs docs/search/config.json; never part of --all)
 /doc-superpowers hooks install --search        # .claude/doc-superpowers/search-mcp.sh + the .mcp.json entry (commit both)
+/doc-superpowers hooks install --search-gate   # its readiness gate: hooks in .claude/settings.json + .codex/hooks.json (commit both; gates where the config sets "required": true)
 
 # Claude-powered workflows are opt-in by name
 /doc-superpowers hooks install --ci --workflows=doc-pr-release,doc-review-pr
@@ -269,7 +272,7 @@ $DOC_TOOLS tools status                        # present? matches the plugin? wh
 $DOC_TOOLS tools uninstall                     # removes only files identical to the plugin's
 
 # Check what's installed (optionally one tier: --git / --claude / --ci, or --all; the opt-in
-# sets with --ledger / --ledger-claude / --search, each in its own section after the tiers);
+# sets with --ledger / --ledger-claude / --search / --search-gate, each in its own section after the tiers);
 # "⚠ … outdated: re-run install --git|--claude|--ledger|--ledger-claude|--search" marks another version's install
 /doc-superpowers hooks status
 
@@ -277,7 +280,8 @@ $DOC_TOOLS tools uninstall                     # removes only files identical to
 /doc-superpowers hooks uninstall --all
 /doc-superpowers hooks uninstall --ci --workflows=doc-release  # remove ONE workflow
 /doc-superpowers hooks uninstall --ledger --ledger-claude      # the ledger sets (--all removes neither)
-/doc-superpowers hooks uninstall --search                      # doc-search's launcher and .mcp.json entry
+/doc-superpowers hooks uninstall --search                      # doc-search's launcher and .mcp.json entry (refused while the gate's hooks run it)
+/doc-superpowers hooks uninstall --search-gate                 # the gate's hook entries (--search --search-gate removes both)
 ```
 
 The installer works from anywhere in the repository (it acts on the top level; a linked worktree or submodule is its own top level) and puts git hooks where git runs them (`git rev-parse --git-path hooks`). It refuses, writing nothing, when `core.hooksPath` comes from your global/system git config, or when a file it would write — or a directory on the way — is a symbolic link. It owns only what it marks: a hook of yours is kept, with a marked POSIX block after its `#!` line that runs ours (skipped if the hook is not a shell script); its `.gitattributes` and `info/exclude` entries are marked blocks; in `.claude/settings.local.json` it touches only the entries that run its own scripts. The work ledger's sets mark theirs `# ledger-superpowers:begin` … `:end` (a hook the set created holds only `#!/bin/sh` and that block), and neither set's markers match the other's. `uninstall` puts all of that back as it was. The Claude tier is **per-user**: its settings file and scripts are excluded from git through `.git/info/exclude`, and its commands run `"$CLAUDE_PROJECT_DIR"/.claude/hooks/doc-superpowers/…`.
@@ -403,7 +407,7 @@ doc-superpowers/
 ├── search/               # doc-search: the opt-in MCP server over docs and code (a uv Python package)
 │   ├── pyproject.toml    # semble, mcp, pathspec; the cloud extra (google-genai, google-cloud-firestore) and the local-transformer extra (onnxruntime, flatbuffers, protobuf; tokenizers and huggingface-hub, which semble already brings)
 │   ├── uv.lock
-│   ├── src/doc_search/   # server, CLI, searcher, semble engines, the local transformer docs embedder, cloud leg (read and write paths)
+│   ├── src/doc_search/   # server, CLI, searcher, semble engines, the local transformer docs embedder, cloud leg (read and write paths), the readiness check and gate
 │   └── tests/            # pytest suite (no network: a tiny test-built model, fake cloud clients)
 ├── scripts/
 │   ├── doc-superpowers   # The dispatcher: help, setup, version, and hooks / tools / search pass-throughs (the terminal command)
@@ -446,6 +450,7 @@ doc-superpowers/
 │   ├── ledger.md                  # Work ledger (opt-in): config, verbs, keys, adapters, hooks, init
 │   ├── ledger-index.schema.json   # The work-ledger index shape (ledger-index/1)
 │   ├── search.md                  # doc-search (opt-in): config, CLI, tools, cloud leg, other clients
+│   ├── search-rule.md             # The agent rule a repository that requires doc-search copies into AGENTS.md or CLAUDE.md
 │   ├── integration-patterns.md    # Code review, commit review, wrapper skill integration
 │   └── tool-mappings.md           # Per-client tool names and capabilities
 ├── evals/                # Evaluation test cases
