@@ -1,5 +1,20 @@
 # Release Notes
 
+## v3.11.1 (2026-10-29)
+
+This patch release trims doc-search's install (#65). doc-search no longer installs four hard dependencies that no doc-search code path imports, and the packages they pull in: `questionary` (with `prompt-toolkit` and `wcwidth`, from semble's installer), `pyjwt` (from mcp's client auth), and, on Intel macOS only, `sympy` (with `mpmath`) and `coloredlogs` (with `humanfriendly`, from onnxruntime 1.23's tools). Installed packages on macOS x86_64: base 52 → 48, cloud 74 → 70, local-transformer 59 → 51 (55 → 51 on Linux and arm64).
+
+### Upgrading from 3.11.0
+Nothing to do. The next `uv sync` of doc-search's environment (the launcher runs `uv run --frozen`) drops the excluded packages. doc-search behaves the same: a runtime import audit in every profile, a real `serve` over stdio and the pytest suite (863 passed, 2 live tests skipped) all match 3.11.0.
+- **`hooks install --search` users:** `bump-version` stamps the version into `scripts/search/launch.sh`, so the committed `.claude/doc-superpowers/search-mcp.sh` reads `outdated` in `hooks status --search`. Re-run `hooks install --search` and commit the launcher.
+- `tool.uv.exclude-dependencies` needs **uv 0.9.10 or later** to re-lock. An older uv still installs the trimmed lock with `--frozen`, printing one warning that it does not know the key; re-locking with it would add the packages back.
+
+### Dependencies
+- **`search/pyproject.toml`:** `tool.uv.exclude-dependencies = ["questionary", "pyjwt", "sympy", "coloredlogs"]`, and `cryptography` is now declared directly (mcp imports it in `mcp.server.request_state` but declares it only through `pyjwt[crypto]`).
+
+### Other
+- Verified locally (GitHub Actions does not run on this account): `uv run --project search --frozen --all-extras pytest -q`, 863 passed, 2 skipped; `check-version` passes.
+
 ## v3.11.0 (2026-10-28)
 
 This release lets a repository require doc-search: an agent stops while doc-search cannot answer, instead of working around it. Two new config keys set the policy, `doc-search check` decides one verdict, and the opt-in `--search-gate` hooks act on it in Claude Code and Codex. The gate applies only to a developer whose client finds doc-superpowers; for everyone else the committed hooks do nothing. A repository that does not set `"required": true` sees no change.
