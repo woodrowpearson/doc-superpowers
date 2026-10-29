@@ -5893,16 +5893,30 @@ SRL_BIN=$(harness_mktemp_d fakeuv)
 printf '#!/bin/sh\nprintf "uv %%s\\n" "$*"\necho "$#" > "$(dirname "$0")/argc"\n' > "$SRL_BIN/uv"
 chmod +x "$SRL_BIN/uv"
 
-# srl_root <dir>: <dir> as a doc-superpowers root (a search/pyproject.toml).
+# srl_root <dir>: <dir> as a doc-superpowers root (a search/pyproject.toml),
+# one with the readiness gate (search/src/doc_search/gate.py).
 srl_root() {
+  mkdir -p "$1/search/src/doc_search"
+  : > "$1/search/pyproject.toml"
+  : > "$1/search/src/doc_search/gate.py"
+}
+
+# srl_pregate_root <dir> [version]: <dir> as a root that predates the
+# readiness gate (no search/src/doc_search/gate.py), its package.json at
+# <version> (default 3.10.0; "none" writes no package.json).
+srl_pregate_root() {
   mkdir -p "$1/search"
   : > "$1/search/pyproject.toml"
+  if [ "${2:-3.10.0}" != none ]; then
+    printf '{\n  "name": "doc-superpowers",\n  "version": "%s"\n}\n' "${2:-3.10.0}" > "$1/package.json"
+  fi
 }
 
 # srl_run [VAR=value …] -- <launcher args…>: run the launcher (under /bin/sh)
-# in the cwd with the fake uv in front. DOC_SUPERPOWERS_ROOT and
-# CLAUDE_PLUGIN_CACHE are empty unless given. Sets RUN_RC and RUN_OUT
-# (stdout + stderr).
+# in the cwd with the fake uv in front. DOC_SUPERPOWERS_ROOT,
+# CLAUDE_PLUGIN_CACHE and CODEX_HOME are empty unless given (an empty
+# CODEX_HOME is $HOME/.codex, under the fixture's HOME). Sets RUN_RC and
+# RUN_OUT (stdout + stderr).
 srl_run() {
   local envs=()
   while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
@@ -5911,7 +5925,7 @@ srl_run() {
   done
   [ "$#" -gt 0 ] && shift
   RUN_RC=0
-  RUN_OUT=$(env DOC_SUPERPOWERS_ROOT= CLAUDE_PLUGIN_CACHE= PATH="$SRL_BIN:$REAL_PATH" ${envs[@]+"${envs[@]}"} \
+  RUN_OUT=$(env DOC_SUPERPOWERS_ROOT= CLAUDE_PLUGIN_CACHE= CODEX_HOME= PATH="$SRL_BIN:$REAL_PATH" ${envs[@]+"${envs[@]}"} \
     /bin/sh "$SCRIPT_DIR/search/launch.sh" "$@" 2>&1) || RUN_RC=$?
 }
 
@@ -5968,6 +5982,45 @@ test_launcher_resolution_order() {
   srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- query "a b" --limit 3
   assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search query a b --limit 3" "$RUN_OUT" "arguments are passed on after doc-search"
   assert_eq "10" "$(cat "$SRL_BIN/argc")" "…each as one word (\"a b\" is not split)"
+  teardown
+}
+
+test_launcher_codex_root() {
+  echo "test: launcher: the Codex install \${CODEX_HOME:-\$HOME/.codex}/doc-superpowers, when it has search/pyproject.toml, is a root — after DOC_SUPERPOWERS_ROOT and this repository, before the plugin cache"
+  setup
+  local envroot top cache codex
+  envroot=$(harness_mktemp_d envroot)
+  codex=$(harness_mktemp_d codexhome)
+  top=$(pwd -P)
+  cache="$HOME/.claude/plugins/cache"
+  srl_root "$cache/mkt/doc-superpowers/9.9.9"
+  mkdir -p "$codex/doc-superpowers"
+  srl_run CODEX_HOME="$codex" -- serve
+  assert_eq "uv run --project $cache/mkt/doc-superpowers/9.9.9/search --frozen --no-dev doc-search serve" "$RUN_OUT" "a Codex doc-superpowers without search/pyproject.toml is not a root: the cache"
+  srl_root "$codex/doc-superpowers"
+  srl_run CODEX_HOME="$codex" -- serve
+  assert_eq "0" "$RUN_RC" "\$CODEX_HOME/doc-superpowers: exit 0"
+  assert_eq "uv run --project $codex/doc-superpowers/search --frozen --no-dev doc-search serve" "$RUN_OUT" "…and it is chosen over the plugin cache"
+  # Unset (or empty) CODEX_HOME: $HOME/.codex.
+  srl_root "$HOME/.codex/doc-superpowers"
+  RUN_RC=0
+  RUN_OUT=$(env -u CODEX_HOME DOC_SUPERPOWERS_ROOT= CLAUDE_PLUGIN_CACHE= PATH="$SRL_BIN:$REAL_PATH" \
+    /bin/sh "$SCRIPT_DIR/search/launch.sh" serve 2>&1) || RUN_RC=$?
+  assert_eq "uv run --project $HOME/.codex/doc-superpowers/search --frozen --no-dev doc-search serve" "$RUN_OUT" "CODEX_HOME unset: \$HOME/.codex/doc-superpowers"
+  srl_run CODEX_HOME= -- serve
+  assert_eq "uv run --project $HOME/.codex/doc-superpowers/search --frozen --no-dev doc-search serve" "$RUN_OUT" "…and empty CODEX_HOME is unset"
+  srl_run CODEX_HOME="$envroot/no-codex" -- serve
+  assert_eq "uv run --project $cache/mkt/doc-superpowers/9.9.9/search --frozen --no-dev doc-search serve" "$RUN_OUT" "a set CODEX_HOME without doc-superpowers: \$HOME/.codex is not consulted, the cache is"
+  # This repository, when it is doc-superpowers itself, still wins over it.
+  srl_root "$top"
+  mkdir -p scripts
+  : > scripts/doc-tools.sh
+  srl_run CODEX_HOME="$codex" -- serve
+  assert_eq "uv run --project $top/search --frozen --no-dev doc-search serve" "$RUN_OUT" "this repository wins over the Codex install"
+  # And DOC_SUPERPOWERS_ROOT wins over all of them.
+  srl_root "$envroot"
+  srl_run CODEX_HOME="$codex" DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_OUT" "DOC_SUPERPOWERS_ROOT wins over the Codex install"
   teardown
 }
 
@@ -6074,6 +6127,8 @@ test_launcher_without_uv() {
 test_launcher_is_posix_sh() {
   echo "test: launcher: a POSIX sh script — #!/bin/sh, no bashism; runs under every sh on this host"
   assert_eq "#!/bin/sh" "$(sed -n 1p "$SCRIPT_DIR/search/launch.sh")" "the shebang is /bin/sh"
+  assert_true "line 2 is the version stamp '# doc-search launcher vX.Y.Z'" \
+    test -n "$(sed -n 2p "$SCRIPT_DIR/search/launch.sh" | grep -E '^# doc-search launcher v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
   assert_true "it holds no bash-only construct ([[, arrays, \${//}, <<<, \$'…')" \
     test -z "$(grep -nE '\[\[|<<<|\$'"'"'|\$\{[A-Za-z_]+(//|,,|\^\^|/)|^[[:space:]]*(declare|local -a|mapfile|readarray)[[:space:]]' "$SCRIPT_DIR/search/launch.sh" || true)"
   local sh
@@ -6170,6 +6225,8 @@ test_search_install_writes_launcher_and_entry() {
   srh_fixture
   inst install --search
   assert_eq "0" "$IRC" "install --search (no .mcp.json): exit 0"
+  # shellcheck disable=SC2016  # the message's literal text
+  assert_contains "$IOUT" 'DOC_SUPERPOWERS_ROOT, this checkout, the Codex install ${CODEX_HOME:-~/.codex}/doc-superpowers, or the plugin cache' "…its message names every root, the Codex install too"
   assert_true "the launcher is the plugin's scripts/search/launch.sh, byte for byte" cmp -s "$SRH_LAUNCHER" "$SCRIPT_DIR/search/launch.sh"
   assert_true "…executable" test -x "$SRH_LAUNCHER"
   assert_eq "755" "$(srh_mode "$SRH_LAUNCHER")" "…mode 755"
@@ -6439,6 +6496,568 @@ test_search_status_and_json() {
   teardown
 }
 
+# --- doc-search: the opt-in --search-gate set ---------------------------------
+#
+# install --search-gate merges three hook entries, each running the committed
+# launcher's gate, into .claude/settings.json (Claude Code) and .codex/hooks.json
+# (Codex), both committed. Per event an entry is identified by its command.
+
+# shellcheck disable=SC2016  # the command is literal text
+SGT_CMD_PREFIX='sh "$(git rev-parse --show-toplevel)/.claude/doc-superpowers/search-mcp.sh" gate'
+SGT_CLAUDE=".claude/settings.json"
+SGT_CODEX=".codex/hooks.json"
+
+# sgt_want <claude|codex>: the hooks object install --search-gate writes, compact
+# (session-start names the client).
+sgt_want() {
+  jq -cn --arg p "$SGT_CMD_PREFIX" --arg who "$1" '
+    def h($e; $t): [{type: "command", command: "\($p) \($e)", timeout: $t}];
+    {SessionStart: [{matcher: "startup|resume|clear|compact", hooks: h("session-start --client \($who)"; 45)}],
+     UserPromptSubmit: [{hooks: h("prompt"; 45)}],
+     PreToolUse: [(if $who == "claude" then {matcher: "*"} else {} end) + {hooks: h("tool"; 10)}]}'
+}
+
+# sgt_fixture [config]: srh_fixture, then install --search (the launcher the
+# gate needs), its files left out of the commits.
+sgt_fixture() {
+  srh_fixture "$@"
+  inst install --search
+  printf '.claude/doc-superpowers/\n.mcp.json\n' >> .git/info/exclude
+}
+
+# sgt_jq <file> <filter>: a compact value of <file> ("ERR" when unreadable).
+sgt_jq() {
+  jq -c "$2" "$1" 2>/dev/null || echo "ERR"
+}
+
+test_search_gate_preflight() {
+  echo "test: search-gate: install --search-gate needs docs/search/config.json and the --search launcher (exit 1, the message, nothing written, with another set too); install --search --search-gate installs both; uninstall needs neither"
+  setup
+  local before
+  before=$(_tree_state)
+  inst install --search-gate
+  assert_eq "1" "$IRC" "no config: exit 1"
+  assert_eq "ERROR: install --search-gate needs docs/search/config.json, which this repository does not have: doc-search is not enabled here (doc-search init sets it up). Nothing was changed." \
+    "$IOUT" "…the message, whole"
+  assert_eq "$before" "$(_tree_state)" "…nothing written"
+  inst uninstall --search-gate
+  assert_eq "0" "$IRC" "uninstall --search-gate without the config: exit 0"
+  assert_contains "$IOUT" "nothing to uninstall" "…nothing to uninstall"
+  teardown
+  srh_fixture '{"required": true}'
+  before=$(_tree_state)
+  inst install --search-gate
+  assert_eq "1" "$IRC" "config, no launcher: exit 1"
+  assert_eq "ERROR: install --search-gate needs the doc-search launcher .claude/doc-superpowers/search-mcp.sh, which the hooks run: install --search first (or with it). Nothing was changed." \
+    "$IOUT" "…the message, whole"
+  assert_eq "$before" "$(_tree_state)" "…nothing written"
+  inst install --git --search-gate
+  assert_eq "1" "$IRC" "install --git --search-gate, no launcher: exit 1"
+  assert_eq "$before" "$(_tree_state)" "…the git tier not written either (every check runs first)"
+  inst install --search --search-gate
+  assert_eq "0" "$IRC" "install --search --search-gate: exit 0"
+  assert_file_exists "$SRH_LAUNCHER" "…the launcher"
+  assert_eq "$(sgt_want claude)" "$(sgt_jq "$SGT_CLAUDE" .hooks)" "…and the Claude Code entries"
+  assert_eq "$(sgt_want codex)" "$(sgt_jq "$SGT_CODEX" .hooks)" "…and the Codex entries"
+  inst install --search-gate --json
+  assert_eq "2" "$IRC" "install --search-gate --json: exit 2 (--json is status's)"
+  # A launcher copy that is not the plugin's (an older one has no gate): refused, unless --search refreshes it.
+  rm -f "$SGT_CLAUDE" "$SGT_CODEX"
+  rmdir .codex 2>/dev/null || true
+  printf '#!/bin/sh\n# doc-search launcher v3.10.0\nexec true\n' > "$SRH_LAUNCHER"
+  before=$(_tree_state)
+  inst install --search-gate
+  assert_eq "1" "$IRC" "a launcher copy that differs from the plugin's: exit 1"
+  assert_eq "ERROR: install --search-gate needs the doc-search launcher .claude/doc-superpowers/search-mcp.sh to be the plugin's (it differs, and a copy from before the readiness gate cannot answer the hooks): re-run install --search first (or with it). Nothing was changed." \
+    "$IOUT" "…the message, whole"
+  assert_eq "$before" "$(_tree_state)" "…nothing written"
+  inst install --search --search-gate
+  assert_eq "0" "$IRC" "install --search --search-gate with that copy: exit 0"
+  assert_true "…the launcher refreshed first" cmp -s "$SCRIPT_DIR/search/launch.sh" "$SRH_LAUNCHER"
+  assert_eq "$(sgt_want codex)" "$(sgt_jq "$SGT_CODEX" .hooks)" "…and the entries written"
+  printf '#!/bin/sh\n' > "$SRH_LAUNCHER"
+  inst uninstall --search-gate
+  assert_eq "0" "$IRC" "uninstall --search-gate does not need the plugin's launcher"
+  teardown
+}
+
+test_search_gate_install_writes_entries() {
+  echo "test: search-gate: install --search-gate creates .claude/settings.json and .codex/hooks.json with the three entries; into existing files it keeps every other key, entry and handler, and appends its own per event"
+  sgt_fixture
+  inst install --search-gate
+  assert_eq "0" "$IRC" "install --search-gate (no files): exit 0"
+  assert_eq "{\"hooks\":$(sgt_want claude)}" "$(sgt_jq "$SGT_CLAUDE" .)" ".claude/settings.json: the three entries, nothing else"
+  assert_eq "{\"hooks\":$(sgt_want codex)}" "$(sgt_jq "$SGT_CODEX" .)" ".codex/hooks.json: the same, PreToolUse without a matcher"
+  assert_eq "?? .claude/settings.json
+?? .codex/hooks.json" "$(git status --porcelain -uall)" "…those two files are all it wrote"
+  assert_eq "$(cat "$SGT_CLAUDE")" "$(jq . "$SGT_CLAUDE")" "…pretty-printed as jq prints it"
+  assert_not_contains "$(cat "$SGT_CLAUDE" "$SGT_CODEX")" "$TEST_DIR" "…no machine path in either"
+  rm -f "$SGT_CLAUDE" "$SGT_CODEX"
+  # Existing files: other keys, events, groups and handlers survive, in their order.
+  printf '%s\n' '{"permissions":{"allow":["Bash(ls)"]},"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"echo hi"}]}],"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"mine.sh","timeout":5}]}],"Stop":[{"hooks":[{"type":"command","command":"stop.sh"}]}]},"model":"x"}' | jq . > "$SGT_CLAUDE"
+  printf '%s\n' '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"p.sh"}]}]},"other":1}' > "$SGT_CODEX"
+  inst install --search-gate
+  assert_eq "0" "$IRC" "install into existing files: exit 0"
+  assert_eq '{"allow":["Bash(ls)"]}' "$(sgt_jq "$SGT_CLAUDE" .permissions)" "another key kept"
+  assert_eq '"x"' "$(sgt_jq "$SGT_CLAUDE" .model)" "…and another"
+  assert_eq '["permissions","hooks","model"]' "$(sgt_jq "$SGT_CLAUDE" 'keys_unsorted')" "…in their order"
+  assert_eq '[{"hooks":[{"type":"command","command":"stop.sh"}]}]' "$(sgt_jq "$SGT_CLAUDE" .hooks.Stop)" "another event untouched"
+  assert_eq '{"matcher":"startup","hooks":[{"type":"command","command":"echo hi"}]}' "$(sgt_jq "$SGT_CLAUDE" '.hooks.SessionStart[0]')" "another SessionStart group first, untouched"
+  assert_eq "$(jq -c '.SessionStart[0]' <<<"$(sgt_want claude)")" "$(sgt_jq "$SGT_CLAUDE" '.hooks.SessionStart[1]')" "…ours after it"
+  assert_eq '{"matcher":"Bash","hooks":[{"type":"command","command":"mine.sh","timeout":5}]}' "$(sgt_jq "$SGT_CLAUDE" '.hooks.PreToolUse[0]')" "another PreToolUse group first"
+  assert_eq "$(jq -c '.PreToolUse[0]' <<<"$(sgt_want claude)")" "$(sgt_jq "$SGT_CLAUDE" '.hooks.PreToolUse[1]')" "…ours after it"
+  assert_eq "$(jq -c '.UserPromptSubmit' <<<"$(sgt_want claude)")" "$(sgt_jq "$SGT_CLAUDE" '.hooks.UserPromptSubmit')" "an event it lacked: added"
+  assert_eq '[{"hooks":[{"type":"command","command":"p.sh"}]},'"$(jq -c '.UserPromptSubmit[0]' <<<"$(sgt_want codex)")"']' "$(sgt_jq "$SGT_CODEX" '.hooks.UserPromptSubmit')" "Codex: another UserPromptSubmit entry kept, ours after it"
+  assert_eq '1' "$(sgt_jq "$SGT_CODEX" .other)" "…and another key"
+  # An entry of ours in another shape (an edited timeout, a handler beside another's): set right.
+  jq '.hooks.PreToolUse[1].hooks[0].timeout = 99 | .hooks.SessionStart[1].hooks += [{"type":"command","command":"x.sh"}]' "$SGT_CLAUDE" > s.tmp && mv s.tmp "$SGT_CLAUDE"
+  inst install --search-gate
+  assert_eq "$(jq -c '.PreToolUse[0]' <<<"$(sgt_want claude)")" "$(sgt_jq "$SGT_CLAUDE" '.hooks.PreToolUse[1]')" "an edited timeout: restored"
+  assert_eq "2" "$(sgt_jq "$SGT_CLAUDE" '.hooks.PreToolUse | length')" "…not duplicated"
+  assert_eq '[{"matcher":"startup","hooks":[{"type":"command","command":"echo hi"}]},{"matcher":"startup|resume|clear|compact","hooks":[{"type":"command","command":"x.sh"}]},'"$(jq -c '.SessionStart[0]' <<<"$(sgt_want claude)")"']' \
+    "$(sgt_jq "$SGT_CLAUDE" '.hooks.SessionStart')" "a group holding ours and another handler: that handler kept in its group, ours its own group again"
+  teardown
+}
+
+test_search_gate_install_idempotent() {
+  echo "test: search-gate: install --search-gate twice changes nothing (byte for byte, mtimes too); a hand-formatted file already holding the entries is never rewritten"
+  sgt_fixture
+  local a m1 m2 c
+  inst install --search-gate
+  a=$(_tree_state)
+  m1=$(stat -c %Y "$SGT_CLAUDE" 2>/dev/null || stat -f %m "$SGT_CLAUDE")
+  sleep 1
+  inst install --search-gate
+  assert_eq "0" "$IRC" "second install: exit 0"
+  m2=$(stat -c %Y "$SGT_CLAUDE" 2>/dev/null || stat -f %m "$SGT_CLAUDE")
+  assert_eq "$a" "$(_tree_state)" "the tree is byte for byte the same"
+  assert_eq "$m1" "$m2" "….claude/settings.json was not even rewritten"
+  # Hand-formatted, keys reordered, others' entries around ours: untouched.
+  jq -cn --argjson w "$(sgt_want claude)" '{hooks: {Stop: [{hooks: [{command: "s.sh", type: "command"}]}],
+      PreToolUse: ([{matcher: "Bash", hooks: [{type: "command", command: "b.sh"}]}] + $w.PreToolUse),
+      SessionStart: $w.SessionStart, UserPromptSubmit: $w.UserPromptSubmit}, env: {A: "1"}}' > "$SGT_CLAUDE"
+  printf '\n\n' >> "$SGT_CLAUDE"
+  jq -n --argjson w "$(sgt_want codex)" '.hooks = $w' | sed 's/^/  /' > "$SGT_CODEX"
+  c=$(cksum < "$SGT_CLAUDE")$(cksum < "$SGT_CODEX")
+  inst install --search-gate
+  assert_eq "0" "$IRC" "install over files already holding the entries: exit 0"
+  assert_eq "$c" "$(cksum < "$SGT_CLAUDE")$(cksum < "$SGT_CODEX")" "…both untouched, byte for byte"
+  teardown
+}
+
+test_search_gate_uninstall_removes_only_ours() {
+  echo "test: search-gate: uninstall --search-gate removes its three entries and nothing else; a file left {} or {\"hooks\":{}} is removed, and .codex/ when it is then empty"
+  sgt_fixture
+  local before
+  before=$(_tree_state)
+  inst install --search-gate
+  inst uninstall --search-gate
+  assert_eq "0" "$IRC" "uninstall --search-gate: exit 0"
+  assert_contains "$IOUT" "doc-search gate: removed" "…saying so"
+  assert_eq "$before" "$(_tree_state)" "…the tree as before the install (both files gone, .codex/ gone)"
+  # Others' entries and keys, in both files.
+  printf '%s\n' '{"permissions":{"allow":["x"]},"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"mine.sh"}]}],"Stop":[{"hooks":[{"type":"command","command":"stop.sh"}]}]}}' | jq . > "$SGT_CLAUDE"
+  mkdir -p .codex
+  printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"s.sh"}]}]}}' | jq . > "$SGT_CODEX"
+  printf 'x = 1\n' > .codex/config.toml
+  before=$(_tree_state)
+  inst install --search-gate
+  inst uninstall --search-gate
+  assert_eq "0" "$IRC" "uninstall beside others' entries: exit 0"
+  assert_eq "$before" "$(_tree_state)" "…every other entry, key and file exactly as before (jq's formatting)"
+  # A handler of ours sharing a group with another's: only ours goes.
+  jq --argjson w "$(sgt_want claude)" '.hooks.PreToolUse[0].hooks += $w.PreToolUse[0].hooks' "$SGT_CLAUDE" > s.tmp && mv s.tmp "$SGT_CLAUDE"
+  inst uninstall --search-gate
+  assert_eq '[{"matcher":"Bash","hooks":[{"type":"command","command":"mine.sh"}]}]' "$(sgt_jq "$SGT_CLAUDE" .hooks.PreToolUse)" "a shared group: our handler removed, the group kept"
+  # Left {"hooks":{}} or {}: removed.
+  jq -n --argjson w "$(sgt_want claude)" '{hooks: $w}' > "$SGT_CLAUDE"
+  rm -f "$SGT_CODEX" .codex/config.toml
+  jq -n --argjson w "$(sgt_want codex)" '{hooks: ($w + {Stop: []})}' > "$SGT_CODEX"
+  inst uninstall --search-gate
+  assert_file_not_exists "$SGT_CLAUDE" "only ours: .claude/settings.json removed"
+  assert_eq '{"hooks":{"Stop":[]}}' "$(sgt_jq "$SGT_CODEX" .)" "an event array of someone else's, empty: kept, so the file is kept"
+  printf '{"hooks":{}}\n' > "$SGT_CODEX"
+  jq -n --argjson w "$(sgt_want claude)" '{hooks: $w}' > "$SGT_CLAUDE"
+  inst uninstall --search-gate
+  assert_file_not_exists "$SGT_CLAUDE" "removed again"
+  assert_eq '{"hooks":{}}' "$(sgt_jq "$SGT_CODEX" .)" "a file of {\"hooks\":{}} holding nothing of ours: not touched"
+  rm -f "$SGT_CODEX"
+  # Twice, and with nothing installed.
+  inst uninstall --search-gate
+  assert_eq "0" "$IRC" "uninstall again: exit 0"
+  assert_contains "$IOUT" "doc-search gate: nothing to uninstall" "…saying so"
+  # A gate command under another event, or another gate event under ours, is not ours.
+  printf '%s\n' "{\"hooks\":{\"PostToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":$(jq -n --arg c "$SGT_CMD_PREFIX tool" '$c')}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":$(jq -n --arg c "$SGT_CMD_PREFIX prompt" '$c')}]}]}}" > "$SGT_CLAUDE"
+  before=$(cksum < "$SGT_CLAUDE")
+  inst uninstall --search-gate
+  assert_eq "$before" "$(cksum < "$SGT_CLAUDE")" "per event, an entry is ours by its command: others' uses are kept"
+  teardown
+}
+
+test_search_gate_refuses_unreadable_files() {
+  echo "test: search-gate: a hook file that is not one JSON object, or whose hooks (or an event of it) has the wrong type, is refused, exit 1, nothing changed — install and uninstall alike"
+  sgt_fixture
+  local before c f
+  for f in "$SGT_CLAUDE" "$SGT_CODEX"; do
+    mkdir -p "${f%/*}"
+    for c in '[]' 'null' '3' '{} {}' 'not json' '' '{"hooks":[]}' '{"hooks":null}' '{"hooks":{"PreToolUse":{}}}'; do
+      rm -f "$SGT_CLAUDE" "$SGT_CODEX"
+      printf '%s' "$c" > "$f"
+      before=$(_tree_state)
+      inst install --search-gate
+      assert_eq "1" "$IRC" "install, $f '$c': exit 1"
+      assert_contains "$IOUT" "$f" "…naming it"
+      assert_contains "$IOUT" "Nothing was changed" "…saying nothing was"
+      assert_eq "$before" "$(_tree_state)" "…the other file not written either"
+      inst uninstall --search-gate
+      assert_eq "1" "$IRC" "uninstall, $f '$c': exit 1"
+      assert_eq "$before" "$(_tree_state)" "…nothing changed"
+    done
+  done
+  teardown
+}
+
+test_search_gate_unreadable_rule_copy() {
+  echo "test: search-gate: an AGENTS.md or CLAUDE.md that cannot be read is reported as unreadable (a ⚠ line; .search_rule_copies state unreadable, version null), with no awk error and no false 'no end marker'; the readable copy decides search_rule"
+  sgt_fixture
+  local tpl="$SCRIPT_DIR/../references/search-rule.md"
+  sed -n '/^<!-- doc-superpowers:search-rule v[0-9]/,/^<!-- \/doc-superpowers:search-rule -->$/p' "$tpl" > CLAUDE.md
+  cp CLAUDE.md AGENTS.md
+  chmod 000 AGENTS.md
+  if [ -r AGENTS.md ]; then
+    chmod 644 AGENTS.md
+    record_skip "search-gate: an unreadable rule copy — chmod 000 does not stop this user reading it (root)"
+    teardown
+    return 0
+  fi
+  inst status --search-gate
+  assert_eq "0" "$IRC" "status: exit 0"
+  assert_contains "$IOUT" "⚠ AGENTS.md cannot be read: its search rule is not checked (fix its permissions)" "a ⚠ line naming the file"
+  assert_contains "$IOUT" "✓ search rule: current (CLAUDE.md: v" "…the readable copy decides"
+  assert_not_contains "$IOUT" "awk" "…no awk error"
+  assert_not_contains "$IOUT" "no end marker" "…no false 'no end marker'"
+  assert_not_contains "$IOUT" "AGENTS.md: v" "…no empty version"
+  inst status --search-gate --json
+  assert_eq "0" "$IRC" "status --json: exit 0"
+  assert_eq "json" "$(jq -e . >/dev/null 2>&1 <<<"$IOUT" && echo json)" "…stdout and stderr together are one JSON object (no awk error)"
+  assert_eq "current" "$(srh_json .tiers.search_gate.search_rule)" "JSON: the readable copy decides"
+  assert_eq '{"state":"unreadable","version":null}' "$(srh_json '.tiers.search_gate.search_rule_copies["AGENTS.md"] | tojson')" "JSON: AGENTS.md unreadable, version null"
+  rm -f CLAUDE.md
+  inst status --search-gate --json
+  assert_eq "absent unreadable" "$(srh_json '.tiers.search_gate | "\(.search_rule) \(.search_rule_copies["AGENTS.md"].state)"')" "only an unreadable copy: absent, the copy unreadable"
+  chmod 644 AGENTS.md
+  teardown
+}
+
+test_search_gate_never_writes_through_links() {
+  echo "test: search-gate: a symbolic link at .claude/settings.json, .codex or .codex/hooks.json is refused (exit 1, nothing written, nothing through it) — install and uninstall"
+  sgt_fixture
+  local before elsewhere
+  elsewhere=$(harness_mktemp_d sgtelse)
+  printf '{}\n' > "$elsewhere/s.json"
+  ln -s "$elsewhere/s.json" "$SGT_CLAUDE"
+  before=$(_tree_state)
+  inst install --search-gate
+  assert_eq "1" "$IRC" ".claude/settings.json a link: install exit 1"
+  assert_contains "$IOUT" "symbolic link" "…named as one"
+  assert_eq "$before" "$(_tree_state)" "…nothing written (no .codex/hooks.json either)"
+  assert_eq "{}" "$(cat "$elsewhere/s.json")" "…nothing through it"
+  inst uninstall --search-gate
+  assert_eq "1" "$IRC" "…uninstall exit 1"
+  rm "$SGT_CLAUDE"
+  ln -s "$elsewhere" .codex
+  inst install --search-gate
+  assert_eq "1" "$IRC" ".codex a link: install exit 1"
+  assert_file_not_exists "$SGT_CLAUDE" "….claude/settings.json not written first"
+  assert_eq "s.json" "$(ls -A "$elsewhere")" "…nothing through it"
+  rm .codex
+  mkdir .codex
+  ln -s "$elsewhere/s.json" "$SGT_CODEX"
+  inst install --search-gate
+  assert_eq "1" "$IRC" ".codex/hooks.json a link: install exit 1"
+  assert_eq "{}" "$(cat "$elsewhere/s.json")" "…nothing through it"
+  inst uninstall --search-gate
+  assert_eq "1" "$IRC" "…uninstall exit 1"
+  teardown
+}
+
+test_search_gate_not_in_all() {
+  echo "test: search-gate: neither --all nor --search includes the --search-gate set (install adds none of it, uninstall keeps it); status --json reports it only when named"
+  sgt_fixture
+  inst install --all
+  assert_file_not_exists "$SGT_CLAUDE" "install --all: no .claude/settings.json"
+  assert_file_not_exists "$SGT_CODEX" "…no .codex/hooks.json"
+  inst install --search
+  assert_file_not_exists "$SGT_CODEX" "install --search: none of it either"
+  inst install --search-gate
+  inst uninstall --all
+  assert_file_exists "$SGT_CLAUDE" "uninstall --all keeps it"
+  inst uninstall --search
+  assert_eq "1" "$IRC" "uninstall --search, the gate's hooks registered: refused, exit 1"
+  assert_file_exists "$SGT_CODEX" "…the gate's hooks kept"
+  assert_file_exists "$SRH_LAUNCHER" "…and the launcher they run"
+  inst status --json
+  assert_eq "null" "$(srh_json '.tiers.search_gate')" "status --json: not in it"
+  inst status --search --json
+  assert_eq "search" "$(srh_json '.tiers | keys | join(",")')" "status --search --json: only the --search set"
+  inst status --search-gate --json
+  assert_eq "search_gate" "$(srh_json '.tiers | keys | join(",")')" "status --search-gate --json: it alone"
+  inst status --all
+  assert_not_contains "$IOUT" "doc-search gate" "status --all: no gate section"
+  inst status
+  assert_contains "$IOUT" "doc-search gate (the opt-in --search-gate set):" "plain status: its section"
+  teardown
+}
+
+test_search_gate_replaces_pre_client_entries() {
+  echo "test: search-gate: a SessionStart entry from before --client (gate session-start alone) is ours: status reads the file partial, install replaces it (no duplicate), uninstall removes it"
+  sgt_fixture '{"required": true}'
+  local f who
+  for f in "$SGT_CLAUDE" "$SGT_CODEX"; do
+    who=claude
+    [ "$f" = "$SGT_CLAUDE" ] || who=codex
+    mkdir -p "${f%/*}"
+    jq -n --argjson h "$(sgt_want "$who")" '{hooks: $h} | .hooks.SessionStart[0].hooks[0].command |= (rtrimstr(" --client claude") | rtrimstr(" --client codex"))' > "$f"
+  done
+  assert_eq "$SGT_CMD_PREFIX session-start" "$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$SGT_CODEX")" "the fixture: the old command"
+  inst status --search-gate
+  assert_contains "$IOUT" "⚠ .claude/settings.json: partial: missing or changed: SessionStart (re-run install --search-gate)" "status: Claude Code's file partial, SessionStart named"
+  assert_contains "$IOUT" "⚠ .codex/hooks.json: partial: missing or changed: SessionStart (re-run install --search-gate)" "…Codex's too"
+  inst status --search-gate --json
+  assert_eq "partial:partial" "$(srh_json '"\(.tiers.search_gate.claude_settings):\(.tiers.search_gate.codex_hooks)"')" "…and in JSON"
+  inst install --search-gate
+  assert_eq "0" "$IRC" "install --search-gate: exit 0"
+  assert_eq "$(sgt_want claude)" "$(sgt_jq "$SGT_CLAUDE" .hooks)" "Claude Code: the old entry replaced, none duplicated"
+  assert_eq "$(sgt_want codex)" "$(sgt_jq "$SGT_CODEX" .hooks)" "…Codex too"
+  # An old entry beside the new one: two of ours is partial; install leaves one.
+  jq --arg c "$SGT_CMD_PREFIX session-start" '.hooks.SessionStart += [{hooks: [{type: "command", command: $c, timeout: 45}]}]' "$SGT_CLAUDE" > "$SGT_CLAUDE.tmp" && mv "$SGT_CLAUDE.tmp" "$SGT_CLAUDE"
+  inst status --search-gate --json
+  assert_eq "partial" "$(srh_json .tiers.search_gate.claude_settings)" "old and new together: partial"
+  inst install --search-gate
+  assert_eq "$(sgt_want claude)" "$(sgt_jq "$SGT_CLAUDE" .hooks)" "…install leaves the new one alone"
+  # Uninstall removes an old entry too.
+  for f in "$SGT_CLAUDE" "$SGT_CODEX"; do
+    jq '.hooks.SessionStart[0].hooks[0].command |= (rtrimstr(" --client claude") | rtrimstr(" --client codex"))' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  done
+  inst uninstall --search-gate
+  assert_eq "0" "$IRC" "uninstall --search-gate: exit 0"
+  assert_file_not_exists "$SGT_CLAUDE" "…the old entries removed with ours: the file goes"
+  assert_file_not_exists "$SGT_CODEX" "…both files"
+  teardown
+}
+
+test_search_uninstall_refused_while_gated() {
+  echo "test: search-gate: uninstall --search alone is refused (exit 1, the message naming uninstall --search-gate, nothing changed) while either hook file holds the gate's entries, whose commands run the launcher it would remove; with --search-gate too it removes both"
+  sgt_fixture '{"required": true}'
+  local before f
+  inst install --search-gate
+  for f in "$SGT_CLAUDE" "$SGT_CODEX"; do
+    before=$(_tree_state)
+    inst uninstall --search
+    assert_eq "1" "$IRC" "the gate's hooks in $f: uninstall --search exits 1"
+    assert_contains "$IOUT" "ERROR: uninstall --search would remove the launcher .claude/doc-superpowers/search-mcp.sh, which the doc-search gate's hooks run ($f" "…naming the file"
+    assert_contains "$IOUT" "uninstall --search-gate first, or both together (uninstall --search --search-gate). Nothing was changed." "…and the way out"
+    assert_eq "$before" "$(_tree_state)" "…nothing changed"
+    inst uninstall --git --search
+    assert_eq "1" "$IRC" "…with another tier too: exit 1 (every check runs first)"
+    assert_eq "$before" "$(_tree_state)" "…nothing changed"
+    # Next round: the entries in the other file only.
+    jq '.hooks.SessionStart = [] | .hooks.UserPromptSubmit = [] | .hooks.PreToolUse = []' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+  done
+  inst install --search-gate
+  inst uninstall --search --search-gate
+  assert_eq "0" "$IRC" "uninstall --search --search-gate: exit 0"
+  assert_file_not_exists "$SRH_LAUNCHER" "…the launcher removed"
+  assert_file_not_exists "$SGT_CLAUDE" "…and the gate's hooks"
+  assert_file_not_exists "$SGT_CODEX" "…in both files"
+  inst install --search
+  inst uninstall --search
+  assert_eq "0" "$IRC" "no gate's hooks: uninstall --search exits 0"
+  teardown
+}
+
+test_search_gate_status_warns_launcher_differs() {
+  echo "test: search-gate: status warns when the hooks are registered and the launcher copy they run differs from the plugin's (an older one cannot answer them)"
+  sgt_fixture '{"required": true}'
+  inst install --search-gate
+  inst status --search-gate
+  assert_not_contains "$IOUT" "differs from the plugin's scripts/search/launch.sh" "the plugin's copy: no warning"
+  printf '#!/bin/sh\n# doc-search launcher v3.10.0\n' > "$SRH_LAUNCHER"
+  inst status --search-gate
+  assert_contains "$IOUT" "⚠ the hooks run .claude/doc-superpowers/search-mcp.sh, which differs from the plugin's scripts/search/launch.sh: a copy from before the readiness gate cannot answer them (re-run install --search)" "a copy that differs: ⚠"
+  teardown
+}
+
+test_search_gate_status_and_json() {
+  echo "test: search-gate: status reports each file installed / partial / absent and the search-rule block (absent without the plugin's template), as text and as .tiers.search_gate"
+  setup
+  inst status --search-gate
+  assert_eq "0" "$IRC" "status --search-gate: exit 0"
+  assert_contains "$IOUT" "doc-search gate (the opt-in --search-gate set):" "its header"
+  assert_contains "$IOUT" "not enabled (no docs/search/config.json); nothing of this set is installed" "no config, nothing installed: one plain line"
+  assert_not_contains "$IOUT" "⚠" "…no warning"
+  teardown
+  sgt_fixture
+  inst status --search-gate
+  assert_contains "$IOUT" "✗ .claude/settings.json: not registered (install --search-gate)" "nothing installed: Claude Code"
+  assert_contains "$IOUT" "✗ .codex/hooks.json: not registered (install --search-gate)" "…Codex"
+  assert_contains "$IOUT" "search rule: absent" "…the rule"
+  inst status --search-gate --json
+  assert_eq "absent absent absent" "$(srh_json '.tiers.search_gate | "\(.claude_settings) \(.codex_hooks) \(.search_rule)"')" "JSON: all absent"
+  assert_eq "doc-superpowers-hooks-status/1" "$(srh_json .schema)" "…the schema unchanged"
+  inst install --search-gate
+  inst status --search-gate
+  assert_contains "$IOUT" "✓ .claude/settings.json: installed (SessionStart, UserPromptSubmit, PreToolUse)" "installed: Claude Code"
+  assert_contains "$IOUT" "✓ .codex/hooks.json: installed (SessionStart, UserPromptSubmit, PreToolUse; Codex runs them once the project is trusted and they are approved in /hooks)" "…Codex, with its two conditions"
+  assert_not_contains "$IOUT" "⚠" "…no warning"
+  inst status --search-gate --json
+  assert_eq "installed installed absent" "$(srh_json '.tiers.search_gate | "\(.claude_settings) \(.codex_hooks) \(.search_rule)"')" "JSON: installed"
+  inst status --git --search --search-gate --json
+  assert_eq "git,search,search_gate" "$(srh_json '.tiers | keys | join(",")')" "--git --search --search-gate --json: the three named"
+  # Partial: one event gone, or another timeout.
+  jq 'del(.hooks.UserPromptSubmit)' "$SGT_CLAUDE" > s.tmp && mv s.tmp "$SGT_CLAUDE"
+  jq '.hooks.PreToolUse[0].hooks[0].timeout = 3' "$SGT_CODEX" > s.tmp && mv s.tmp "$SGT_CODEX"
+  inst status --search-gate
+  assert_contains "$IOUT" "⚠ .claude/settings.json: partial: missing or changed: UserPromptSubmit (re-run install --search-gate)" "an event removed: partial, naming it"
+  assert_contains "$IOUT" "⚠ .codex/hooks.json: partial: missing or changed: PreToolUse (re-run install --search-gate)" "a timeout changed: partial"
+  inst status --search-gate --json
+  assert_eq "partial partial" "$(srh_json '.tiers.search_gate | "\(.claude_settings) \(.codex_hooks)"')" "JSON: partial"
+  # Unreadable: absent, with a warning.
+  printf '[1]' > "$SGT_CODEX"
+  inst status --search-gate
+  assert_eq "0" "$IRC" "an unreadable file: status still exits 0"
+  assert_contains "$IOUT" "⚠ .codex/hooks.json cannot be read as hook settings" "…warned"
+  inst status --search-gate --json
+  assert_eq "absent" "$(srh_json .tiers.search_gate.codex_hooks)" "JSON: absent"
+  rm -f "$SGT_CODEX"
+  inst install --search-gate
+  # The launcher gone, or the config.
+  rm -f "$SRH_LAUNCHER"
+  inst status --search-gate
+  assert_contains "$IOUT" "⚠ the hooks run .claude/doc-superpowers/search-mcp.sh, which is not installed (install --search)" "registered without the launcher: ⚠"
+  inst install --search
+  rm -f docs/search/config.json
+  inst status --search-gate
+  assert_contains "$IOUT" "⚠ docs/search/config.json is missing: doc-search is not enabled here, so the hooks allow everything" "installed without the config: ⚠"
+  inst status --search-gate --json
+  assert_eq "installed" "$(srh_json .tiers.search_gate.claude_settings)" "…and JSON still reports the files"
+  # A marked rule block, but a plugin without references/search-rule.md: absent.
+  local plug
+  plug=$(harness_mktemp_d sgtnotpl)
+  plugin_copy "$plug"
+  printf '# Agents\n<!-- doc-superpowers:search-rule v1.2.3 -->\nrule\n<!-- /doc-superpowers:search-rule -->\n' > AGENTS.md
+  inst --from "$plug/scripts/hooks/install.sh" status --search-gate --json
+  assert_eq "absent" "$(srh_json .tiers.search_gate.search_rule)" "a marked block, no references/search-rule.md in the plugin: absent"
+  inst --from "$plug/scripts/hooks/install.sh" status --search-gate
+  assert_contains "$IOUT" "✗ search rule: absent (this plugin has no references/search-rule.md to compare with)" "…as text"
+  teardown
+}
+
+test_search_gate_rule_drift() {
+  echo "test: search-gate: status compares the body of the marked block in AGENTS.md or CLAUDE.md (the lines between the markers) with the plugin's references/search-rule.md: current, outdated (a changed line, no end marker), absent; the marker version is shown, not judged; CRLF is the same text"
+  sgt_fixture
+  local plug ish
+  plug=$(harness_mktemp_d sgtplug)
+  plugin_copy "$plug"
+  ish="$plug/scripts/hooks/install.sh"
+  mkdir -p "$plug/references"
+  printf '# The rule\n\nCopy the block below.\n\n<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\n\nUse doc-search.\n<!-- /doc-superpowers:search-rule -->\n' > "$plug/references/search-rule.md"
+  # Absent: no file, or no opening marker.
+  inst --from "$ish" status --search-gate --json
+  assert_eq "absent" "$(srh_json .tiers.search_gate.search_rule)" "no AGENTS.md or CLAUDE.md: absent"
+  assert_eq "{}" "$(srh_json '.tiers.search_gate.search_rule_copies | tojson')" "…no copies"
+  printf '# Agents\n\n## Searching\n\nUse doc-search.\n<!-- /doc-superpowers:search-rule -->\n' > AGENTS.md
+  inst --from "$ish" status --search-gate --json
+  assert_eq "absent" "$(srh_json .tiers.search_gate.search_rule)" "a closing marker with no opening marker: absent"
+  inst --from "$ish" status --search-gate
+  assert_contains "$IOUT" "✗ search rule: absent (no marked doc-superpowers:search-rule block in AGENTS.md or CLAUDE.md)" "…as text"
+  # Current: the body is the template's; the marker version is shown, not judged.
+  printf '# Agents\n\nintro\n<!-- doc-superpowers:search-rule v1.0.0 -->\n## Searching\n\nUse doc-search.\n<!-- /doc-superpowers:search-rule -->\nafter\n' > AGENTS.md
+  inst --from "$ish" status --search-gate --json
+  assert_eq "current" "$(srh_json .tiers.search_gate.search_rule)" "AGENTS.md's body is the template's, another marker version: current"
+  assert_eq '{"AGENTS.md":{"state":"current","version":"1.0.0"}}' "$(srh_json '.tiers.search_gate.search_rule_copies | tojson')" "…the copy and its marker version"
+  inst --from "$ish" status --search-gate
+  assert_contains "$IOUT" "✓ search rule: current (AGENTS.md: v1.0.0)" "…as text, with the copy's version"
+  # Outdated: one changed line.
+  printf '<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\n\nUse rg.\n<!-- /doc-superpowers:search-rule -->\n' > CLAUDE.md
+  inst --from "$ish" status --search-gate --json
+  assert_eq "outdated" "$(srh_json .tiers.search_gate.search_rule)" "CLAUDE.md's body has one changed line, its version the template's: outdated (the worse of the two)"
+  assert_eq "current outdated 9.9.9" "$(srh_json '.tiers.search_gate.search_rule_copies | "\(.["AGENTS.md"].state) \(.["CLAUDE.md"].state) \(.["CLAUDE.md"].version)"')" "…each copy's state and version"
+  inst --from "$ish" status --search-gate
+  assert_contains "$IOUT" "⚠ search rule: outdated (CLAUDE.md: v9.9.9): differs from the plugin's references/search-rule.md (copy its marked block again)" "…as text, naming the file"
+  rm -f AGENTS.md
+  # The block in CLAUDE.md only.
+  printf '# Claude\n<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\n\nUse doc-search.\n<!-- /doc-superpowers:search-rule -->\n' > CLAUDE.md
+  inst --from "$ish" status --search-gate --json
+  assert_eq "current" "$(srh_json .tiers.search_gate.search_rule)" "the block in CLAUDE.md only: current"
+  inst --from "$ish" status --search-gate
+  assert_contains "$IOUT" "✓ search rule: current (CLAUDE.md: v9.9.9)" "…as text"
+  rm -f CLAUDE.md
+  # Outdated: no closing marker, even with the whole body there.
+  printf '<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\n\nUse doc-search.\n' > AGENTS.md
+  inst --from "$ish" status --search-gate --json
+  assert_eq "outdated" "$(srh_json .tiers.search_gate.search_rule)" "the body with no closing marker: outdated"
+  inst --from "$ish" status --search-gate
+  assert_contains "$IOUT" "⚠ search rule: outdated (AGENTS.md: v9.9.9, no end marker)" "…as text, saying why"
+  # A blank line added before the closing marker is a changed body.
+  printf '<!-- doc-superpowers:search-rule v9.9.9 -->\n## Searching\n\nUse doc-search.\n\n<!-- /doc-superpowers:search-rule -->\n' > AGENTS.md
+  inst --from "$ish" status --search-gate --json
+  assert_eq "outdated" "$(srh_json .tiers.search_gate.search_rule)" "a trailing blank line added inside the block: outdated"
+  # CRLF line endings: the same text.
+  printf '# Agents\r\n<!-- doc-superpowers:search-rule v9.9.9 -->\r\n## Searching\r\n\r\nUse doc-search.\r\n<!-- /doc-superpowers:search-rule -->\r\n' > AGENTS.md
+  inst --from "$ish" status --search-gate --json
+  assert_eq "current 9.9.9" "$(srh_json '.tiers.search_gate | "\(.search_rule) \(.search_rule_copies["AGENTS.md"].version)"')" "a CRLF copy of the block: current (line endings are not text)"
+  teardown
+}
+
+test_search_gate_shipped_rule_is_current() {
+  echo "test: search-gate: the shipped references/search-rule.md, its block copied as is into AGENTS.md, is current; a copy with one changed line is outdated"
+  sgt_fixture
+  local tpl="$SCRIPT_DIR/../references/search-rule.md"
+  assert_file_exists "$tpl" "the plugin ships references/search-rule.md"
+  sed -n '/^<!-- doc-superpowers:search-rule v[0-9]/,/^<!-- \/doc-superpowers:search-rule -->$/p' "$tpl" > AGENTS.md
+  assert_eq "<!-- /doc-superpowers:search-rule -->" "$(tail -n 1 AGENTS.md)" "…its block ends with the closing marker"
+  assert_eq "<!-- /doc-superpowers:search-rule -->" "$(tail -n 1 "$tpl")" "…and nothing follows it in the template"
+  inst status --search-gate --json
+  assert_eq "current" "$(srh_json .tiers.search_gate.search_rule)" "the shipped block copied as is: current"
+  assert_eq "$(jq -r .version "$SCRIPT_DIR/../package.json")" "$(srh_json '.tiers.search_gate.search_rule_copies["AGENTS.md"].version')" "…its marker version is the plugin's"
+  sed 's/^### Halt$/### Stop/' AGENTS.md > a.tmp && mv a.tmp AGENTS.md
+  inst status --search-gate --json
+  assert_eq "outdated" "$(srh_json .tiers.search_gate.search_rule)" "one heading changed: outdated"
+  teardown
+}
+
+test_search_gate_hooks_run_the_launcher() {
+  echo "test: search-gate: the registered PreToolUse command, run as a client runs it (sh -c, from a subdirectory, the event on stdin), reaches the committed launcher: with a not-ready verdict it denies rg and allows the fix command"
+  sgt_fixture '{"required": true}'
+  local envroot cmd f ev vf who
+  envroot=$(harness_mktemp_d sgtroot)
+  srl_root "$envroot"
+  inst install --search-gate
+  vf=$(git rev-parse --git-path doc-search-gate)
+  printf 'not-ready\nindex absent; fix: sh .claude/doc-superpowers/search-mcp.sh index\n' > "$vf"
+  mkdir -p sub/dir
+  ev="$SRG_TMP/sgt-ev.json"
+  for f in "$SGT_CLAUDE" "$SGT_CODEX"; do
+    cmd=$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$f")
+    srg_event "$ev" Bash "rg foo"
+    RUN_RC=0
+    RUN_OUT=$(cd sub/dir && env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= PATH="$SRL_BIN:$REAL_PATH" sh -c "$cmd" < "$ev" 2>&1) || RUN_RC=$?
+    assert_eq "0" "$RUN_RC" "$f: exit 0"
+    assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "$f: rg denied"
+    srg_event "$ev" Bash "sh .claude/doc-superpowers/search-mcp.sh index"
+    RUN_OUT=$(cd sub/dir && env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= PATH="$SRL_BIN:$REAL_PATH" sh -c "$cmd" < "$ev" 2>&1) || true
+    assert_eq "" "$RUN_OUT" "$f: the fix command allowed (silent)"
+    # SessionStart names its client: doc-search gate gets --client.
+    cmd=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$f")
+    RUN_OUT=$(cd sub/dir && env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= PATH="$SRL_BIN:$REAL_PATH" sh -c "$cmd" < /dev/null 2>&1) || true
+    who=claude
+    [ "$f" = "$SGT_CLAUDE" ] || who=codex
+    assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search gate session-start --client $who" "$RUN_OUT" "$f: SessionStart runs doc-search gate session-start --client $who"
+  done
+  teardown
+}
+
 test_launcher_client_cwd() {
   echo "test: launcher: serve exports the parent process's cwd as DOC_SEARCH_CLIENT_CWD (the client's worktree becomes the server's default); a value already set is kept; other verbs do not set it"
   setup
@@ -6467,15 +7086,682 @@ test_launcher_client_cwd() {
   teardown
 }
 
+# --- doc-search: the launcher's check and gate ---------------------------------
+#
+# `check` and `gate` answer in the launcher where doc-search cannot run (outside
+# a work tree, no root, no uv); otherwise they exec doc-search. `gate tool`
+# never runs uv: it decides from the verdict file,
+# $(git rev-parse --git-path doc-search-gate) — line 1 the verdict, line 2 the
+# reason and fix. Every JSON the launcher prints is parsed with `jq -e .`.
+
+SRG_TMP=$(harness_mktemp_d srg)
+SRG_UV_REASON="uv not found (https://docs.astral.sh/uv/)"
+SRG_LAUNCHER_FIX="sh .claude/doc-superpowers/search-mcp.sh"
+
+# srg_run <stdin file> [VAR=value …] -- <launcher args…>: the launcher under
+# /bin/sh in the cwd, stdin from the file, the fake uv in front of PATH (a
+# PATH=… given replaces it). The root variables and DOC_SEARCH_GATE are empty
+# unless given. Sets RUN_RC, RUN_OUT (stdout alone) and RUN_ERR (stderr).
+srg_run() {
+  local input=$1
+  local envs=()
+  shift
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    envs+=("$1")
+    shift
+  done
+  [ "$#" -gt 0 ] && shift
+  RUN_RC=0
+  RUN_OUT=$(env DOC_SUPERPOWERS_ROOT= CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= PATH="$SRL_BIN:$REAL_PATH" \
+    ${envs[@]+"${envs[@]}"} /bin/sh "$SCRIPT_DIR/search/launch.sh" "$@" <"$input" 2>"$SRG_TMP/err") || RUN_RC=$?
+  RUN_ERR=$(cat "$SRG_TMP/err")
+}
+
+# srg_pipe <stdin file> [VAR=value …] -- <launcher args…>: srg_run, the event
+# written through a pipe by cat. RUN_PIPE is cat's exit status: 0 when the
+# launcher drained it, 141 (SIGPIPE) when it exited without reading.
+srg_pipe() {
+  local input=$1 res
+  local envs=()
+  shift
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    envs+=("$1")
+    shift
+  done
+  [ "$#" -gt 0 ] && shift
+  res=$(
+    set +e
+    cat "$input" | env DOC_SUPERPOWERS_ROOT= CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= PATH="$SRL_BIN:$REAL_PATH" \
+      ${envs[@]+"${envs[@]}"} /bin/sh "$SCRIPT_DIR/search/launch.sh" "$@" 2>"$SRG_TMP/err"
+    printf '\n%s %s' "${PIPESTATUS[0]}" "${PIPESTATUS[1]}"
+  )
+  RUN_PIPE=${res##*$'\n'}
+  RUN_RC=${RUN_PIPE#* }
+  RUN_PIPE=${RUN_PIPE%% *}
+  RUN_OUT=${res%$'\n'*}
+  RUN_ERR=$(cat "$SRG_TMP/err")
+}
+
+# srg_event <file> <tool_name> [command]: a PreToolUse event in <file> — a
+# Bash-shaped tool_input with <command>, else a Read-shaped one.
+srg_event() {
+  if [ "$#" -gt 2 ]; then
+    jq -cn --arg t "$2" --arg c "$3" \
+      '{session_id: "s", hook_event_name: "PreToolUse", tool_name: $t, tool_input: {command: $c}}' > "$1"
+  else
+    jq -cn --arg t "$2" \
+      '{session_id: "s", hook_event_name: "PreToolUse", tool_name: $t, tool_input: {file_path: "README.md"}}' > "$1"
+  fi
+}
+
+# srg_nouv_path: a PATH with jq and no uv.
+srg_nouv_path() {
+  local dir
+  dir=$(make_nojq_path)
+  ln -s "$(type -P jq)" "$dir/jq"
+  printf '%s' "$dir"
+}
+
+# srg_is_json: RUN_OUT is exactly one JSON object (`jq -e .` parses it).
+srg_is_json() {
+  jq -e . >/dev/null 2>&1 <<<"$RUN_OUT" && [ "$(jq -cs 'length == 1 and (.[0] | type == "object")' <<<"$RUN_OUT" 2>/dev/null)" = "true" ]
+}
+
+# srg_deny <reason>: the PreToolUse deny JSON with <reason>, compact.
+srg_deny() {
+  jq -cn --arg r "$1" '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}'
+}
+
+# srg_check_json <state> <exit> <reason> [fix]: check's JSON answer, compact.
+srg_check_json() {
+  jq -cn --arg s "$1" --argjson e "$2" --arg r "$3" --arg f "${4:-}" \
+    '{state: $s, exit: $e, reason: $r, fix: (if $f == "" then null else $f end)}'
+}
+
+# srg_compact: RUN_OUT as compact JSON ("NOT JSON" when it does not parse).
+srg_compact() {
+  jq -c . <<<"$RUN_OUT" 2>/dev/null || echo "NOT JSON"
+}
+
+test_launcher_gate_opt_out() {
+  echo "test: launcher: DOC_SEARCH_GATE=0 — every gate event exits 0 with no output (required with no uv, or a not-ready verdict); check is unchanged; the env hook can set it"
+  srh_fixture '{"required": true}'
+  local envroot nouv vf ev e
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  nouv=$(srg_nouv_path)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
+  ev="$SRG_TMP/rg.json"
+  srg_event "$ev" Bash "rg foo"
+  for e in session-start prompt; do
+    srg_run /dev/null DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate "$e"
+    assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate $e, required, no uv: exit 0, no output"
+    srg_run /dev/null DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" -- gate "$e"
+    assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate $e, with uv: exit 0, no output (doc-search is not run)"
+  done
+  srg_run "$ev" DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate tool, a not-ready verdict, rg: exit 0, no output (allowed)"
+  srg_run "$ev" DOC_SEARCH_GATE=" 0 " DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0:" "$RUN_RC:$RUN_OUT" "…' 0 ' (blanks around it) is 0 too"
+  srg_run "$ev" DOC_SEARCH_GATE=1 DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "…DOC_SEARCH_GATE=1 is not: rg is denied"
+  srg_run /dev/null DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" -- check --format json
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search check --format json" "$RUN_RC:$RUN_OUT" "check is unchanged: doc-search check runs"
+  srg_run /dev/null DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "1:doc-search: not ready: $SRG_UV_REASON" "$RUN_RC:$RUN_OUT" "…and, required with no uv, still says not ready, exit 1"
+  # Read after the env hook: the hook can set it.
+  mkdir -p "$XDG_CONFIG_HOME/doc-search"
+  printf 'DOC_SEARCH_GATE=0\n' > "$XDG_CONFIG_HOME/doc-search/env.sh"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0:" "$RUN_RC:$RUN_OUT" "DOC_SEARCH_GATE=0 set by the env hook: gate tool is silent"
+  printf "GATE_ALLOWED='.*'\n" > "$XDG_CONFIG_HOME/doc-search/env.sh"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "…but the hook cannot widen what is allowed (the launcher's own names are set after it)"
+  teardown
+}
+
+test_launcher_check_gate_outside_a_work_tree() {
+  echo "test: launcher: outside a git work tree — check says 'not in force: not a git work tree', exit 4, without running doc-search; every gate event is silent, exit 0"
+  setup
+  local envroot out nouv ev e
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  nouv=$(srg_nouv_path)
+  out=$(harness_mktemp_d outside)
+  ev="$SRG_TMP/rg.json"
+  srg_event "$ev" Bash "rg foo"
+  cd "$out"
+  srg_run /dev/null GIT_CEILING_DIRECTORIES="$SUITE_TMP" DOC_SUPERPOWERS_ROOT="$envroot" -- check
+  assert_eq "4:doc-search: not in force: not a git work tree:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: the line on stdout, exit 4 (uv is not run)"
+  srg_run /dev/null GIT_CEILING_DIRECTORIES="$SUITE_TMP" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "4:doc-search: not in force: not a git work tree" "$RUN_RC:$RUN_OUT" "…the same with no uv"
+  srg_run /dev/null GIT_CEILING_DIRECTORIES="$SUITE_TMP" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check --format json
+  assert_eq "4" "$RUN_RC" "check --format json: exit 4"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  assert_eq "$(srg_check_json not-in-force 4 "not a git work tree")" "$(srg_compact)" "…the verdict as JSON, fix null"
+  srg_run /dev/null GIT_CEILING_DIRECTORIES="$SUITE_TMP" -- check
+  assert_eq "4:doc-search: not in force: not a git work tree" "$RUN_RC:$RUN_OUT" "…and with no root (outside a work tree comes first)"
+  for e in session-start prompt; do
+    srg_run /dev/null GIT_CEILING_DIRECTORIES="$SUITE_TMP" DOC_SUPERPOWERS_ROOT="$envroot" -- gate "$e"
+    assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate $e: silent, exit 0"
+  done
+  srg_run "$ev" GIT_CEILING_DIRECTORIES="$SUITE_TMP" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate tool: silent, exit 0"
+  # Inside .git is not a work tree either.
+  cd "$TEST_DIR/.git"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check
+  assert_eq "4:doc-search: not in force: not a git work tree" "$RUN_RC:$RUN_OUT" "inside .git: not a git work tree, exit 4"
+  cd "$TEST_DIR"
+  teardown
+}
+
+test_launcher_check_gate_without_a_root() {
+  echo "test: launcher: no doc-superpowers root — check says 'not in force: doc-superpowers is not installed for this developer', exit 4; every gate event is silent, even required with a not-ready verdict; serve still fails"
+  srh_fixture '{"required": true}'
+  local nouv vf ev e
+  nouv=$(srg_nouv_path)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
+  ev="$SRG_TMP/rg.json"
+  srg_event "$ev" Bash "rg foo"
+  srg_run /dev/null -- check
+  assert_eq "4:doc-search: not in force: doc-superpowers is not installed for this developer:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: the line on stdout, exit 4"
+  srg_run /dev/null PATH="$nouv" -- check
+  assert_eq "4:doc-search: not in force: doc-superpowers is not installed for this developer" "$RUN_RC:$RUN_OUT" "…the same with no uv (no root comes first)"
+  srg_run /dev/null -- check --format json
+  assert_eq "4" "$RUN_RC" "check --format json: exit 4"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  assert_eq "$(srg_check_json not-in-force 4 "doc-superpowers is not installed for this developer")" "$(srg_compact)" "…the verdict as JSON, fix null"
+  for e in session-start prompt; do
+    printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
+    srg_run /dev/null PATH="$nouv" -- gate "$e"
+    assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate $e, required, no uv: silent, exit 0"
+    assert_true "…and removes the verdict file (not in force)" test ! -e "$vf"
+  done
+  printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
+  srg_run "$ev" -- gate tool
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate tool, a not-ready verdict, rg: silent, exit 0"
+  assert_true "…and leaves the verdict file alone" test -f "$vf"
+  srg_run /dev/null -- serve
+  assert_eq "2:doc-search: cannot find doc-superpowers (set DOC_SUPERPOWERS_ROOT)" "$RUN_RC:$RUN_ERR" "serve keeps its failure: exit 2, one stderr line"
+  teardown
+}
+
+test_launcher_check_gate_without_uv_required() {
+  echo "test: launcher: no uv where the raw config says \"required\": true — check: 'not ready: uv not found', exit 1; gate prompt blocks and gate session-start adds context, as JSON; gate tool decides as usual"
+  srh_fixture '{"required": true}'
+  local envroot nouv nojq vf ev want
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  nouv=$(srg_nouv_path)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "1:doc-search: not ready: $SRG_UV_REASON:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: the line on stdout, exit 1"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check --format json
+  assert_eq "1" "$RUN_RC" "check --format json: exit 1"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  assert_eq "$(srg_check_json not-ready 1 "$SRG_UV_REASON" "install uv")" "$(srg_compact)" "…the verdict as JSON, with its fix"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check --budget 5 --format=json
+  assert_eq "$(srg_check_json not-ready 1 "$SRG_UV_REASON" "install uv")" "$(srg_compact)" "…--format=json, after another option, too"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check --format json --format text
+  assert_eq "1:doc-search: not ready: $SRG_UV_REASON" "$RUN_RC:$RUN_OUT" "…the last --format wins (text)"
+  # Without jq: the same object, printed as a fixed string.
+  nojq=$(make_nojq_path)
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nojq" -- check --format json
+  assert_eq "1" "$RUN_RC" "without jq, check --format json: exit 1"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  assert_eq "$(srg_check_json not-ready 1 "$SRG_UV_REASON" "install uv")" "$(srg_compact)" "…the same verdict"
+  # gate tool: as usual, from the verdict file (check wrote one; without it: silent).
+  ev="$SRG_TMP/rg.json"
+  srg_event "$ev" Bash "rg foo"
+  rm -f "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
+  assert_eq "0:" "$RUN_RC:$RUN_OUT" "gate tool, no verdict file: silent"
+  # gate prompt and session-start: doc-search gate's words (Fix:, and the user-only
+  # sentence at session start: install uv is not a command the tool gate allows).
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate prompt
+  assert_eq "0" "$RUN_RC" "gate prompt: exit 0"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  want="doc-search is required here and not ready: $SRG_UV_REASON. Fix: install uv — then send your message again. (Set DOC_SEARCH_GATE=0 to turn the gate off for yourself.)"
+  assert_eq "$(jq -cn --arg r "$want" '{decision: "block", reason: $r}')" "$(srg_compact)" "…blocks the prompt with the reason"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate session-start
+  assert_eq "0" "$RUN_RC" "gate session-start: exit 0"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  want="doc-search is required here and not ready: $SRG_UV_REASON. Fix: install uv. Only the user can run this fix; you may run only sh .claude/doc-superpowers/search-mcp.sh index, status or check. Do no work until it is ready: tell the user this line and stop."
+  assert_eq "$(jq -cn --arg r "$want" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $r}}')" "$(srg_compact)" "…adds the reason as context"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate session-start --client codex
+  assert_eq "$(jq -cn --arg r "$want" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $r}}')" "$(srg_compact)" "…the same with --client codex"
+  # …and both keep the verdict file, as doc-search gate does: two LF lines.
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
+  assert_eq "$(srg_deny "doc-search is required here and not ready: $SRG_UV_REASON; fix: install uv. Stop and report this to the user; do not work around it.")" "$(srg_compact)" \
+    "gate tool after them: rg is denied, the verdict file's reason in the deny"
+  printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "gate tool, a not-ready verdict: rg is denied (no uv needed)"
+  rm -f "$vf"
+  # The raw text decides, as Python's config_says_required does: "required"\s*:\s*true.
+  mkdir -p src/deep
+  (cd src/deep && srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check && echo "$RUN_RC" > "$SRG_TMP/deep.rc")
+  assert_eq "1" "$(cat "$SRG_TMP/deep.rc")" "from a subdirectory: the config at the repository top, exit 1"
+  printf '{\n  "required"\n    :\ttrue\n}\n' > docs/search/config.json
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "1" "$RUN_RC" "\"required\", a newline, a colon, a tab, true: required (Python's \\s spans lines)"
+  printf '{"required": true,\n' > docs/search/config.json
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "1" "$RUN_RC" "an invalid config that says \"required\": true: required"
+  printf '{"required": false}\n' > docs/search/config.json
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "4" "$RUN_RC" "\"required\": false: not required, exit 4"
+  printf '{"required": "true"}\n' > docs/search/config.json
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "4" "$RUN_RC" "\"required\": \"true\" (a string): not required, exit 4"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- serve
+  assert_eq "2:doc-search: uv not found (https://docs.astral.sh/uv/)" "$RUN_RC:$RUN_ERR" "serve keeps its failure: exit 2, one stderr line"
+  teardown
+}
+
+test_launcher_check_gate_without_uv_not_required() {
+  echo "test: launcher: no uv, the config not required (or absent) — check: 'not in force: uv not found', exit 4; gate session-start and prompt silent; gate tool decides as usual"
+  srh_fixture '{}'
+  local envroot nouv vf ev e
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  nouv=$(srg_nouv_path)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "4:doc-search: not in force: $SRG_UV_REASON:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: the line on stdout, exit 4"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check --format json
+  assert_eq "4" "$RUN_RC" "check --format json: exit 4"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  assert_eq "$(srg_check_json not-in-force 4 "$SRG_UV_REASON")" "$(srg_compact)" "…the verdict as JSON, fix null"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$(make_nojq_path)" -- check --format json
+  assert_eq "$(srg_check_json not-in-force 4 "$SRG_UV_REASON")" "$(srg_compact)" "…without jq too (fix null)"
+  for e in session-start prompt; do
+    printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
+    srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate "$e"
+    assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate $e: silent, exit 0"
+    assert_true "…and removes the verdict file (not in force)" test ! -e "$vf"
+    srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate "$e"
+    assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "…again, with no file: silent, exit 0"
+  done
+  rm -f docs/search/config.json
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "4:doc-search: not in force: $SRG_UV_REASON" "$RUN_RC:$RUN_OUT" "no config: the same, exit 4"
+  ev="$SRG_TMP/rg.json"
+  srg_event "$ev" Bash "rg foo"
+  printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "gate tool, a not-ready verdict: rg is denied (the file decides)"
+  teardown
+}
+
+test_launcher_check_gate_exec_doc_search() {
+  echo "test: launcher: a root and uv — check and gate session-start|prompt exec doc-search with their arguments; gate tool never runs uv; another gate event is a usage error"
+  srh_fixture '{"required": true}'
+  local envroot vf ev
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  vf=$(git rev-parse --git-path doc-search-gate)
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search check" "$RUN_RC:$RUN_OUT" "check: doc-search check"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check --format json --budget 5
+  assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search check --format json --budget 5" "$RUN_OUT" "…its arguments passed on"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate session-start
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search gate session-start" "$RUN_RC:$RUN_OUT" "gate session-start: doc-search gate session-start"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate prompt --budget 5
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search gate prompt --budget 5" "$RUN_RC:$RUN_OUT" "gate prompt: doc-search gate prompt, its arguments passed on"
+  ev="$SRG_TMP/ok.json"
+  srg_event "$ev" Bash "$SRG_LAUNCHER_FIX index"
+  rm -f "$SRL_BIN/argc"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate tool, no verdict file: silent"
+  printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate tool, not-ready, the index command: silent (allowed)"
+  assert_true "…and uv was never run" test ! -e "$SRL_BIN/argc"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate stop
+  assert_eq "3::doc-search: usage: gate session-start|prompt|tool" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate stop: a usage error on stderr, exit 3"
+  printf '{"tool_name":"Bash","tool_input":{"command":"%s"}}' "$(head -c 300000 /dev/zero | tr '\0' x)" > "$SRG_TMP/big-usage.json"
+  srg_pipe "$SRG_TMP/big-usage.json" DOC_SUPERPOWERS_ROOT="$envroot" -- gate stop
+  assert_eq "0:3" "$RUN_PIPE:$RUN_RC" "…its stdin drained first (a large event's writer exits 0)"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate
+  assert_eq "3:" "$RUN_RC:$RUN_OUT" "gate with no event: exit 3"
+  # --client claude|codex (what install --search-gate registers for session-start) is passed on.
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate session-start --client claude
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search gate session-start --client claude" "$RUN_RC:$RUN_OUT" "gate session-start --client claude: passed on"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate prompt --client=codex
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search gate prompt --client=codex" "$RUN_RC:$RUN_OUT" "…--client=codex too"
+  for c in "--client cursor" "--client" "--client="; do
+    # shellcheck disable=SC2086  # the option and its value, split on purpose
+    srg_pipe "$SRG_TMP/big-usage.json" DOC_SUPERPOWERS_ROOT="$envroot" -- gate session-start $c
+    assert_eq "0:3::doc-search: usage: gate session-start|prompt|tool [--client claude|codex]" "$RUN_PIPE:$RUN_RC:$RUN_OUT:$RUN_ERR" "gate session-start $c: a usage error on stderr, exit 3, its stdin drained"
+  done
+  ev="$SRG_TMP/rgc.json"
+  srg_event "$ev" Bash "rg foo"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool --client claude
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "gate tool --client claude: decides as without it"
+  teardown
+}
+
+test_launcher_gate_tool() {
+  echo "test: launcher: gate tool — no verdict file, or line 1 not not-ready: silent; not-ready: only a Bash call of exactly the fix commands is allowed, everything else denied with line 2 as the reason; without jq everything is denied"
+  srh_fixture '{"required": true}'
+  local envroot vf top ev reason want c nojq
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  top=$(pwd -P)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  ev="$SRG_TMP/ev.json"
+  srg_event "$ev" Bash "rg foo"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "no verdict file: silent, exit 0"
+  printf 'ready\n' > "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "line 1 ready: silent"
+  printf 'not-ready-ish\nx\n' > "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0:" "$RUN_RC:$RUN_OUT" "line 1 not exactly not-ready: silent"
+  printf 'not-ready\r\nindex absent\r\n' > "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "a CRLF file: line 1 is not-ready once its CR is dropped, rg denied (fail closed)"
+  assert_eq "$(srg_deny "doc-search is required here and not ready: index absent. Stop and report this to the user; do not work around it.")" "$(srg_compact)" \
+    "…line 2's CR dropped too: none in the reason"
+  printf 'not-ready\r\r\nx\n' > "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0:" "$RUN_RC:$RUN_OUT" "…only one CR is dropped: not-ready and two CRs is not not-ready, silent"
+  reason="index absent: \"docs\" at C:\\x; fix: $SRG_LAUNCHER_FIX index"
+  printf 'not-ready\n%s\n' "$reason" > "$vf"
+  want="doc-search is required here and not ready: $reason. Stop and report this to the user; do not work around it."
+  for c in "$SRG_LAUNCHER_FIX index" \
+    "$SRG_LAUNCHER_FIX status" \
+    "$SRG_LAUNCHER_FIX check" \
+    "$SRG_LAUNCHER_FIX check --format text" \
+    "sh \"$top/.claude/doc-superpowers/search-mcp.sh\" status --format json" \
+    "sh /abs/repo/.claude/doc-superpowers/search-mcp.sh index" \
+    "sh \"/a dir/with spaces/.claude/doc-superpowers/search-mcp.sh\" check --format json" \
+    "sh \".claude/doc-superpowers/search-mcp.sh\" index"; do
+    srg_event "$ev" Bash "$c"
+    srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+    assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "allowed: $c"
+  done
+  # shellcheck disable=SC2016  # the single-quoted commands are literal shell syntax under test
+  for c in "$SRG_LAUNCHER_FIX index && rm -rf x" \
+    "$SRG_LAUNCHER_FIX index; ls" \
+    "$SRG_LAUNCHER_FIX index | cat" \
+    "$SRG_LAUNCHER_FIX index &" \
+    "rg foo" \
+    "$SRG_LAUNCHER_FIX serve" \
+    "$SRG_LAUNCHER_FIX query foo" \
+    "$SRG_LAUNCHER_FIX index --format yaml" \
+    "bash .claude/doc-superpowers/search-mcp.sh index" \
+    "sh evil.claude/doc-superpowers/search-mcp.sh index" \
+    "sh .claude/doc-superpowers/search-mcp.shx index" \
+    " $SRG_LAUNCHER_FIX index" \
+    "$SRG_LAUNCHER_FIX index"$'\n'"rm -rf x" \
+    "rm -rf x"$'\n'"$SRG_LAUNCHER_FIX index" \
+    "$SRG_LAUNCHER_FIX index"$'\n' \
+    'sh `id`/.claude/doc-superpowers/search-mcp.sh index' \
+    'sh $(touch${IFS}pwned)/.claude/doc-superpowers/search-mcp.sh index' \
+    'sh "$(curl${IFS}x)"/.claude/doc-superpowers/search-mcp.sh" index' \
+    'sh >victim/.claude/doc-superpowers/search-mcp.sh index' \
+    'sh <victim/.claude/doc-superpowers/search-mcp.sh index' \
+    "sh a"$'\t'"b/.claude/doc-superpowers/search-mcp.sh index" \
+    "$SRG_LAUNCHER_FIX"$'\t'"index" \
+    'sh "x/.claude/doc-superpowers/search-mcp.sh index' \
+    'sh x"/.claude/doc-superpowers/search-mcp.sh" index' \
+    'sh a b/.claude/doc-superpowers/search-mcp.sh index'; do
+    srg_event "$ev" Bash "$c"
+    srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+    assert_eq "0" "$RUN_RC" "denied, exit 0: $(printf '%s' "$c" | tr '\n' '/')"
+    assert_true "…one JSON object (jq -e .)" srg_is_json
+    assert_eq "$(srg_deny "$want")" "$(srg_compact)" "…the deny, line 2 verbatim in its reason"
+  done
+  srg_event "$ev" Read
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "$(srg_deny "$want")" "$(srg_compact)" "a Read tool: denied"
+  jq -cn --arg c "$SRG_LAUNCHER_FIX index" '{tool_name: "Bash", tool_input: {command: [$c]}}' > "$ev"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "$(srg_deny "$want")" "$(srg_compact)" "a Bash command that is not a string: denied"
+  printf 'not json' > "$ev"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "$(srg_deny "$want")" "$(srg_compact)" "an event that is not JSON: denied"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "$(srg_deny "$want")" "$(srg_compact)" "no event: denied"
+  # Line 2 absent: the reason without it.
+  printf 'not-ready\n' > "$vf"
+  srg_event "$ev" Bash "rg foo"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "$(srg_deny "doc-search is required here and not ready. Stop and report this to the user; do not work around it.")" "$(srg_compact)" "no line 2: denied, the reason without it"
+  printf 'not-ready\n%s\n' "$reason" > "$vf"
+  # From a subdirectory: the same verdict file.
+  mkdir -p src/deep
+  cd src/deep
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "$(srg_deny "$want")" "$(srg_compact)" "from a subdirectory: the worktree's verdict file, rg denied"
+  srg_event "$ev" Bash "$SRG_LAUNCHER_FIX index"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "0:" "$RUN_RC:$RUN_OUT" "…and the index command allowed"
+  cd "$top"
+  # Without jq: every tool is denied, with a fixed reason (line 2 cannot be escaped).
+  nojq=$(make_nojq_path)
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nojq" -- gate tool
+  assert_eq "0" "$RUN_RC" "without jq, not-ready: exit 0"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "…the index command is denied too"
+  assert_eq "doc-search is required here and not ready, and this hook cannot read the tool call without jq. Stop and report this to the user; do not work around it." \
+    "$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$RUN_OUT" 2>/dev/null || true)" "…with the fixed reason"
+  rm -f "$vf"
+  srg_run "$ev" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nojq" -- gate tool
+  assert_eq "0:" "$RUN_RC:$RUN_OUT" "without jq, no verdict file: silent"
+  teardown
+}
+
+test_launcher_gate_keeps_the_verdict_file() {
+  echo "test: launcher: gate session-start|prompt, required with no uv — the verdict file is two LF lines (not-ready, '<reason>; fix: <fix>'), replaced by a rename, no temp file left; from a subdirectory and in a linked worktree, each worktree's own file"
+  srh_fixture '{"required": true}'
+  local envroot nouv vf want e wt wtvf
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  nouv=$(srg_nouv_path)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  want="$SRG_TMP/want-verdict"
+  printf 'not-ready\n%s; fix: install uv\n' "$SRG_UV_REASON" > "$want"
+  for e in session-start prompt; do
+    printf 'ready\r\nold\r\n' > "$vf"
+    srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate "$e"
+    assert_eq "0" "$RUN_RC" "gate $e: exit 0"
+    assert_true "…the verdict file is exactly the two LF lines (the old file replaced)" cmp -s "$want" "$vf"
+    assert_eq "doc-search-gate" "$(cd "$(dirname "$vf")" && ls -A | grep '^doc-search-gate' || true)" "…no temp file left beside it"
+  done
+  rm -f "$vf"
+  mkdir -p src/deep
+  (cd src/deep && srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate prompt)
+  assert_true "from a subdirectory: the worktree's verdict file" cmp -s "$want" "$vf"
+  # A linked worktree keeps its own file; the main one's is not touched.
+  rm -f "$vf"
+  wt="$SUITE_TMP/srg-linked-$$"
+  git worktree add -q "$wt" -b srg-linked
+  wtvf=$(cd "$wt" && cd "$(dirname "$(git rev-parse --git-path doc-search-gate)")" && pwd -P)/doc-search-gate
+  (cd "$wt" && srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate session-start)
+  assert_true "in a linked worktree: its own verdict file" cmp -s "$want" "$wtvf"
+  assert_true "…and the main worktree's is not written" test ! -e "$vf"
+  git worktree remove --force "$wt"
+  # A verdict file that cannot be written: the answer still goes out (root writes anyway).
+  if [ "$(id -u)" != 0 ]; then
+    chmod 0555 "$(dirname "$vf")"
+    srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate prompt
+    chmod 0755 "$(dirname "$vf")"
+    assert_eq "0:block:" "$RUN_RC:$(jq -r .decision <<<"$RUN_OUT" 2>/dev/null || true):$RUN_ERR" "an unwritable git dir: still blocks, exit 0, nothing on stderr"
+    assert_true "…and writes no file" test ! -e "$vf"
+  fi
+  teardown
+}
+
+test_launcher_gate_reads_the_event() {
+  echo "test: launcher: gate takes the event on stdin, never echoes it, and drains it where it does not read it, so a large event's writer never blocks"
+  srh_fixture '{"required": true}'
+  local envroot nouv nojq vf big out e
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  nouv=$(srg_nouv_path)
+  nojq=$(make_nojq_path)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  out=$(harness_mktemp_d outside)
+  big="$SRG_TMP/big.json"
+  {
+    printf '{"tool_name":"Bash","tool_input":{"command":"rg MARKER-7f3a '
+    head -c 300000 /dev/zero | tr '\0' x
+    printf '"}}'
+  } > "$big"
+  # gate tool: not-ready reads it to decide.
+  printf 'not-ready\nindex absent; fix: %s index\n' "$SRG_LAUNCHER_FIX" > "$vf"
+  srg_pipe "$big" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
+  assert_eq "0:0" "$RUN_PIPE:$RUN_RC" "gate tool, not-ready: the event read whole (its writer exits 0)"
+  assert_eq "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' <<<"$RUN_OUT" 2>/dev/null || true)" "…and denied"
+  assert_not_contains "$RUN_OUT$RUN_ERR" "MARKER-7f3a" "…never echoed"
+  srg_pipe "$big" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nojq" -- gate tool
+  assert_eq "0:0" "$RUN_PIPE:$RUN_RC" "gate tool, not-ready, no jq: drained"
+  assert_not_contains "$RUN_OUT$RUN_ERR" "MARKER-7f3a" "…never echoed"
+  rm -f "$vf"
+  srg_pipe "$big" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate tool
+  assert_eq "0:0:" "$RUN_PIPE:$RUN_RC:$RUN_OUT" "gate tool, no verdict file: drained, silent"
+  # session-start and prompt, where the launcher answers: drained, never echoed.
+  for e in session-start prompt; do
+    srg_pipe "$big" DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- gate "$e"
+    assert_eq "0:0" "$RUN_PIPE:$RUN_RC" "gate $e, required, no uv: drained"
+    assert_true "…one JSON object (jq -e .)" srg_is_json
+    assert_not_contains "$RUN_OUT$RUN_ERR" "MARKER-7f3a" "…never echoed"
+    srg_pipe "$big" PATH="$nouv" -- gate "$e"
+    assert_eq "0:0:" "$RUN_PIPE:$RUN_RC:$RUN_OUT" "gate $e, no root: drained, silent"
+    srg_pipe "$big" DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" -- gate "$e"
+    assert_eq "0:0:" "$RUN_PIPE:$RUN_RC:$RUN_OUT" "gate $e, DOC_SEARCH_GATE=0: drained, silent"
+  done
+  cd "$out"
+  srg_pipe "$big" GIT_CEILING_DIRECTORIES="$SUITE_TMP" DOC_SUPERPOWERS_ROOT="$envroot" -- gate prompt
+  assert_eq "0:0:" "$RUN_PIPE:$RUN_RC:$RUN_OUT" "gate prompt outside a work tree: drained, silent"
+  cd "$TEST_DIR"
+  teardown
+}
+
+test_launcher_check_keeps_the_verdict_file() {
+  echo "test: launcher: check, where the launcher answers it, keeps the verdict file as gate does — required with no uv writes it, not in force (not required, no root) removes it; DOC_SEARCH_GATE=0 leaves it alone"
+  srh_fixture '{"required": true}'
+  local envroot nouv vf want
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  nouv=$(srg_nouv_path)
+  vf=$(git rev-parse --git-path doc-search-gate)
+  want="$SRG_TMP/want-check-verdict"
+  printf 'not-ready\n%s; fix: install uv\n' "$SRG_UV_REASON" > "$want"
+  rm -f "$vf"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "1" "$RUN_RC" "required, no uv: check exits 1"
+  assert_true "…and writes the verdict file, two LF lines" cmp -s "$want" "$vf"
+  printf 'ready\n' > "$vf"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check --format json
+  assert_true "…check --format json too" cmp -s "$want" "$vf"
+  rm -f "$vf"
+  srg_run /dev/null DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "1" "$RUN_RC" "DOC_SEARCH_GATE=0, required, no uv: check still exits 1"
+  assert_true "…but writes no verdict file" test ! -e "$vf"
+  printf '{"required": false}\n' > docs/search/config.json
+  printf 'not-ready\nold\n' > "$vf"
+  srg_run /dev/null DOC_SEARCH_GATE=0 DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "not-ready" "$(head -n 1 "$vf" 2>/dev/null || true)" "DOC_SEARCH_GATE=0, not required: the verdict file is not removed"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" PATH="$nouv" -- check
+  assert_eq "4" "$RUN_RC" "not required, no uv: check exits 4"
+  assert_true "…and removes the verdict file" test ! -e "$vf"
+  printf '{"required": true}\n' > docs/search/config.json
+  printf 'not-ready\nold\n' > "$vf"
+  srg_run /dev/null PATH="$nouv" -- check
+  assert_eq "4" "$RUN_RC" "no root: check exits 4"
+  assert_true "…and removes the verdict file" test ! -e "$vf"
+  teardown
+}
+
+test_launcher_pre_gate_root() {
+  echo "test: launcher: a root that predates the readiness gate (no search/src/doc_search/gate.py) — required: check says not ready, '<X> predates the readiness gate', the plugin update as the fix, exit 1, and gate session-start|prompt answer as with no uv; not required: check exit 4, gate silent; uv is never run"
+  srh_fixture '{"required": true}'
+  local envroot vf want reason fix codex
+  envroot=$(harness_mktemp_d pregate)
+  srl_pregate_root "$envroot" 3.10.0
+  vf=$(git rev-parse --git-path doc-search-gate)
+  reason="doc-superpowers 3.10.0 predates the readiness gate"
+  fix="claude plugin update doc-superpowers"
+  rm -f "$SRL_BIN/argc"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check
+  assert_eq "1:doc-search: not ready: $reason:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: not ready, exit 1"
+  assert_true "…uv never run" test ! -e "$SRL_BIN/argc"
+  want="$SRG_TMP/want-pregate"
+  printf 'not-ready\n%s; fix: %s\n' "$reason" "$fix" > "$want"
+  assert_true "…the verdict file written" cmp -s "$want" "$vf"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "$reason" "$fix")" "$(srg_compact)" "check --format json: the verdict, the plugin update as its fix"
+  rm -f "$vf"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate session-start
+  assert_eq "0" "$RUN_RC" "gate session-start: exit 0"
+  want="doc-search is required here and not ready: $reason. Fix: $fix. Only the user can run this fix; you may run only sh .claude/doc-superpowers/search-mcp.sh index, status or check. Do no work until it is ready: tell the user this line and stop."
+  assert_eq "$(jq -cn --arg r "$want" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $r}}')" "$(srg_compact)" "…the context, the fix the user's"
+  assert_eq "not-ready" "$(head -n 1 "$vf" 2>/dev/null || true)" "…the verdict file written"
+  rm -f "$vf"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate prompt
+  want="doc-search is required here and not ready: $reason. Fix: $fix — then send your message again. (Set DOC_SEARCH_GATE=0 to turn the gate off for yourself.)"
+  assert_eq "0:$(jq -cn --arg r "$want" '{decision: "block", reason: $r}')" "$RUN_RC:$(srg_compact)" "gate prompt: blocked, exit 0"
+  assert_eq "not-ready" "$(head -n 1 "$vf" 2>/dev/null || true)" "…the verdict file written"
+  srg_event "$SRG_TMP/pg.json" Bash "rg foo"
+  srg_run "$SRG_TMP/pg.json" DOC_SUPERPOWERS_ROOT="$envroot" -- gate tool
+  assert_eq "$(srg_deny "doc-search is required here and not ready: $reason; fix: $fix. Stop and report this to the user; do not work around it.")" "$(srg_compact)" "gate tool: rg denied, from the verdict file"
+  assert_true "…uv never run" test ! -e "$SRL_BIN/argc"
+  # The Codex install is pulled, as check.py's plugin fix says.
+  codex="$HOME/.codex/doc-superpowers"
+  srl_pregate_root "$codex" 3.9.0
+  srg_run /dev/null -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "doc-superpowers 3.9.0 predates the readiness gate" "git -C ~/.codex/doc-superpowers pull")" "$(srg_compact)" "the Codex root: its version, git pull as the fix"
+  # No package.json: the version is unknown.
+  srl_pregate_root "$envroot/../pregate-nopkg" none
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot/../pregate-nopkg" -- check
+  assert_eq "1:doc-search: not ready: doc-superpowers (version unknown) predates the readiness gate" "$RUN_RC:$RUN_OUT" "no package.json: (version unknown)"
+  # Not required: not in force, silent, the file removed.
+  printf '{}\n' > docs/search/config.json
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check
+  assert_eq "4:doc-search: not in force: $reason" "$RUN_RC:$RUN_OUT" "not required: check exit 4"
+  assert_true "…the verdict file removed" test ! -e "$vf"
+  printf 'not-ready\nold\n' > "$vf"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate session-start
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate session-start: silent"
+  assert_true "…the verdict file removed" test ! -e "$vf"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- gate prompt
+  assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate prompt: silent"
+  assert_true "…uv never run" test ! -e "$SRL_BIN/argc"
+  # A root with the gate execs doc-search as before.
+  srl_root "$envroot"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search check" "$RUN_RC:$RUN_OUT" "with gate.py: doc-search check"
+  teardown
+}
+
 echo ""
 echo "=== doc-search: the launcher and the opt-in --search set ==="
 test_launcher_resolution_order
+test_launcher_codex_root
 test_launcher_cloud_extra
 test_launcher_transformer_extra
 test_launcher_without_uv
 test_launcher_is_posix_sh
 test_launcher_env_hook
 test_launcher_client_cwd
+test_launcher_gate_opt_out
+test_launcher_check_gate_outside_a_work_tree
+test_launcher_check_gate_without_a_root
+test_launcher_check_gate_without_uv_required
+test_launcher_check_gate_without_uv_not_required
+test_launcher_check_gate_exec_doc_search
+test_launcher_gate_tool
+test_launcher_gate_keeps_the_verdict_file
+test_launcher_gate_reads_the_event
+test_launcher_check_keeps_the_verdict_file
+test_launcher_pre_gate_root
 test_search_install_refused_without_config
 test_search_install_writes_launcher_and_entry
 test_search_install_idempotent
@@ -6485,6 +7771,24 @@ test_search_never_writes_through_links
 test_search_not_in_all
 test_search_uninstall_removes_only_ours
 test_search_status_and_json
+
+echo ""
+echo "=== doc-search: the opt-in --search-gate set ==="
+test_search_gate_preflight
+test_search_gate_install_writes_entries
+test_search_gate_install_idempotent
+test_search_gate_uninstall_removes_only_ours
+test_search_gate_refuses_unreadable_files
+test_search_gate_unreadable_rule_copy
+test_search_gate_never_writes_through_links
+test_search_gate_not_in_all
+test_search_gate_status_and_json
+test_search_uninstall_refused_while_gated
+test_search_gate_status_warns_launcher_differs
+test_search_gate_replaces_pre_client_entries
+test_search_gate_rule_drift
+test_search_gate_shipped_rule_is_current
+test_search_gate_hooks_run_the_launcher
 
 # --- Maintainer tooling (#27): scripts/check-ci.sh and the opt-in pre-push ---
 #
