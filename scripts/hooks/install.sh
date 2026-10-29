@@ -41,7 +41,12 @@ set -euo pipefail
 #     uninstall takes its own.
 #   - doc-search's opt-in set (--search, never part of --all): the launcher
 #     .claude/doc-superpowers/search-mcp.sh and the "doc-search" key of
-#     .mcpServers in .mcp.json (the rest of that file is the project's).
+#     .mcpServers in .mcp.json (the rest of that file is the project's);
+#   - doc-search's gate set (--search-gate, never part of --all or --search):
+#     in .claude/settings.json and .codex/hooks.json, each hook HANDLER whose
+#     command is exactly one of the launcher's three gate commands (session-start
+#     with or without either --client), under its own event (SessionStart,
+#     UserPromptSubmit, PreToolUse).
 #
 # STATE — the CI tier's choices (workflow set, base branch, cron, strict) are
 # recorded in .claude/doc-superpowers/installed.json (state.sh), so a plain
@@ -88,6 +93,14 @@ SEARCH_LAUNCHER_SRC="$SKILL_DIR/scripts/search/launch.sh"
 MCP_FILE=".mcp.json"
 SEARCH_SERVER="doc-search"
 SEARCH_ENTRY='{"command":"sh","args":[".claude/doc-superpowers/search-mcp.sh","serve"]}'
+# doc-search's gate set (--search-gate): the launcher's gate, registered as
+# hooks for Claude Code and Codex, and the search rule's drift check.
+GATE_CLAUDE_FILE=".claude/settings.json"
+GATE_CODEX_FILE=".codex/hooks.json"
+# shellcheck disable=SC2016  # expanded by the shell the client runs the hook in
+GATE_CMD='sh "$(git rev-parse --show-toplevel)/.claude/doc-superpowers/search-mcp.sh" gate'
+SEARCH_RULE_SRC="$SKILL_DIR/references/search-rule.md"
+SEARCH_RULE_FILES="AGENTS.md CLAUDE.md"
 
 # The workflow templates, once (a membership test is a string match).
 KNOWN_WORKFLOWS=""
@@ -143,9 +156,9 @@ usage() {
 doc-superpowers hooks installer
 
 Usage:
-  install.sh install   [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [CI options]
-  install.sh uninstall [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--workflows=<csv|all|none>] [--transient]
-  install.sh status    [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--json]
+  install.sh install   [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [CI options]
+  install.sh uninstall [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--workflows=<csv|all|none>] [--transient]
+  install.sh status    [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--json]
   install.sh print-merge-driver
   install.sh help
 
@@ -221,16 +234,43 @@ Tiers:
                                   project's mcpServers (the rest is kept; a file
                                   that is not one JSON object is refused)
             uninstall --search removes that key and the launcher, and .mcp.json
-            itself when it is left as {"mcpServers":{}}. Nothing of it is
+            itself when it is left as {"mcpServers":{}}; while the
+            --search-gate hooks are registered it is refused (they run the
+            launcher): name --search-gate too. Nothing of it is
             recorded in installed.json. status --json reports it, under
             .tiers.search, only when --search is named.
+  --search-gate
+            doc-search's readiness gate, an opt-in set of its own (never part
+            of --all or --search) that needs docs/search/config.json and the
+            --search launcher, the plugin's own copy (install --search
+            refreshes it, in the same run too). Three hook entries, each running
+            sh "\$(git rev-parse --show-toplevel)/.claude/doc-superpowers/search-mcp.sh" gate <event>,
+            merged into two files to commit:
+              .claude/settings.json  Claude Code: SessionStart (startup|resume|
+                                     clear|compact, 45 s) gate session-start
+                                     --client claude,
+                                     UserPromptSubmit (45 s) gate prompt,
+                                     PreToolUse (*, 10 s) gate tool
+              .codex/hooks.json      Codex: the same, --client codex,
+                                     PreToolUse with no matcher; Codex runs
+                                     them in a trusted project once each is
+                                     approved in /hooks
+            They gate only where the config sets "required": true. Others'
+            entries are kept, and a file already holding ours is not
+            rewritten. uninstall --search-gate removes our entries, and a file
+            left {} or {"hooks":{}}. status reports each file (installed,
+            partial, absent) and the marked doc-superpowers:search-rule block
+            in AGENTS.md or CLAUDE.md, its body against the plugin's
+            references/search-rule.md (current, outdated, absent; each
+            copy's marker version shown, not judged); status --json reports
+            it under .tiers.search_gate, only when --search-gate is named.
 
 Machine-readable:
   status --json       the git, Claude and CI tiers (all, or those named) as one
                       JSON object (schema doc-superpowers-hooks-status/1;
                       references/hooks.md lists every state); exit 0.
-                      --search adds the doc-search set (alone, when it is the
-                      only one named)
+                      --search adds the doc-search set and --search-gate the
+                      gate set (alone, when they are the only ones named)
   print-merge-driver  the merge.doc-index.driver value install --git registers
 
 Hook output: DOC_SUPERPOWERS_ADVICE (else the advice key of
@@ -1762,6 +1802,27 @@ preflight_search() {
   fi
   why=$(mcp_problem)
   [ -z "$why" ] || die "$MCP_FILE $why: fix it by hand, then re-run. Nothing was changed."
+  if [ "$COMMAND" = uninstall ] && ! $DO_SEARCH_GATE; then
+    preflight_search_uninstall_gated
+  fi
+}
+
+# preflight_search_uninstall_gated: uninstall --search without --search-gate
+# would leave the gate's hooks running a deleted launcher: refused while
+# either hook file holds the gate's entries (a file that cannot be read is
+# not judged).
+preflight_search_uninstall_gated() {
+  local f who held=""
+  for f in "$GATE_CLAUDE_FILE" "$GATE_CODEX_FILE"; do
+    who=claude
+    [ "$f" = "$GATE_CLAUDE_FILE" ] || who=codex
+    gate_state "$f" "$who"
+    case "$GT_STATE" in
+      installed | partial) held="${held:+$held and }$f" ;;
+    esac
+  done
+  [ -z "$held" ] \
+    || die "uninstall --search would remove the launcher $SEARCH_LAUNCHER_DEST, which the doc-search gate's hooks run ($held): uninstall --search-gate first, or both together (uninstall --search --search-gate). Nothing was changed."
 }
 
 # search_state: SR_LAUNCHER — installed (the plugin's copy, byte for byte) |
@@ -1810,7 +1871,7 @@ install_search() {
     commit_tmp "$MCP_FILE" 644
   fi
   echo "doc-search MCP: launcher $SEARCH_LAUNCHER_DEST and the \"$SEARCH_SERVER\" server in $MCP_FILE installed"
-  echo "  Commit both: a teammate with uv gets the server (the launcher finds doc-superpowers through DOC_SUPERPOWERS_ROOT, this checkout, or the plugin cache)"
+  echo "  Commit both: a teammate with uv gets the server (the launcher finds doc-superpowers through DOC_SUPERPOWERS_ROOT, this checkout, the Codex install \${CODEX_HOME:-~/.codex}/doc-superpowers, or the plugin cache)"
 }
 
 uninstall_search() {
@@ -1867,6 +1928,347 @@ status_search() {
   if [ -n "$(mcp_problem)" ]; then
     echo "  ⚠ $MCP_FILE $(mcp_problem): no server can be read from it"
   fi
+}
+
+# --- doc-search's gate set (--search-gate) ---------------------------------------
+#
+# An opt-in set of its own, never part of --all or of --search, never recorded
+# in installed.json. Three hook entries, each running the committed launcher's
+# gate (references/search.md → gate), merged into two committed files:
+#   - .claude/settings.json (Claude Code): SessionStart (matcher
+#     startup|resume|clear|compact, timeout 45; gate session-start --client
+#     claude), UserPromptSubmit (45) and PreToolUse (matcher *, 10);
+#   - .codex/hooks.json (Codex, the same shape): the same three, session-start
+#     with --client codex, PreToolUse without a matcher (meant for all tools;
+#     Codex's coverage is not verified). Codex runs it only in a trusted
+#     project, once each hook is approved in /hooks.
+# Per event, an entry is ours when a handler's command is exactly that event's
+# gate command (for session-start, also without --client or with the other
+# client's: replaced, not duplicated); every other key, event, group and
+# handler is kept, and a file
+# already holding the three is never rewritten. Install needs the config and
+# the launcher (or --search beside it). Uninstall removes our handlers (a group
+# left empty, then an event, then .hooks) and the file when that leaves {} or
+# {"hooks":{}}.
+
+# $want: {<event>: <our group>}; each group's one handler runs that event's
+# command. A handler is ours when its command is that command without its
+# --client, or with either client's: an entry from before --client (3.11.0
+# added it to session-start), or the other client's, is replaced, not
+# duplicated, and status reads it as changed.
+# shellcheck disable=SC2016  # jq program
+_GATE_JQ_DEFS='
+  def gbase($e): $want[$e].hooks[0].command | rtrimstr(" --client claude") | rtrimstr(" --client codex");
+  def gours($e): gbase($e) as $b
+    | type == "object" and .type == "command"
+      and (.command == $b or .command == ($b + " --client claude") or .command == ($b + " --client codex"));
+  def gstrip($e): map(if type == "object" and ((.hooks | type) == "array") and any(.hooks[]; gours($e))
+                      then (.hooks |= map(select(gours($e) | not))) | select(.hooks | length > 0) else . end);
+  def gevent($e): ((.hooks // {})[$e] // []);
+  def gcount($e): [gevent($e)[] | select(type == "object" and ((.hooks | type) == "array")) | .hooks[] | select(gours($e))] | length;
+  def ghas($e): gcount($e) == 1 and any(gevent($e)[]; . == $want[$e]);'
+
+# gate_want <claude|codex>: our groups for that client, compact. session-start
+# names the client, whose MCP registration its line reports.
+gate_want() {
+  jq -cn --arg p "$GATE_CMD" --arg who "$1" '
+    def h($e; $t): [{type: "command", command: "\($p) \($e)", timeout: $t}];
+    {SessionStart: {matcher: "startup|resume|clear|compact", hooks: h("session-start --client \($who)"; 45)},
+     UserPromptSubmit: {hooks: h("prompt"; 45)},
+     PreToolUse: ((if $who == "claude" then {matcher: "*"} else {} end) + {hooks: h("tool"; 10)})}'
+}
+
+# gate_read <file>: the file as one compact JSON object, or why not (exit 1).
+gate_read() {
+  jq -cs "$_CLAUDE_JQ_DEFS"'
+    if length != 1 then error("it is not one JSON object") else .[0] | shape end' "$1" 2>&1
+}
+
+# gate_why <jq output>: its first line, without jq's "jq: error (at …): ".
+gate_why() {
+  local w="${1%%$'\n'*}"
+  printf '%s' "${w#jq: error*: }"
+}
+
+gate_refuse() {
+  die "$1 cannot be read as hook settings ($(gate_why "$2")). Fix it, then re-run. Nothing was changed."
+}
+
+# preflight_search_gate_config: installing the set needs the config and the
+# launcher its hooks run, the plugin's own copy (install --search writes it
+# first in the same run).
+preflight_search_gate_config() {
+  [ "$COMMAND" = install ] || return 0
+  if [ ! -f "$SEARCH_CONFIG" ]; then
+    echo "ERROR: install --search-gate needs $SEARCH_CONFIG, which this repository does not have: doc-search is not enabled here (doc-search init sets it up). Nothing was changed." >&2
+    exit 1
+  fi
+  $DO_SEARCH && return 0
+  [ -f "$SEARCH_LAUNCHER_DEST" ] \
+    || die "install --search-gate needs the doc-search launcher $SEARCH_LAUNCHER_DEST, which the hooks run: install --search first (or with it). Nothing was changed."
+  cmp -s "$SEARCH_LAUNCHER_DEST" "$SEARCH_LAUNCHER_SRC" \
+    || die "install --search-gate needs the doc-search launcher $SEARCH_LAUNCHER_DEST to be the plugin's (it differs, and a copy from before the readiness gate cannot answer the hooks): re-run install --search first (or with it). Nothing was changed."
+}
+
+# Every check before the first write; the new content of each file, computed
+# here: GATE_NEW_<client> is "" when the file is to stay as it is.
+GATE_NEW_CLAUDE="" GATE_NEW_CODEX=""
+preflight_search_gate() {
+  command -v jq >/dev/null 2>&1 \
+    || die "the --search-gate set edits $GATE_CLAUDE_FILE and $GATE_CODEX_FILE with jq, which is not on PATH: install jq and re-run. Nothing was changed."
+  safe_dest "$GATE_CLAUDE_FILE"
+  safe_dest "$GATE_CODEX_FILE"
+  GATE_NEW_CLAUDE=$(gate_plan "$GATE_CLAUDE_FILE" claude) || gate_refuse "$GATE_CLAUDE_FILE" "$GATE_NEW_CLAUDE"
+  GATE_NEW_CODEX=$(gate_plan "$GATE_CODEX_FILE" codex) || gate_refuse "$GATE_CODEX_FILE" "$GATE_NEW_CODEX"
+}
+
+# gate_plan <file> <claude|codex>: on stdout, the file's new compact content
+# ("" when unchanged), or (exit 1) why it cannot be read. Install merges our
+# entries; uninstall strips them.
+gate_plan() {
+  local cur="{}" new want
+  if [ -e "$1" ]; then
+    cur=$(gate_read "$1") || { printf '%s' "$cur"; return 1; }
+  elif [ "$COMMAND" = uninstall ]; then
+    return 0
+  fi
+  want=$(gate_want "$2")
+  if [ "$COMMAND" = install ]; then
+    new=$(jq -c --argjson want "$want" "$_GATE_JQ_DEFS"'
+      reduce ($want | keys_unsorted[]) as $e (.;
+        if ghas($e) then .
+        else .hooks = (.hooks // {}) | .hooks[$e] = ((gevent($e) | gstrip($e)) + [$want[$e]]) end)' <<<"$cur" 2>&1) \
+      || { printf '%s' "$new"; return 1; }
+    [ -e "$1" ] && [ "$new" = "$cur" ] && return 0
+  else
+    new=$(jq -c --argjson want "$want" "$_GATE_JQ_DEFS"'
+      . as $orig
+      | reduce ($want | keys_unsorted[]) as $e (.;
+          if gcount($e) > 0
+          then .hooks[$e] |= gstrip($e) | (if (.hooks[$e] | length) == 0 then del(.hooks[$e]) else . end)
+          else . end)
+      | if (.hooks | length) == 0 and ($orig.hooks | length) > 0 then del(.hooks) else . end' <<<"$cur" 2>&1) \
+      || { printf '%s' "$new"; return 1; }
+    [ "$new" = "$cur" ] && return 0
+  fi
+  printf '%s' "$new"
+}
+
+# gate_required: the config sets "required": true (without it the gate allows everything).
+gate_required() {
+  jq -e '.required == true' "$SEARCH_CONFIG" >/dev/null 2>&1
+}
+
+install_search_gate() {
+  local f new
+  for f in "$GATE_CLAUDE_FILE" "$GATE_CODEX_FILE"; do
+    new="$GATE_NEW_CLAUDE"
+    [ "$f" = "$GATE_CLAUDE_FILE" ] || new="$GATE_NEW_CODEX"
+    [ -n "$new" ] || continue
+    tmp_beside "$f"
+    printf '%s\n' "$new" | jq . > "$_TMP"
+    commit_tmp "$f" 644
+  done
+  echo "doc-search gate: SessionStart, UserPromptSubmit and PreToolUse registered in $GATE_CLAUDE_FILE (Claude Code) and $GATE_CODEX_FILE (Codex)"
+  echo "  Commit both. Codex runs $GATE_CODEX_FILE only in a trusted project, once each hook is approved in /hooks."
+  echo "  The hooks allow everything for a developer without doc-superpowers installed, or with DOC_SEARCH_GATE=0."
+  gate_required || echo "  NOTE: $SEARCH_CONFIG does not set \"required\": true, so the hooks allow everything until it does."
+}
+
+uninstall_search_gate() {
+  local f new any=0
+  for f in "$GATE_CLAUDE_FILE" "$GATE_CODEX_FILE"; do
+    new="$GATE_NEW_CLAUDE"
+    [ "$f" = "$GATE_CLAUDE_FILE" ] || new="$GATE_NEW_CODEX"
+    [ -n "$new" ] || continue
+    any=1
+    if [ "$new" = '{}' ] || [ "$new" = '{"hooks":{}}' ]; then
+      remove_file "$f"
+    else
+      tmp_beside "$f"
+      printf '%s\n' "$new" | jq . > "$_TMP"
+      commit_tmp "$f" 644
+    fi
+  done
+  remove_dir_if_empty "${GATE_CODEX_FILE%/*}"
+  remove_dir_if_empty .claude
+  if [ "$any" = 1 ]; then
+    echo "doc-search gate: removed (its entries in $GATE_CLAUDE_FILE and $GATE_CODEX_FILE)"
+  else
+    echo "doc-search gate: nothing to uninstall"
+  fi
+}
+
+# gate_state <file> <claude|codex>: GT_STATE — installed (the three entries,
+# exactly) | partial (some of ours, not all right; GT_WRONG names those events)
+# | absent | unreadable (GT_WHY says why).
+gate_state() {
+  local cur want n
+  GT_WRONG="" GT_WHY=""
+  if [ ! -e "$1" ]; then
+    GT_STATE=absent
+    return 0
+  fi
+  if ! cur=$(gate_read "$1"); then
+    GT_STATE=unreadable GT_WHY=$(gate_why "$cur")
+    return 0
+  fi
+  want=$(gate_want "$2")
+  GT_WRONG=$(jq -r --argjson want "$want" "$_GATE_JQ_DEFS"'
+    [($want | keys_unsorted[]) as $e | select(ghas($e) | not) | $e] | join(", ")' <<<"$cur")
+  n=$(jq -r --argjson want "$want" "$_GATE_JQ_DEFS"'
+    [($want | keys_unsorted[]) as $e | gcount($e)] | add' <<<"$cur")
+  if [ -z "$GT_WRONG" ]; then
+    GT_STATE=installed
+  elif [ "$n" = 0 ]; then
+    GT_STATE=absent
+  else
+    GT_STATE=partial
+  fi
+}
+
+# rule_block <file>: the first marked search-rule block. Line 1 is its
+# opening marker's version; then its body, the lines strictly between the
+# markers; then a "." line, so a trailing blank line in the body survives the
+# command substitution that reads it. A CR ending a line is dropped first: a
+# CRLF copy is the same text. Exit 1: no opening marker; 2: no closing marker
+# after it (the body runs to the end of the file). Callers check that <file>
+# is readable first (awk would exit 2 for that too).
+rule_block() {
+  awk '
+    { sub(/\r$/, "") }
+    !s && /^<!-- doc-superpowers:search-rule v[0-9]+\.[0-9]+\.[0-9]+ -->$/ {
+      s = 1
+      v = $0
+      sub(/^<!-- doc-superpowers:search-rule v/, "", v)
+      sub(/ -->$/, "", v)
+      print v
+      next
+    }
+    s && $0 == "<!-- /doc-superpowers:search-rule -->" { e = 1; exit }
+    s { print }
+    END {
+      if (s) print "."
+      exit s ? (e ? 0 : 2) : 1
+    }' "$1"
+}
+
+# search_rule_state: SRULE — current (the body of every marked block in
+# AGENTS.md and CLAUDE.md is the template's; the marker versions are not
+# compared) | outdated (one body differs, or a block has no closing marker) |
+# absent (no opening marker in either file, or the plugin has no template
+# with a block) — SRULE_IN, the files that decide with their marker versions
+# ("AGENTS.md: v3.10.0"), and SRULE_COPIES, one "<file> <state> <version>"
+# line per file with a block. A file that cannot be read is not judged: its
+# line is "<file> unreadable" (no version), and the readable files decide.
+search_rule_state() {
+  local f tpl blk rc ver cur_in="" out_in=""
+  SRULE=absent SRULE_IN="" SRULE_COPIES=""
+  [ -f "$SEARCH_RULE_SRC" ] && [ -r "$SEARCH_RULE_SRC" ] || return 0
+  tpl=$(rule_block "$SEARCH_RULE_SRC") || return 0
+  tpl="${tpl#*$'\n'}"
+  for f in $SEARCH_RULE_FILES; do
+    [ -f "$f" ] || continue
+    if [ ! -r "$f" ]; then
+      SRULE_COPIES="$SRULE_COPIES$f unreadable"$'\n'
+      continue
+    fi
+    rc=0
+    blk=$(rule_block "$f") || rc=$?
+    [ "$rc" != 1 ] || continue
+    ver="${blk%%$'\n'*}"
+    if [ "$rc" = 0 ] && [ "${blk#*$'\n'}" = "$tpl" ]; then
+      cur_in="$cur_in; $f: v$ver"
+      SRULE_COPIES="$SRULE_COPIES$f current $ver"$'\n'
+    else
+      if [ "$rc" = 0 ]; then
+        out_in="$out_in; $f: v$ver"
+      else
+        out_in="$out_in; $f: v$ver, no end marker"
+      fi
+      SRULE_COPIES="$SRULE_COPIES$f outdated $ver"$'\n'
+    fi
+  done
+  if [ -n "$out_in" ]; then
+    SRULE=outdated SRULE_IN="${out_in#; }"
+  elif [ -n "$cur_in" ]; then
+    SRULE=current SRULE_IN="${cur_in#; }"
+  fi
+}
+
+# status_search_gate: the human lines, or (--json) one search_gate.state record
+# and one search_gate.rule record per file holding a marked block.
+status_search_gate() {
+  local cl cx f who st ver
+  gate_state "$GATE_CLAUDE_FILE" claude
+  cl="$GT_STATE"
+  gate_state "$GATE_CODEX_FILE" codex
+  cx="$GT_STATE"
+  search_rule_state
+  if $JSON; then
+    [ "$cl" != unreadable ] || cl=absent
+    [ "$cx" != unreadable ] || cx=absent
+    st_rec search_gate.state "$cl" "$cx" "$SRULE"
+    while read -r f st ver; do
+      if [ -n "$f" ]; then st_rec search_gate.rule "$f" "$st" "${ver:-}"; fi
+    done <<<"$SRULE_COPIES"
+    return 0
+  fi
+  echo "doc-search gate (the opt-in --search-gate set):"
+  if [ ! -f "$SEARCH_CONFIG" ]; then
+    if [ "$cl" = absent ] && [ "$cx" = absent ]; then
+      echo "  not enabled (no $SEARCH_CONFIG); nothing of this set is installed"
+      return 0
+    fi
+    echo "  ⚠ $SEARCH_CONFIG is missing: doc-search is not enabled here, so the hooks allow everything"
+  elif ! gate_required; then
+    echo "  $SEARCH_CONFIG does not set \"required\": true, so the hooks allow everything"
+  fi
+  for f in "$GATE_CLAUDE_FILE" "$GATE_CODEX_FILE"; do
+    who=claude
+    [ "$f" = "$GATE_CLAUDE_FILE" ] || who=codex
+    gate_state "$f" "$who"
+    case "$GT_STATE" in
+      installed)
+        if [ "$who" = claude ]; then
+          echo "  ✓ $f: installed (SessionStart, UserPromptSubmit, PreToolUse)"
+        else
+          echo "  ✓ $f: installed (SessionStart, UserPromptSubmit, PreToolUse; Codex runs them once the project is trusted and they are approved in /hooks)"
+        fi
+        ;;
+      partial) echo "  ⚠ $f: partial: missing or changed: $GT_WRONG (re-run install --search-gate)" ;;
+      unreadable) echo "  ⚠ $f cannot be read as hook settings ($GT_WHY): fix it by hand, then re-run install --search-gate" ;;
+      *) echo "  ✗ $f: not registered (install --search-gate)" ;;
+    esac
+  done
+  for st in "$cl" "$cx"; do
+    case "$st" in
+      installed | partial)
+        if [ ! -f "$SEARCH_LAUNCHER_DEST" ]; then
+          echo "  ⚠ the hooks run $SEARCH_LAUNCHER_DEST, which is not installed (install --search)"
+        elif ! cmp -s "$SEARCH_LAUNCHER_DEST" "$SEARCH_LAUNCHER_SRC"; then
+          echo "  ⚠ the hooks run $SEARCH_LAUNCHER_DEST, which differs from the plugin's scripts/search/launch.sh: a copy from before the readiness gate cannot answer them (re-run install --search)"
+        fi
+        break
+        ;;
+    esac
+  done
+  case "$SRULE" in
+    current) echo "  ✓ search rule: current ($SRULE_IN)" ;;
+    outdated) echo "  ⚠ search rule: outdated ($SRULE_IN): differs from the plugin's references/search-rule.md (copy its marked block again)" ;;
+    *)
+      if [ -f "$SEARCH_RULE_SRC" ]; then
+        echo "  ✗ search rule: absent (no marked doc-superpowers:search-rule block in AGENTS.md or CLAUDE.md)"
+      else
+        echo "  ✗ search rule: absent (this plugin has no references/search-rule.md to compare with)"
+      fi
+      ;;
+  esac
+  while read -r f st ver; do
+    if [ "$st" = unreadable ]; then
+      echo "  ⚠ $f cannot be read: its search rule is not checked (fix its permissions)"
+    fi
+  done <<<"$SRULE_COPIES"
 }
 
 # --- CI tier -------------------------------------------------------------------------
@@ -2596,6 +2998,9 @@ _STATUS_JSON_JQ='
     elif $r[0] == "ci.removable" then .tiers.ci.removable_vendored += [$r[1]]
     elif $r[0] == "ci.vendored" then .tiers.ci.doc_tools_vendored = $r[1]
     elif $r[0] == "search.state" then .tiers.search = {launcher: $r[1], mcp_entry: $r[2]}
+    elif $r[0] == "search_gate.state" then .tiers.search_gate = {claude_settings: $r[1], codex_hooks: $r[2], search_rule: $r[3],
+                                                                 search_rule_copies: {}}
+    elif $r[0] == "search_gate.rule" then .tiers.search_gate.search_rule_copies[$r[1]] = {state: $r[2], version: ($r[3] // "" | n)}
     else . end)
   | .env = {DOC_SUPERPOWERS_STRICT: ($strict | n), DOC_SUPERPOWERS_SKIP: ($skip | n),
             DOC_SUPERPOWERS_QUIET: ($quiet | n), DOC_SUPERPOWERS_HOOK_BUDGET: ($budget | n),
@@ -2644,7 +3049,7 @@ case "$SKILL_DIR" in
   *$'\n'*) die "the skill path holds a line break, which no hook line can carry: $SKILL_DIR" ;;
 esac
 
-DO_GIT=false DO_CLAUDE=false DO_CI=false DO_LEDGER=false DO_LEDGER_CLAUDE=false DO_SEARCH=false
+DO_GIT=false DO_CLAUDE=false DO_CI=false DO_LEDGER=false DO_LEDGER_CLAUDE=false DO_SEARCH=false DO_SEARCH_GATE=false
 # --claude named itself (not through --all, which never reports a ledger set).
 CLAUDE_NAMED=false
 OPT_BASE="" OPT_CRON="" OPT_STRICT="" HELPERS=true FORCE=false TRANSIENT=false
@@ -2659,7 +3064,7 @@ DRIVER_ONLY=false JSON=false
 # Which command takes which flag (anything else: exit 2).
 allowed() {
   case "$COMMAND:$1" in
-    *:--git | *:--claude | *:--ci | *:--all | *:--ledger | *:--ledger-claude | *:--search | *:--merge-driver-only) return 0 ;;
+    *:--git | *:--claude | *:--ci | *:--all | *:--ledger | *:--ledger-claude | *:--search | *:--search-gate | *:--merge-driver-only) return 0 ;;
     status:--json) return 0 ;;
     install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force | install:--marketplace-url) return 0 ;;
     uninstall:--workflows | uninstall:--transient) return 0 ;;
@@ -2676,7 +3081,7 @@ while [ $# -gt 0 ]; do
     *) value="" has_value=0 ;;
   esac
   case "$name" in
-    --git | --claude | --ci | --all | --ledger | --ledger-claude | --search | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url) ;;
+    --git | --claude | --ci | --all | --ledger | --ledger-claude | --search | --search-gate | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url) ;;
     *) usage_error "unknown option: $arg" ;;
   esac
   allowed "$name" || usage_error "$name does not apply to $COMMAND"
@@ -2699,6 +3104,7 @@ while [ $# -gt 0 ]; do
     --ledger) DO_LEDGER=true ;;
     --ledger-claude) DO_LEDGER_CLAUDE=true ;;
     --search) DO_SEARCH=true ;;
+    --search-gate) DO_SEARCH_GATE=true ;;
     --merge-driver-only) DRIVER_ONLY=true ;;
     --json) JSON=true ;;
     --base-branch)
@@ -2757,7 +3163,7 @@ enter_repo
 
 case "$COMMAND" in
   install)
-    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE && ! $DO_SEARCH; then
+    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE && ! $DO_SEARCH && ! $DO_SEARCH_GATE; then
       if [[ -t 0 ]]; then
         echo "doc-superpowers hooks installer"
         echo ""
@@ -2767,7 +3173,7 @@ case "$COMMAND" in
         echo "  [3] CI/CD workflows: $SHELL_WORKFLOWS"
         echo "      (the others are opt-in by name — $SHELL_OPTIN_WORKFLOWS (no AI) and the Claude-powered ones: install.sh install --ci --workflows=<names>; install.sh help lists them)"
         echo "  [a] All of the above"
-        echo "  (The work ledger's hooks and doc-search's MCP server are sets of their own: install.sh install --ledger, --ledger-claude and/or --search.)"
+        echo "  (The work ledger's hooks, doc-search's MCP server and its gate are sets of their own: install.sh install --ledger, --ledger-claude, --search and/or --search-gate.)"
         echo ""
         read -rp "Select (comma-separated, e.g. 1,2): " selection
         [[ "$selection" == *1* ]] && DO_GIT=true
@@ -2782,9 +3188,11 @@ case "$COMMAND" in
     # Every check first: a refusal writes nothing.
     { $DO_LEDGER || $DO_LEDGER_CLAUDE; } && preflight_ledger_config
     $DO_SEARCH && preflight_search_config
+    $DO_SEARCH_GATE && preflight_search_gate_config
     $DO_LEDGER && preflight_ledger
     $DO_LEDGER_CLAUDE && preflight_ledger_claude
     $DO_SEARCH && preflight_search
+    $DO_SEARCH_GATE && preflight_search_gate
     $DO_GIT && preflight_git
     # --merge-driver-only installs the driver alone: without it, nothing to do.
     if $DO_GIT && $DRIVER_ONLY && [[ ! -f "$SKILL_DIR/scripts/merge-doc-index.sh" ]]; then
@@ -2802,12 +3210,14 @@ case "$COMMAND" in
     # After install_claude: the settings it wrote are the ones extended.
     $DO_LEDGER_CLAUDE && install_ledger_claude
     $DO_SEARCH && install_search
+    # After install_search: the launcher the hooks run is in place.
+    $DO_SEARCH_GATE && install_search_gate
     echo ""
     echo "Done."
     ;;
 
   uninstall)
-    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE && ! $DO_SEARCH; then
+    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE && ! $DO_SEARCH && ! $DO_SEARCH_GATE; then
       if [[ -t 0 ]]; then
         read -rp "No tier specified. Uninstall all tiers? [y/N] " confirm
         if [[ "$confirm" =~ ^[Yy] ]]; then
@@ -2817,13 +3227,14 @@ case "$COMMAND" in
           exit 0
         fi
       else
-        echo "ERROR: specify tier flags (--git, --claude, --ci, --all, --ledger, --ledger-claude, --search)" >&2
+        echo "ERROR: specify tier flags (--git, --claude, --ci, --all, --ledger, --ledger-claude, --search, --search-gate)" >&2
         exit 1
       fi
     fi
     $DO_LEDGER && preflight_ledger
     $DO_LEDGER_CLAUDE && preflight_ledger_claude
     $DO_SEARCH && preflight_search
+    $DO_SEARCH_GATE && preflight_search_gate
     $DO_GIT && preflight_git
     $DO_CLAUDE && preflight_uninstall_claude
     $DO_CI && preflight_uninstall_ci
@@ -2837,6 +3248,7 @@ case "$COMMAND" in
     # After uninstall_claude: a hook-lib.sh it kept for the set goes now.
     $DO_LEDGER_CLAUDE && uninstall_ledger_claude
     $DO_SEARCH && uninstall_search
+    $DO_SEARCH_GATE && uninstall_search_gate
     echo ""
     echo "Done."
     ;;
@@ -2844,21 +3256,22 @@ case "$COMMAND" in
   status)
     if $JSON; then
       # The three tiers (all of them, or those named), one JSON object on
-      # stdout, exit 0: the states are the verdict. --search adds doc-search's
-      # set (never part of the default, or of --all; the only member when it
-      # is the only one named).
-      if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_SEARCH; then
+      # stdout, exit 0: the states are the verdict. --search and --search-gate
+      # add doc-search's sets (never part of the default, or of --all; the
+      # only members when they are the only ones named).
+      if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_SEARCH && ! $DO_SEARCH_GATE; then
         DO_GIT=true DO_CLAUDE=true DO_CI=true
       fi
       if $DO_GIT; then status_git; fi
       if $DO_CLAUDE; then status_claude; fi
       if $DO_CI; then status_ci; fi
       if $DO_SEARCH; then status_search; fi
+      if $DO_SEARCH_GATE; then status_search_gate; fi
       status_json
       exit 0
     fi
-    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE && ! $DO_SEARCH; then
-      DO_GIT=true DO_CLAUDE=true DO_CI=true DO_LEDGER=true DO_LEDGER_CLAUDE=true DO_SEARCH=true
+    if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE && ! $DO_SEARCH && ! $DO_SEARCH_GATE; then
+      DO_GIT=true DO_CLAUDE=true DO_CI=true DO_LEDGER=true DO_LEDGER_CLAUDE=true DO_SEARCH=true DO_SEARCH_GATE=true
     fi
     # status --claude: the ledger's Claude set lives in the same settings
     # file, so once any of it is installed it is reported too (an install
@@ -2893,6 +3306,10 @@ case "$COMMAND" in
     fi
     if $DO_SEARCH; then
       status_search
+      echo ""
+    fi
+    if $DO_SEARCH_GATE; then
+      status_search_gate
       echo ""
     fi
     echo "Env overrides: DOC_SUPERPOWERS_STRICT=${DOC_SUPERPOWERS_STRICT:-unset} DOC_SUPERPOWERS_SKIP=${DOC_SUPERPOWERS_SKIP:-unset} DOC_SUPERPOWERS_LEDGER_SKIP=${DOC_SUPERPOWERS_LEDGER_SKIP:-unset}"

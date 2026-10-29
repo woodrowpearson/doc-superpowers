@@ -1,0 +1,444 @@
+"""`doc-search gate <event>`: the client hooks' entry (gate.py), driven in-process through `main(argv)`.
+
+The repository fixtures are test_check.py's (`gated`: required, the plugin's launcher copy, no index yet;
+`own_home`: a HOME and CODEX_HOME of the test's own).
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import subprocess
+import sys
+import threading
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from doc_search import gate as gate_mod
+from doc_search.check import CONFIG_FIX, TRANSFORMER_NOT_BUILT, Verdict
+from doc_search.config import CONFIG_REL
+from doc_search.gate import TRANSFORMER_USER_ONLY, agent_can_run, hook_output, verdict_path, write_verdict
+from doc_search.version import plugin_root
+import test_check
+from test_check import INDEX_FIX, configure, install_launcher
+
+own_home = test_check.own_home  # autouse: a HOME and CODEX_HOME of the test's own
+gated = test_check.gated
+
+CHECK_FIX = "sh .claude/doc-superpowers/search-mcp.sh check"
+USER_ONLY = (
+    " Only the user can run this fix; you may run only sh .claude/doc-superpowers/search-mcp.sh index, status"
+    " or check."
+)
+
+
+NONE = {"claude": "not-registered", "codex": "not-registered"}
+"""`mcp` with no client named and nothing registered."""
+
+
+def verdict(state: str, reason: str | None = None, fix: str | None = None, mcp: dict[str, str] = NONE) -> Verdict:
+    state_: Any = state  # a State literal
+    mcp_: Any = mcp
+    return Verdict(state_, reason, fix, True, None, "1.2.3", "current", mcp_, {}, False)
+
+
+def gate(run, event: str, *argv: str) -> tuple[int, Any]:
+    """`gate <event>`: its exit code and its JSON (None for no output)."""
+    done = run("gate", event, *argv)
+    assert done.err == ""
+    return done.code, json.loads(done.out) if done.out.strip() else None
+
+
+def verdict_file(made) -> Path:
+    return made.root / ".git" / "doc-search-gate"
+
+
+def block(reason: str, fix: str) -> dict[str, str]:
+    return {
+        "decision": "block",
+        "reason": (
+            f"doc-search is required here and not ready: {reason}. Fix: {fix} — then send your message again."
+            " (Set DOC_SEARCH_GATE=0 to turn the gate off for yourself.)"
+        ),
+    }
+
+
+def context(text: str) -> dict[str, Any]:
+    return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}
+
+
+# --- prompt ----------------------------------------------------------------------------------------------
+
+
+def test_gate_prompt_blocks_when_not_ready(gated, run) -> None:
+    code, out = gate(run, "prompt")
+
+    assert code == 0
+    assert out == block("docs index absent", INDEX_FIX)
+    assert verdict_file(gated).read_bytes() == f"not-ready\ndocs index absent; fix: {INDEX_FIX}\n".encode()
+
+
+def test_gate_prompt_silent_and_clears_when_ready(gated, run) -> None:
+    assert gate(run, "prompt")[1] is not None
+    assert verdict_file(gated).exists()
+    assert run("index").code == 0
+
+    assert gate(run, "prompt") == (0, None)
+    assert not verdict_file(gated).exists(), "a verdict that is not not-ready removes the file"
+    assert gate(run, "prompt") == (0, None), "…and a missing file is fine"
+
+
+def test_gate_prompt_silent_when_not_required(gated, run) -> None:
+    configure(gated, required=False)
+    verdict_file(gated).write_text("not-ready\nold\n")
+
+    assert gate(run, "prompt") == (0, None)
+    assert not verdict_file(gated).exists()
+
+
+def test_gate_prompt_says_fix_for_a_fix_that_is_not_one_command(gated, run) -> None:
+    (gated.root / CONFIG_REL).write_text('{"required": true, "bogus": 1}')
+
+    code, out = gate(run, "prompt")
+
+    assert code == 0 and out == block("invalid config: unknown key bogus", CONFIG_FIX)
+    assert USER_ONLY.strip() not in out["reason"], "the prompt block is shown to the user"
+
+
+# --- session-start ---------------------------------------------------------------------------------------
+
+
+def test_gate_session_start_context_per_state(gated, run) -> None:
+    code, out = gate(run, "session-start")
+    assert code == 0 and out == context(
+        f"doc-search is required here and not ready: docs index absent. Fix: {INDEX_FIX}. Do no work until it is"
+        " ready: tell the user this line and stop."
+    )
+    assert verdict_file(gated).read_text().splitlines()[0] == "not-ready"
+
+    assert run("index").code == 0
+    code, out = gate(run, "session-start")
+    assert code == 0 and out == context("doc-search: ready\nmcp: claude=not-registered codex=not-registered")
+    assert not verdict_file(gated).exists()
+
+    install_launcher(gated, "#!/bin/sh\n# doc-search launcher v0.0.1\n")
+    code, out = gate(run, "session-start")
+    assert code == 0 and out == context(
+        "doc-search: ready (degraded: launcher copy differs from the plugin's)"
+        "\nmcp: claude=not-registered codex=not-registered"
+    )
+    assert not verdict_file(gated).exists()
+
+    configure(gated, required=False)
+    assert gate(run, "session-start") == (0, None)
+
+
+def test_gate_session_start_tells_the_agent_when_only_the_user_can_fix(gated, run) -> None:
+    (gated.root / CONFIG_REL).write_text('{"required": true, "bogus": 1}')
+
+    code, out = gate(run, "session-start")
+
+    assert code == 0 and out == context(
+        f"doc-search is required here and not ready: invalid config: unknown key bogus. Fix: {CONFIG_FIX}.{USER_ONLY}"
+        " Do no work until it is ready: tell the user this line and stop."
+    )
+
+
+def test_hook_output_texts() -> None:
+    ready = verdict("ready", mcp={"claude": "expected"})
+    degraded = verdict("degraded", "static index while the transformer index builds")
+    not_ready = verdict("not-ready", "code index absent", INDEX_FIX)
+    plugin = verdict("not-ready", "doc-superpowers 1.2.3 is below requires >=9.0.0", "claude plugin update x")
+    off = verdict("not-in-force", "not required here (ready)")
+
+    assert hook_output("session-start", ready) == context("doc-search: ready\nmcp: claude=expected")
+    assert hook_output("session-start", degraded) == context(
+        "doc-search: ready (degraded: static index while the transformer index builds)"
+        "\nmcp: claude=not-registered codex=not-registered"
+    )
+    assert hook_output("session-start", plugin) == context(
+        "doc-search is required here and not ready: doc-superpowers 1.2.3 is below requires >=9.0.0."
+        f" Fix: claude plugin update x.{USER_ONLY} Do no work until it is ready: tell the user this line and stop."
+    )
+    assert hook_output("session-start", off) is None
+    assert hook_output("prompt", not_ready) == block("code index absent", INDEX_FIX)
+    for quiet in (ready, degraded, off):
+        assert hook_output("prompt", quiet) is None
+
+
+def test_agent_can_run_is_the_launchers_allowlist() -> None:
+    for fix in (
+        INDEX_FIX,
+        "sh .claude/doc-superpowers/search-mcp.sh status --format json",
+        "sh .claude/doc-superpowers/search-mcp.sh check",
+        'sh "/a dir/.claude/doc-superpowers/search-mcp.sh" check --format text',
+        "sh /abs/path/.claude/doc-superpowers/search-mcp.sh index",
+    ):
+        assert agent_can_run(fix), fix
+    for fix in (
+        CONFIG_FIX,
+        "install uv",
+        "claude plugin update doc-superpowers",
+        f"{INDEX_FIX}\n",
+        f"{INDEX_FIX}; ls",
+        "sh .claude/doc-superpowers/search-mcp.sh serve",
+        'sh "x/.claude/doc-superpowers/search-mcp.sh index',
+        None,
+    ):
+        assert not agent_can_run(fix), fix
+
+
+# --- an exception in assess ------------------------------------------------------------------------------
+
+
+def _raise(*_args: object, **_kwargs: object) -> Verdict:
+    raise RuntimeError("boom\nsecond line")
+
+
+def test_gate_assess_exception_blocks_when_required(gated, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gate_mod, "assess", _raise)
+
+    code, out = gate(run, "prompt")
+
+    assert code == 0
+    assert out == block("check failed: RuntimeError: boom second line", CHECK_FIX)
+    assert verdict_file(gated).read_bytes() == (
+        f"not-ready\ncheck failed: RuntimeError: boom second line; fix: {CHECK_FIX}\n".encode()
+    )
+    code, out = gate(run, "session-start")
+    assert code == 0 and out["hookSpecificOutput"]["additionalContext"].startswith(
+        "doc-search is required here and not ready: check failed: RuntimeError: boom second line. Fix:"
+    )
+
+
+def test_gate_assess_exception_silent_when_not_required(repo, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gate_mod, "assess", _raise)
+    verdict_file(repo).write_text("not-ready\nold\n")
+
+    assert gate(run, "prompt") == (0, None)
+    assert gate(run, "session-start") == (0, None)
+    assert not verdict_file(repo).exists()
+
+
+# --- the verdict file ------------------------------------------------------------------------------------
+
+
+def test_write_verdict_two_lf_lines(tmp_path: Path) -> None:
+    gitdir = tmp_path / "gitdir"
+    gitdir.mkdir()
+    path = gitdir / "doc-search-gate"
+
+    write_verdict(path, verdict("not-ready", "index\r\nabsent\rnow\nhere", "sh x\nindex"))
+    assert path.read_bytes() == b"not-ready\nindex absent now here; fix: sh x index\n"
+
+    write_verdict(path, verdict("not-ready", "no fix here"))
+    assert path.read_bytes() == b"not-ready\nno fix here\n"
+
+    write_verdict(path, verdict("degraded", "x"))
+    assert not path.exists()
+    write_verdict(path, verdict("ready"))
+    assert not path.exists(), "a missing file is fine"
+    assert list(gitdir.iterdir()) == [], "no temp file is left behind"
+
+
+def test_write_verdict_is_atomic(tmp_path: Path) -> None:
+    gitdir = tmp_path / "gitdir"
+    gitdir.mkdir()
+    path = gitdir / "doc-search-gate"
+    texts = {f"not-ready\nreason {i} {'x' * 4000}; fix: {INDEX_FIX}\n" for i in range(4)}
+    verdicts = [verdict("not-ready", f"reason {i} {'x' * 4000}", INDEX_FIX) for i in range(4)] + [verdict("ready")]
+    stop = threading.Event()
+    seen: list[str] = []
+    errors: list[BaseException] = []
+
+    def writer(offset: int) -> None:
+        try:
+            for n in range(200):
+                write_verdict(path, verdicts[(n + offset) % len(verdicts)])
+        except BaseException as err:  # pragma: no cover - surfaced below
+            errors.append(err)
+
+    def reader() -> None:
+        while not stop.is_set():
+            try:
+                seen.append(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                seen.append("")
+
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(8)]
+    watch = threading.Thread(target=reader)
+    watch.start()
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    stop.set()
+    watch.join()
+
+    assert errors == []
+    assert seen and all(text == "" or text in texts for text in seen), "every read is a whole verdict or no file"
+    assert [p.name for p in gitdir.iterdir()] in ([], ["doc-search-gate"]), "no temp file is left behind"
+
+
+def test_verdict_path_is_per_worktree(gated) -> None:
+    linked = gated.add_worktree("other", "other")
+
+    assert verdict_path(gated.root) == verdict_file(gated)
+    assert verdict_path(linked) == gated.root / ".git" / "worktrees" / linked.name / "doc-search-gate"
+
+
+# --- the event and usage ---------------------------------------------------------------------------------
+
+
+def test_gate_reads_and_ignores_the_event_on_stdin(gated, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    event = json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "MARKER-7f3a " + "x" * 300000})
+    stdin = io.StringIO(event)
+    monkeypatch.setattr(sys, "stdin", stdin)
+
+    done = run("gate", "prompt")
+
+    assert done.code == 0 and stdin.read() == "", "the event was read whole"
+    assert "MARKER-7f3a" not in done.out + done.err, "…and never echoed"
+    assert json.loads(done.out) == block("docs index absent", INDEX_FIX), "…nor used"
+
+
+def test_gate_outside_a_repository_is_silent(tmp_path: Path, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert gate(run, "prompt") == (0, None)
+    assert gate(run, "session-start") == (0, None)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("stop",),
+        ("tool",),
+        ("prompt", "--budget", "0"),
+        ("prompt", "--budget", "601"),
+        ("session-start", "--client", "cursor"),
+        ("session-start", "--client"),
+    ],
+)
+def test_gate_usage(repo, run, argv: tuple[str, ...]) -> None:
+    done = run("gate", *argv)
+
+    assert done.code == 3 and done.out == ""
+
+
+def test_gate_budget_and_client_reach_assess(gated, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[float, str | None]] = []
+
+    def spy(top: Path, *, budget_s: float, env: Any, client: str | None) -> Verdict:
+        seen.append((budget_s, client))
+        return verdict("ready")
+
+    monkeypatch.setattr(gate_mod, "assess", spy)
+    run("gate", "prompt")
+    run("gate", "prompt", "--budget", "7")
+    run("gate", "session-start", "--client", "codex")
+
+    assert seen == [(20, None), (7, None), (20, "codex")]
+
+
+# --- check keeps the verdict file; DOC_SEARCH_GATE=0 -----------------------------------------------------
+
+
+def launcher_gate_tool(top: Path, command: str) -> subprocess.CompletedProcess[str]:
+    """The plugin's launcher answering `gate tool` in `top`, as a client runs it (the event on stdin)."""
+    event = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+    env = {**os.environ, "DOC_SUPERPOWERS_ROOT": str(plugin_root()), "DOC_SEARCH_GATE": ""}
+    launcher = plugin_root() / "scripts" / "search" / "launch.sh"
+    return subprocess.run(
+        ["sh", str(launcher), "gate", "tool"], cwd=top, input=event, capture_output=True, text=True, env=env
+    )
+
+
+def test_check_keeps_the_verdict_file(gated, run) -> None:
+    verdict_file(gated).write_text("not-ready\nold\n")
+
+    assert run("check").code == 1
+    assert verdict_file(gated).read_bytes() == f"not-ready\ndocs index absent; fix: {INDEX_FIX}\n".encode()
+    assert run("index").code == 0
+    assert run("check", "--format", "json").code == 0
+    assert not verdict_file(gated).exists(), "halt step 2: index, then check, and the verdict file is gone"
+    denied = launcher_gate_tool(gated.root, "rg foo")
+    assert (denied.returncode, denied.stdout) == (0, ""), "…so the tool gate lets the next call through"
+
+
+def test_check_not_in_force_removes_the_verdict_file(gated, run) -> None:
+    configure(gated, required=False)
+    verdict_file(gated).write_text("not-ready\nold\n")
+
+    assert run("check").code == 4
+    assert not verdict_file(gated).exists()
+
+
+@pytest.mark.parametrize("off", ["0", " 0 "])
+def test_check_with_the_gate_off_leaves_the_verdict_file(gated, run, monkeypatch: pytest.MonkeyPatch, off) -> None:
+    monkeypatch.setenv("DOC_SEARCH_GATE", off)
+    verdict_file(gated).write_text("not-ready\nold\n")
+
+    assert run("check").code == 1
+    assert verdict_file(gated).read_text() == "not-ready\nold\n", "not written"
+    assert run("index").code == 0
+    assert run("check").code == 0
+    assert verdict_file(gated).read_text() == "not-ready\nold\n", "…nor removed"
+
+
+@pytest.mark.parametrize("off", ["0", " 0 "])
+def test_gate_off_is_silent(gated, run, monkeypatch: pytest.MonkeyPatch, off) -> None:
+    def never(*_args: object, **_kwargs: object) -> Verdict:
+        raise AssertionError("assess must not run")
+
+    monkeypatch.setattr(gate_mod, "assess", never)
+    monkeypatch.setenv("DOC_SEARCH_GATE", off)
+    verdict_file(gated).write_text("not-ready\nold\n")
+
+    for event in ("session-start", "prompt"):
+        assert gate(run, event) == (0, None)
+    assert verdict_file(gated).read_text() == "not-ready\nold\n", "the verdict file is left as it is"
+    monkeypatch.setenv("DOC_SEARCH_GATE", "1")
+    monkeypatch.setattr(gate_mod, "assess", _assess_not_ready)
+    assert gate(run, "prompt")[1] == block("docs index absent", INDEX_FIX), "DOC_SEARCH_GATE=1 is not off"
+
+
+def _assess_not_ready(*_args: object, **_kwargs: object) -> Verdict:
+    return verdict("not-ready", "docs index absent", INDEX_FIX)
+
+
+# --- a fix that is the user's ----------------------------------------------------------------------------
+
+
+def test_session_start_marks_the_first_transformer_build_as_the_users() -> None:
+    first = verdict("not-ready", TRANSFORMER_NOT_BUILT, INDEX_FIX)
+
+    assert hook_output("session-start", first) == context(
+        f"doc-search is required here and not ready: transformer index not built. Fix: {INDEX_FIX}."
+        f" {TRANSFORMER_USER_ONLY} Do no work until it is ready: tell the user this line and stop."
+    )
+    assert TRANSFORMER_USER_ONLY == "Only the user can run this fix: the first transformer build takes hours."
+    other = verdict("not-ready", "docs index absent", INDEX_FIX)
+    assert TRANSFORMER_USER_ONLY not in hook_output("session-start", other)["hookSpecificOutput"]["additionalContext"]
+
+
+# --- the client ------------------------------------------------------------------------------------------
+
+
+def test_gate_session_start_names_the_clients_mcp_state(gated, run) -> None:
+    assert run("index").code == 0
+    (gated.root / ".mcp.json").write_text(json.dumps({"mcpServers": {"doc-search": {"command": "sh"}}}))
+
+    assert gate(run, "session-start", "--client", "claude") == (0, context("doc-search: ready\nmcp: claude=expected"))
+    assert gate(run, "session-start", "--client", "codex") == (
+        0,
+        context("doc-search: ready\nmcp: codex=not-registered"),
+    ), "a Codex session: .mcp.json does not register the server for it"
+    assert gate(run, "session-start") == (
+        0,
+        context("doc-search: ready\nmcp: claude=expected codex=not-registered"),
+    ), "no client (a hook entry from before --client): each client"
+    assert gate(run, "prompt", "--client", "codex") == (0, None)

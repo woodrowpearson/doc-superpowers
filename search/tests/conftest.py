@@ -1,4 +1,5 @@
-"""Shared fixtures: offline semble, a tiny Model2Vec model, a fake transformer model, and isolated git repositories.
+"""Shared fixtures: offline semble, a tiny Model2Vec model, a fake transformer model, isolated git repositories, and
+the command line's seeded repository (`repo`, `tx_repo`, `run`: test_cli.py and test_check.py).
 
 Tests never touch the network, the user's semble cache, or the user's git config.
 """
@@ -240,3 +241,91 @@ def git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., G
         return repo
 
     return make
+
+
+# --- the command line's repository (test_cli.py, test_check.py) ---------------------------------------------
+
+SPEC_PATH = "docs/specs/SPEC-PAY-004.md"
+SHIPPING_PATH = "docs/shipping.md"
+CODE_PATH = "src/refund.py"
+
+SPEC = """---
+status: accepted
+---
+# Refunds
+
+Refund rounding rules for the payment service, SPEC-PAY-004.
+
+## Rounding
+
+Refunds round half up to the nearest cent. The refund total is the sum of the
+rounded line amounts, never the rounded sum.
+"""
+
+SHIPPING = """# Shipping
+
+Orders ship from the nearest warehouse. The shipping fee is a flat rate per order.
+"""
+
+REFUND_PY = '''def refund_total(lines):
+    """Sum the rounded line amounts of a refund."""
+    total = 0
+    for amount in lines:
+        total += round(amount, 2)
+    return total
+'''
+
+
+def seed(repo, tiny_model: str, **config) -> None:
+    """The CLI tests' repository: two docs, one code file and a config on the tiny models (`config` adds keys)."""
+    import json
+
+    from doc_search.config import CONFIG_REL
+
+    repo.write(SPEC_PATH, SPEC)
+    repo.write(SHIPPING_PATH, SHIPPING)
+    repo.write(CODE_PATH, REFUND_PY)
+    repo.write(CONFIG_REL, json.dumps({"docs": {"model": tiny_model}, "code": {"model": tiny_model}, **config}))
+    repo.commit("seed")
+
+
+@pytest.fixture
+def repo(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch):
+    """An enabled repository (tiny models) that is the process's working directory."""
+    made = git_repo()
+    seed(made, tiny_model)
+    monkeypatch.chdir(made.root)
+    return made
+
+
+@dataclass
+class Ran:
+    code: int
+    out: str
+    err: str
+
+    @property
+    def lines(self) -> list[str]:
+        return self.out.splitlines()
+
+
+@pytest.fixture
+def run(capsys):
+    """`run(*argv)`: the CLI's `main` in-process, with its exit code and captured output."""
+    from doc_search.cli import main
+
+    def go(*argv: str) -> Ran:
+        code = main(list(argv))
+        out, err = capsys.readouterr()
+        return Ran(code, out, err)
+
+    return go
+
+
+@pytest.fixture
+def tx_repo(git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch):
+    """An enabled repository whose docs model is the fake transformer, as the process's working directory."""
+    made = git_repo()
+    seed(made, tiny_model, docs={"model": "transformer:test-tiny"})
+    monkeypatch.chdir(made.root)
+    return made

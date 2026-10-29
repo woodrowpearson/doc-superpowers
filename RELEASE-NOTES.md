@@ -1,5 +1,62 @@
 # Release Notes
 
+## v3.11.0 (2026-10-28)
+
+This release lets a repository require doc-search: an agent stops while doc-search cannot answer, instead of working around it. Two new config keys set the policy, `doc-search check` decides one verdict, and the opt-in `--search-gate` hooks act on it in Claude Code and Codex. The gate applies only to a developer whose client finds doc-superpowers; for everyone else the committed hooks do nothing. A repository that does not set `"required": true` sees no change.
+
+The decision is mechanical because rule text alone did not hold. Fresh agents under deadline pressure, given a hand-written "search first" rule, carried on past a stale index and an outdated launcher in 2 of 2 runs ("a stale cache isn't one of the listed outages").
+
+The release also changes what a plan claims in flight: only the items it links, never a key word in its body (#60). That ends the false `stop` notices that `exclude` rows raised at every chunk boundary.
+
+### Upgrading from 3.10.x
+Nothing changes until a repository sets `"required": true`. `doc-search init` still writes a config without the new keys, so a 3.10.x teammate can read it.
+- **`hooks install --search` users:** `scripts/search/launch.sh` changed, so the committed `.claude/doc-superpowers/search-mcp.sh` reads `outdated` in `hooks status --search`. Re-run `hooks install --search` and commit the launcher.
+- **Requiring doc-search** needs every opted-in developer on 3.11.0 or later:
+  - 3.10.1 and older reject the new keys: every tool and CLI verb answers `invalid config: unknown key required` (or `requires`). That message is the cue to update.
+  - 3.10.1 and older have no `check` or `gate` (an unknown verb, exit 3). Run through an older launcher copy, or directly, nothing gates such a developer: the gate is silently absent for them.
+  - The 3.11.0 launcher answers for an older plugin itself. Where the config is required, `check` exits 1, the session-start hook tells the agent to stop, the prompt hook blocks and the tool hook denies, with `doc-superpowers <version> predates the readiness gate` and the plugin update as the fix (`claude plugin update doc-superpowers`, or `git -C ~/.codex/doc-superpowers pull` for the Codex root).
+- **The gate's hooks:** run `hooks install --search --search-gate` and commit `.claude/settings.json` and `.codex/hooks.json`. The session-start hook carries `--client claude` or `--client codex`; an entry without it reads `partial` in `hooks status --search-gate`, and re-running the install replaces it.
+- **The agent rule:** copy the marked block of `references/search-rule.md` into `AGENTS.md` or `CLAUDE.md` and commit it. `hooks status --search-gate` says whether the copy is current.
+- **`doc-release.yml`** may now also commit `scripts/search/launch.sh` and `references/search-rule.md`, the two files `bump-version` stamps in the doc-superpowers tree. A project has neither file, so nothing changes for it.
+
+### Added
+- **Two config keys** (`docs/search/config.json`; `references/search.md` → *Configuration*). `"required": true` makes doc-search a gate in this repository; the default `false` keeps the soft behavior. `"requires": ">=X.Y.Z"` is a version floor for the plugin and for the committed launcher copy; the default `null` sets none.
+- **`doc-search check [--format text|json] [--budget 1-600]`**, the readiness probe (`references/search.md` → *CLI* → `check`).
+  - Exits `0` ready or degraded, `1` not-ready (with one fix command), `3` usage, `4` not in force (no doc-superpowers for this developer, no config, or not required).
+  - Ready means a valid config, the plugin and the launcher copy at or above `requires`, and both indexes matching the tree. Degraded: the static docs index serves while a transformer index builds, or the launcher copy differs from the plugin's but meets the floor.
+  - Where required, a stale index gets one incremental refresh, bounded by `--budget` (default 20 s). `check` never starts a first build, and where doc-search is not required it refreshes nothing.
+  - `--format json` gives the state, reason, fix, version, the launcher's state, each client's MCP state and the index states.
+- **`doc-search gate session-start|prompt|tool`**, what the client hooks run.
+  - `session-start` adds the verdict as context; not ready, it tells the agent to do no work until it is.
+  - `prompt` blocks the prompt while not ready, with the reason and the fix.
+  - `tool` runs no Python: it reads a per-worktree verdict file (`$(git rev-parse --git-path doc-search-gate)`) and, while it says not ready, denies every tool call but the launcher's `index`, `status` and `check`. `check` keeps that file too, so the halt's own fix followed by `check` lifts the gate.
+  - The launcher answers `check` and `gate` itself where doc-search cannot run: no root, no `uv`, or an older plugin.
+- **`hooks install --search-gate`** (`references/hooks.md` → *doc-search gate set*). It registers the three hooks (`SessionStart`, `UserPromptSubmit`, `PreToolUse`) in `.claude/settings.json` and `.codex/hooks.json`, merged per handler, both committed.
+  - It is never part of `--all` or `--search`, and is refused without the config, or without the plugin's own launcher copy (unless `--search` runs with it and writes that copy first).
+  - `uninstall --search` alone is refused while these hooks are installed: `uninstall --search-gate` first, or both together.
+  - `hooks status --search-gate [--json]` reports each file (`installed`, `partial`, `absent`) and the rule copy (`.tiers.search_gate`).
+- **The agent rule** `references/search-rule.md`: a block a project copies between `<!-- doc-superpowers:search-rule vX.Y.Z -->` and its closing marker. It is keyed to `check`'s exits and names the two cases `check` cannot see (the MCP tools missing while expected, and the wrong worktree). The status drift check compares the lines between the markers.
+- **The Codex root.** The launcher also finds doc-superpowers at `${CODEX_HOME:-$HOME/.codex}/doc-superpowers`, after `$DOC_SUPERPOWERS_ROOT` and the repository itself and before the Claude Code plugin cache, so a Codex-only developer needs no variable (`.codex/INSTALL.md` → *doc-search*).
+- **Two per-developer variables**, usually set in the launcher's env hook. `DOC_SEARCH_MCP=0`: this developer's client cannot run the MCP server, so `check` reports its MCP state as `off` and the rule does not halt on missing tools. `DOC_SEARCH_GATE=0`: the hooks allow everything for this developer and leave the verdict file alone.
+- **Version stamps.** Line 2 of `scripts/search/launch.sh` is `# doc-search launcher vX.Y.Z`, and the rule's opening marker carries the version too. `doc-tools.sh bump-version` writes both and `check-version` checks both, only in the doc-superpowers tree (a project's own files of those names are left alone).
+
+### Changed
+- **A plan claims only what it links (in-flight).** A plan whose only mention of an item is a key word in its body no longer claims that item. To keep the claim, link the item with an `include` row or a frontmatter value, claim it with a claims trailer, or edit the item file. Every host computes claims itself, so a host on an older release keeps raising the old notices until it upgrades. Each host recomputes its cached branch facts once, on its first in-flight read after the upgrade: the schema is now `ledger-branch/2`, and the cache key covers the link readers.
+
+### Fixes
+- **In-flight plan claims follow the plan's links (#60).** A branch that modified a plan claimed every key word in it (`_LG_AWK_IFL_WORDS`). That included the `exclude: <why>` rows that `ledger sweep --plan` writes, so `ledger notices --gate` raised false `stop` notices at every chunk boundary. On one host a plan claimed 214 items, 212 of them named only on `exclude` rows, and another branch's gate raised 56 `stop` notices that took 60 `Ledger-Ack` trailers. A plan now claims what it links, as `references/ledger.md` already said and merge-time upkeep already read. The reader (`_LG_AWK_IFL_LINKS`) emits an `include` row's first cell and each frontmatter value, a scalar or a list element. The join resolves each to a key or alias, in any case, else to an item path with `./` dropped, as upkeep's `up_item_ref` does. None of these claim: an excluded or unmarked row, another cell of an `include` row, a Related work table inside a fenced block, prose, or an unterminated frontmatter. The `git cat-file --batch` framing and its desync exits are unchanged.
+- **One plan-link row test.** `relations.sh`'s new `rw_linked` is the one test of a plan-link row. Upkeep's plan-link reader and in-flight both call it, so the two cannot drift apart. Upkeep's behavior is unchanged.
+- **No stale cached claims.** The facts signature now also hashes `_LG_AWK_RW`, `_LG_AWK_IFL_LINKS` and `frontmatter.awk`, so a change to the link test invalidates every cached claim.
+
+### Other
+- What is verified for Codex: the `.codex/hooks.json` shape was checked offline with codex-cli 0.163.0 (its `hooks/list` loaded the three hooks in a trusted project and none in an untrusted one). The hooks have not been seen firing in a live Codex session, and which tools Codex sends through `PreToolUse` is not verified. Cursor is unverified.
+- The rule's wording was tried with fresh agents, one fresh context per run, five runs per case: the MCP tools missing while expected, a launcher below the floor, doc-superpowers not installed, a first transformer build only the user can run, and Codex without the MCP entry. Each case got the intended answer in 5 of 5. Without the rule, the tools-missing case halted in 0 of 5.
+- Known limits, left for later: a launcher copy newer than the plugin's is refused by `install --search-gate` with a message that calls it older; for a development checkout set as the root, the fix names `claude plugin update`; the rule's excuses table does not name the client in its `mcp:` row.
+- Tests: `test-ledger.sh`'s "ledger publish never forces" failed now and then. The rival commit it simulates had no parent and a fixed message, so two races in the same second made the same commit. The second race's push then changed nothing, and publish fast-forwarded (exit 0, not 2). The rival now builds on the tip that publish read, and a new test runs both races with the clock pinned. `ledger publish` itself is unchanged: the race hook runs only under the test variable.
+- Docs: `references/ledger.md` now defines "links" for in-flight claims. The work-ledger design (§H.1, "names it" becomes "links it") and the upkeep design (D9 no longer keeps a looser in-flight link) are amended with dated notes. `docs/codebase-guide.md` names the rule.
+- Tests: `test-ledger.sh` adds three tests: plan claims follow links, excluded rows never stop, and the facts signature covers the link readers. The plan-links stream tests are rewritten for links (+14 assertions).
+- Suite counts are in CLAUDE.md. The full local `check-ci.sh` passed under bash 5.x and `/bin/bash` 3.2: seven suites, 15549 assertions (from 14904), `test-hooks.sh` 4243, `test-doc-tools.sh` 1656, `test-ledger.sh` 3862, `test-spec-status-model.sh` 1045, the other three unchanged; doc-search's pytest suite, 863 passed with the 2 live tests skipped. GitHub Actions does not run on this account (billing lock), so this release was verified locally.
+
 ## v3.10.1 (2026-10-28)
 
 This patch release fixes `check-ci.sh` for an interpreter at a path with a space. It also makes every test suite run under a spaced path on every run (#61, #62). Before, the suites met a spaced path only on a host whose `TMPDIR` had one. There, `test-hooks.sh`, `test-doc-pr-release.sh` and `test-ledger.sh` failed, and every failure but the `check-ci.sh` one was a test bug.
