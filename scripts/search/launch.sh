@@ -1,8 +1,13 @@
 #!/bin/sh
+# doc-search launcher v3.11.0
 # doc-search launcher (POSIX sh): runs the doc-search CLI / MCP server through
 # uv, from wherever doc-superpowers is installed.
 #
 #   sh .claude/doc-superpowers/search-mcp.sh serve     (what .mcp.json runs)
+#   sh .claude/doc-superpowers/search-mcp.sh check     (the readiness probe)
+#   sh "$(git rev-parse --show-toplevel)/.claude/doc-superpowers/search-mcp.sh" \
+#     gate session-start|prompt|tool [--client claude|codex]
+#                                                      (what the client hooks run)
 #
 # install.sh install --search copies this file to
 # .claude/doc-superpowers/search-mcp.sh and registers it in .mcp.json. The copy
@@ -11,9 +16,14 @@
 #   1. $DOC_SUPERPOWERS_ROOT, when it has search/pyproject.toml
 #   2. the repository this is run in, when it is doc-superpowers itself
 #      (search/pyproject.toml and scripts/doc-tools.sh)
-#   3. the newest numeric X.Y.Z directory under
+#   3. ${CODEX_HOME:-$HOME/.codex}/doc-superpowers, the Codex install, when it
+#      has search/pyproject.toml
+#   4. the newest numeric X.Y.Z directory under
 #      ${CLAUDE_PLUGIN_CACHE:-$HOME/.claude/plugins/cache}/*/doc-superpowers/
 #      that has search/pyproject.toml
+#
+# Line 2 is the version stamp, the plugin's version: doc-tools.sh bump-version
+# writes it and check-version checks it.
 #
 # Extras: --extra cloud when docs/search/config.json (at the repository top)
 # has a non-null "cloud"; --extra local-transformer (after cloud) when its
@@ -48,11 +58,304 @@
 # set is kept; none found leaves it unset, and the default is then the launch
 # worktree.
 #
-# Failures are one stderr line and exit 2.
+# check and gate (the readiness probe and the client hooks' entry) are answered
+# here where doc-search cannot run, and exec it otherwise. In this order, after
+# the env hook:
+#   - gate with DOC_SEARCH_GATE=0 (blanks ignored): exit 0, no output;
+#   - outside a git work tree: check prints "not in force: not a git work
+#     tree" and exits 4; gate is silent;
+#   - no root: check prints "not in force: doc-superpowers is not installed for
+#     this developer" and exits 4; gate is silent; check, gate session-start
+#     and prompt remove the verdict file;
+#   - gate tool: answered from the verdict file (below);
+#   - a root that predates the readiness gate (no search/src/doc_search/gate.py,
+#     so its doc-search has neither check nor gate): answered as with no uv,
+#     the reason "doc-superpowers <its package.json version> predates the
+#     readiness gate" and the fix the plugin update doc-search check names
+#     (git -C <the Codex root> pull for the Codex install);
+#   - no uv, where the raw text of docs/search/config.json (at the repository
+#     top) matches "required"\s*:\s*true, across lines, as doc-search's own
+#     test does: check prints "not ready: uv not found" and exits 1; gate
+#     prompt blocks the prompt and gate session-start adds the line as
+#     context, in doc-search gate's words; all three write the verdict file
+#     as doc-search gate does;
+#   - no uv otherwise: check prints "not in force: uv not found" and exits 4;
+#     gate session-start and prompt are silent; all three remove the verdict
+#     file.
+# The verdict file, $(git rev-parse --git-path doc-search-gate), is kept by
+# check and gate session-start and prompt (doc-search's, or this file's where
+# it answers), never with DOC_SEARCH_GATE=0: so the agent's own fix and check
+# lift the tool gate. Two LF lines while not ready, line 1 not-ready and line 2
+# "<reason>; fix: <fix>", written to a temp file beside it and moved over it;
+# absent otherwise. gate tool never runs uv: it reads that file. Unless line 1
+# is not-ready (one trailing CR ignored) it is silent. While it is, a Bash call
+# whose whole command matches GATE_ALLOWED_PLAIN or GATE_ALLOWED_QUOTED (the
+# fix commands) is allowed and every other tool call is denied, line 2 (one
+# trailing CR dropped) in the reason. Without jq the call cannot be read, so
+# every one is denied, with a fixed reason.
+# check's answer goes to stdout, as doc-search's does: the line, or with
+# --format json one object (see check_answer). gate prints one JSON object or
+# nothing and exits 0 (3 for an unknown event, or a --client other than claude
+# or codex; doc-search gate reads --client, the answers here do not need it). It never echoes the event,
+# and it drains stdin it does not read, so the client's write never blocks.
+#
+# Other failures are one stderr line and exit 2.
 
 fail() {
   echo "doc-search: $*" >&2
   exit 2
+}
+
+# drain: discard the hook event on stdin, unless stdin is a terminal.
+drain() {
+  [ -t 0 ] || cat >/dev/null
+}
+
+# gate_silent: drain, then exit 0 with no output (the client goes on).
+gate_silent() {
+  drain
+  exit 0
+}
+
+# config_required: the raw config text says "required": true (it may not parse).
+config_required() {
+  if [ -z "$TOP" ] || [ ! -f "$TOP/docs/search/config.json" ]; then
+    return 1
+  fi
+  # tr turns the ASCII whitespace (\t \n \v \f \r) into spaces, so " *" spans
+  # lines as Python's \s does; the Unicode spaces \s also matches are not covered.
+  tr '\t\n\v\f\r' '     ' 2>/dev/null <"$TOP/docs/search/config.json" | grep -Eq '"required" *: *true'
+}
+
+# json_text <text>: <text> with its backslashes and double quotes escaped, for
+# a JSON string written without jq (the texts here hold no control character).
+json_text() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# gate_keep <line 2>: write the verdict file as not-ready, atomically (a temp
+# file beside it, then mv over it). A failure leaves it as it was. Nothing
+# with DOC_SEARCH_GATE=0.
+gate_keep() {
+  [ "$GATE_OFF" = false ] || return 0
+  VERDICT=$(git rev-parse --git-path doc-search-gate 2>/dev/null) || VERDICT=""
+  [ -n "$VERDICT" ] || return 0
+  if ! (printf 'not-ready\n%s\n' "$1" >"$VERDICT.tmp.$$" && mv -f "$VERDICT.tmp.$$" "$VERDICT") 2>/dev/null; then
+    rm -f "$VERDICT.tmp.$$" 2>/dev/null
+  fi
+  return 0
+}
+
+# gate_forget: remove the verdict file (not in force); a missing one is fine.
+# Nothing with DOC_SEARCH_GATE=0.
+gate_forget() {
+  [ "$GATE_OFF" = false ] || return 0
+  VERDICT=$(git rev-parse --git-path doc-search-gate 2>/dev/null) || VERDICT=""
+  if [ -n "$VERDICT" ]; then rm -f "$VERDICT" 2>/dev/null; fi
+  return 0
+}
+
+# gate_tool: the PreToolUse decision, from the verdict file and the event.
+gate_tool() {
+  VERDICT=$(git rev-parse --git-path doc-search-gate 2>/dev/null) || VERDICT=""
+  if [ -z "$VERDICT" ] || [ ! -f "$VERDICT" ]; then
+    gate_silent
+  fi
+  # Line 1, one trailing CR dropped: a CRLF file still denies (fail closed).
+  LINE1=$(sed -n 1p "$VERDICT" 2>/dev/null) || LINE1=""
+  LINE1=${LINE1%"$(printf '\r')"}
+  if [ "$LINE1" != not-ready ]; then
+    gate_silent
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    drain
+    printf '%s\n' "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$GATE_NOT_READY, and this hook cannot read the tool call without jq. $GATE_STOP\"}}"
+    exit 0
+  fi
+  if [ -t 0 ]; then EVENT=""; else EVENT=$(cat); fi
+  # A newline anywhere is refused: jq's $ also matches before a final newline.
+  if printf '%s' "$EVENT" | jq -e --arg plain "$GATE_ALLOWED_PLAIN" --arg quoted "$GATE_ALLOWED_QUOTED" '
+    .tool_name == "Bash"
+    and (.tool_input.command | type) == "string"
+    and (.tool_input.command | test("[\n\r]") | not)
+    and (.tool_input.command | test($plain) or test($quoted))' >/dev/null 2>&1; then
+    exit 0
+  fi
+  REASON=$(sed -n 2p "$VERDICT" 2>/dev/null) || REASON=""
+  REASON=${REASON%"$(printf '\r')"}
+  if [ -n "$REASON" ]; then
+    REASON="$GATE_NOT_READY: $REASON. $GATE_STOP"
+  else
+    REASON="$GATE_NOT_READY. $GATE_STOP"
+  fi
+  printf '%s' "$REASON" |
+    jq -Rsc '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: .}}' 2>/dev/null ||
+    printf '%s\n' "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$GATE_NOT_READY. $GATE_STOP\"}}"
+  exit 0
+}
+
+# check_answer <state> <exit> <reason> [fix]: check's answer, then exit
+# <exit>. Text: "doc-search: <state, dashes as spaces>: <reason>". With
+# --format json: {"state", "exit", "reason", "fix"} (fix null when none), the
+# names doc-search's own verdict uses; without jq the strings are escaped by
+# json_text.
+check_answer() {
+  if [ "$FORMAT" = json ]; then
+    if command -v jq >/dev/null 2>&1; then
+      jq -n --arg state "$1" --argjson exit "$2" --arg reason "$3" --arg fix "${4:-}" \
+        '{state: $state, exit: $exit, reason: $reason, fix: (if $fix == "" then null else $fix end)}'
+    else
+      FIX_JSON=null
+      if [ -n "${4:-}" ]; then FIX_JSON="\"$(json_text "$4")\""; fi
+      printf '{"state": "%s", "exit": %s, "reason": "%s", "fix": %s}\n' "$1" "$2" "$(json_text "$3")" "$FIX_JSON"
+    fi
+  else
+    echo "doc-search: $(printf '%s' "$1" | tr '-' ' '): $3"
+  fi
+  exit "$2"
+}
+
+# root_version: the root's package.json version, or "(version unknown)".
+root_version() {
+  # Blanks (tabs too) dropped first, so the key, colon and value sit together.
+  RV=$(tr -d ' \t' <"$ROOT/package.json" 2>/dev/null |
+    sed -n 's/^"version":"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/p' | head -n 1)
+  printf '%s' "${RV:-(version unknown)}"
+}
+
+# plugin_fix: how the root is updated, as doc-search check says it: the Codex
+# install (${CODEX_HOME:-$HOME/.codex}/doc-superpowers, a git checkout) is
+# pulled; anything else is taken to be the Claude Code plugin.
+plugin_fix() {
+  if [ "$ROOT" != "${CODEX_HOME:-$HOME/.codex}/doc-superpowers" ]; then
+    printf 'claude plugin update doc-superpowers'
+    return 0
+  fi
+  # The tilde is in the format string: it is the text shown, not expanded.
+  case $ROOT in
+    "$HOME"/*) printf 'git -C ~/%s pull' "${ROOT#"$HOME"/}" ;;
+    *) printf 'git -C %s pull' "$ROOT" ;;
+  esac
+}
+
+# answer_unrunnable <reason> <fix>: doc-search cannot run here. Where the raw
+# config says "required": true, not ready: gate session-start and prompt
+# keep the verdict file and answer in doc-search gate's words (the fix is the
+# user's), and check keeps it and exits 1. Otherwise not in force: the file
+# is removed, gate is silent, and check exits 4.
+answer_unrunnable() {
+  if config_required; then
+    case $EVENT_NAME in
+      session-start)
+        drain
+        gate_keep "$1; fix: $2"
+        printf '%s\n' "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"$(json_text "$GATE_NOT_READY: $1. Fix: $2. $GATE_USER_ONLY Do no work until it is ready: tell the user this line and stop.")\"}}"
+        exit 0
+        ;;
+      prompt)
+        drain
+        gate_keep "$1; fix: $2"
+        printf '%s\n' "{\"decision\":\"block\",\"reason\":\"$(json_text "$GATE_NOT_READY: $1. Fix: $2 — then send your message again. (Set DOC_SEARCH_GATE=0 to turn the gate off for yourself.)")\"}"
+        exit 0
+        ;;
+    esac
+    gate_keep "$1; fix: $2"
+    check_answer not-ready 1 "$1" "$2"
+  fi
+  gate_forget
+  if [ "$VERB" = gate ]; then gate_silent; fi
+  check_answer not-in-force 4 "$1"
+}
+
+# answer_check_gate <verb> [event] …: answer check or gate here where
+# doc-search cannot run (see above); return to exec it otherwise.
+answer_check_gate() {
+  # Set here, after the env hook, so nothing it sets can change them.
+  UV_MISSING="uv not found (https://docs.astral.sh/uv/)"
+  GATE_NOT_READY="doc-search is required here and not ready"
+  GATE_STOP="Stop and report this to the user; do not work around it."
+  # doc-search gate's sentence where the fix is not one the agent may run.
+  GATE_USER_ONLY="Only the user can run this fix; you may run only sh .claude/doc-superpowers/search-mcp.sh index, status or check."
+  # The fix commands allowed while not ready, whole: the launcher path holds
+  # only [A-Za-z0-9_./-], and spaces too when double-quoted, so no shell
+  # syntax (substitution, redirection, a second command) can ride along. The
+  # final $ is outside the quotes: this file's POSIX check refuses a dollar
+  # sign right before a single quote (bash's ANSI-C quoting).
+  GATE_ALLOWED_PLAIN='^sh ([A-Za-z0-9_./-]*/)?\.claude/doc-superpowers/search-mcp\.sh (index|status|check)( --format (text|json))?'\$
+  GATE_ALLOWED_QUOTED='^sh "([A-Za-z0-9_. /-]*/)?\.claude/doc-superpowers/search-mcp\.sh" (index|status|check)( --format (text|json))?'\$
+  VERB=$1
+  EVENT_NAME=""
+  FORMAT=text
+  GATE_OFF=false
+  if [ "$(printf '%s' "${DOC_SEARCH_GATE:-}" | tr -d '[:space:]')" = 0 ]; then GATE_OFF=true; fi
+  if [ "$VERB" = check ]; then
+    # check's --format, as argparse reads it (the last one wins).
+    PREV=""
+    for ARG in "$@"; do
+      if [ "$PREV" = --format ]; then FORMAT=$ARG; fi
+      case $ARG in
+        --format=*) FORMAT=${ARG#--format=} ;;
+      esac
+      PREV=$ARG
+    done
+  fi
+  if [ "$VERB" = gate ]; then
+    EVENT_NAME=${2:-}
+    case $EVENT_NAME in
+      session-start | prompt | tool) ;;
+      *)
+        drain
+        echo "doc-search: usage: gate session-start|prompt|tool" >&2
+        exit 3
+        ;;
+    esac
+    # --client claude|codex: the client whose MCP registration the session-start
+    # line names (doc-search gate reads it; the answers here do not need it).
+    PREV=""
+    for ARG in "$@"; do
+      CLIENT=-
+      if [ "$PREV" = --client ]; then CLIENT=$ARG; fi
+      case $ARG in
+        --client=*) CLIENT=${ARG#--client=} ;;
+      esac
+      case $CLIENT in
+        - | claude | codex) ;;
+        *)
+          drain
+          echo "doc-search: usage: gate session-start|prompt|tool [--client claude|codex]" >&2
+          exit 3
+          ;;
+      esac
+      PREV=$ARG
+    done
+    if [ "$PREV" = --client ]; then
+      drain
+      echo "doc-search: usage: gate session-start|prompt|tool [--client claude|codex]" >&2
+      exit 3
+    fi
+    if [ "$GATE_OFF" = true ]; then
+      gate_silent
+    fi
+  fi
+  if [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" != true ]; then
+    if [ "$VERB" = gate ]; then gate_silent; fi
+    check_answer not-in-force 4 "not a git work tree"
+  fi
+  if [ -z "$ROOT" ]; then
+    if [ "$EVENT_NAME" != tool ]; then gate_forget; fi
+    if [ "$VERB" = gate ]; then gate_silent; fi
+    check_answer not-in-force 4 "doc-superpowers is not installed for this developer"
+  fi
+  if [ "$EVENT_NAME" = tool ]; then
+    gate_tool
+  fi
+  if [ ! -f "$ROOT/search/src/doc_search/gate.py" ]; then
+    answer_unrunnable "doc-superpowers $(root_version) predates the readiness gate" "$(plugin_fix)"
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    return 0
+  fi
+  answer_unrunnable "$UV_MISSING" "install uv"
 }
 
 ENV_HOOK=${DOC_SEARCH_ENV_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/doc-search/env.sh}
@@ -96,6 +399,13 @@ if [ -z "$ROOT" ] && [ -n "$TOP" ] && [ -f "$TOP/search/pyproject.toml" ] && [ -
 fi
 
 if [ -z "$ROOT" ]; then
+  CODEX=${CODEX_HOME:-$HOME/.codex}/doc-superpowers
+  if [ -f "$CODEX/search/pyproject.toml" ]; then
+    ROOT=$CODEX
+  fi
+fi
+
+if [ -z "$ROOT" ]; then
   CACHE=${CLAUDE_PLUGIN_CACHE:-$HOME/.claude/plugins/cache}
   # One "<version> <dir>" line per candidate, across every marketplace.
   CANDIDATES=""
@@ -110,6 +420,10 @@ if [ -z "$ROOT" ]; then
     ROOT=$(printf '%s' "$CANDIDATES" | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1 | cut -d' ' -f2-)
   fi
 fi
+
+case ${1:-} in
+  check | gate) answer_check_gate "$@" ;;
+esac
 
 [ -n "$ROOT" ] || fail "cannot find doc-superpowers (set DOC_SUPERPOWERS_ROOT)"
 command -v uv >/dev/null 2>&1 || fail "uv not found (https://docs.astral.sh/uv/)"

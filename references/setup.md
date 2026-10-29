@@ -13,7 +13,7 @@
 - **It is idempotent.** The plan is the selection against what is installed now (`install.sh status --json --git --claude --ci --search` and the files on disk), never against the defaults: an item in place and current is no step, an outdated one (another version's install) is refreshed, an absent one is installed, and an installed one you untick is uninstalled. A re-run with nothing to change prints `nothing to do` and changes no byte.
 - **Its order.** The switches the installer reads come first (`docs/search/config.json`, `docs/ledger/config.json`, `docs/spec-claims/config.json`), then the installer's steps, then the other harnesses' doc-search entries, the env hook, setup's exclude block and the terminal command, then the records, and a build last, only after every write succeeded. A step that fails stops the run (exit 2); every step is idempotent, so running setup again finishes the job.
 
-What it does not do: run `ledger init`'s bootstrap, configure spec-claims adapters (`doc-superpowers help ledger` and `help claims` point to those flows), add CI templates, change what any installer tier installs, or commit.
+What it does not do: install doc-search's readiness gate (`hooks install --search-gate`, `references/hooks.md`), run `ledger init`'s bootstrap, configure spec-claims adapters (`doc-superpowers help ledger` and `help claims` point to those flows), add CI templates, change what any installer tier installs, or commit.
 
 ## The defaults
 

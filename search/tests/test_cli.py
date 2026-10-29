@@ -19,7 +19,6 @@ import pytest
 from semble import SembleIndex
 
 from doc_search import cli
-from doc_search.cli import main
 from doc_search.cloud import CloudUnavailable
 from doc_search.cloud.read import DegradedLeg
 from doc_search.cloud.write import BaseRefError, CorpusRefused, IndexReport, LeaseHeld, LeaseLost
@@ -30,77 +29,10 @@ from doc_search.evaluate import EvalFileError, run_eval, score_ranking
 from doc_search.progress import read_progress
 from doc_search.transformer import TransformerSpec
 from doc_search.types import Hit, SearchRequest
+from conftest import CODE_PATH, SHIPPING_PATH, SPEC_PATH, seed
 from fakes_transformer import fake_encoder, release_builds, wait_until
 
-SPEC_PATH = "docs/specs/SPEC-PAY-004.md"
-SHIPPING_PATH = "docs/shipping.md"
-CODE_PATH = "src/refund.py"
-
-SPEC = """---
-status: accepted
----
-# Refunds
-
-Refund rounding rules for the payment service, SPEC-PAY-004.
-
-## Rounding
-
-Refunds round half up to the nearest cent. The refund total is the sum of the
-rounded line amounts, never the rounded sum.
-"""
-
-SHIPPING = """# Shipping
-
-Orders ship from the nearest warehouse. The shipping fee is a flat rate per order.
-"""
-
-REFUND_PY = '''def refund_total(lines):
-    """Sum the rounded line amounts of a refund."""
-    total = 0
-    for amount in lines:
-        total += round(amount, 2)
-    return total
-'''
-
 CLOUD = {"vertex": {"project": "p"}, "firestore": {"project": "p", "base_ref": "main"}}
-
-
-def seed(repo, tiny_model: str, **config) -> None:
-    repo.write(SPEC_PATH, SPEC)
-    repo.write(SHIPPING_PATH, SHIPPING)
-    repo.write(CODE_PATH, REFUND_PY)
-    repo.write(CONFIG_REL, json.dumps({"docs": {"model": tiny_model}, "code": {"model": tiny_model}, **config}))
-    repo.commit("seed")
-
-
-@pytest.fixture
-def repo(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch):
-    """An enabled repository (tiny models) that is the process's working directory."""
-    made = git_repo()
-    seed(made, tiny_model)
-    monkeypatch.chdir(made.root)
-    return made
-
-
-@dataclass
-class Ran:
-    code: int
-    out: str
-    err: str
-
-    @property
-    def lines(self) -> list[str]:
-        return self.out.splitlines()
-
-
-@pytest.fixture
-def run(capsys):
-    def go(*argv: str) -> Ran:
-        code = main(list(argv))
-        out, err = capsys.readouterr()
-        return Ran(code, out, err)
-
-    return go
 
 
 @pytest.fixture
@@ -110,15 +42,6 @@ def warm_pool(repo, monkeypatch: pytest.MonkeyPatch) -> IndexPool:
     assert isinstance(pool.get(repo.root, wait_s=60), WorktreeIndexes)
     monkeypatch.setattr("doc_search.server.IndexPool", lambda cfg, **kwargs: pool)  # kwargs: fallback=False
     return pool
-
-
-@pytest.fixture
-def tx_repo(git_repo, tiny_model: str, spec: TransformerSpec, monkeypatch: pytest.MonkeyPatch):
-    """An enabled repository whose docs model is the fake transformer, as the process's working directory."""
-    made = git_repo()
-    seed(made, tiny_model, docs={"model": "transformer:test-tiny"})
-    monkeypatch.chdir(made.root)
-    return made
 
 
 def build_held_elsewhere(made, spec: TransformerSpec) -> tuple[IndexPool, WorktreeIndexes]:
@@ -233,7 +156,9 @@ def test_init_writes_once(git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     assert done.code == 0 and done.err == ""
     written = (fresh.root / CONFIG_REL).read_text()
-    assert written == json.dumps(DEFAULTS, indent=2) + "\n"  # the defaults verbatim, nothing widened
+    # the defaults, nothing widened, without the two gate keys (test_init_leaves_the_gate_keys_out)
+    expected = {key: value for key, value in DEFAULTS.items() if key not in ("required", "requires")}
+    assert written == json.dumps(expected, indent=2) + "\n"
     assert json.loads(written)["docs"]["include"] == ["docs/**/*.md", "*.md"]
     assert done.lines[-1] == "corpus: 3 files would be indexed"
     assert any(line.startswith("docs.include") and "docs/**/*.md" in line for line in done.lines)
@@ -264,6 +189,23 @@ def test_init_writes_once(git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.chdir(outside)
     nowhere = run("init")
     assert nowhere.code == 2 and nowhere.err.startswith("doc-search: not inside a git work tree")
+
+
+def test_init_leaves_the_gate_keys_out(git_repo, monkeypatch: pytest.MonkeyPatch, run) -> None:
+    """A 3.9 plugin rejects `required` and `requires` as unknown keys: a repository that never opted
+    into the gate must not carry them just because 3.10's `init` wrote its config."""
+    fresh = git_repo()
+    fresh.write("README.md", "# Hello\n")
+    fresh.commit("seed")
+    monkeypatch.chdir(fresh.root)
+
+    assert run("init").code == 0
+
+    written = json.loads((fresh.root / CONFIG_REL).read_text())
+    assert "required" not in written and "requires" not in written
+    cfg = load_config(fresh.root, {})
+    assert cfg is not None
+    assert cfg.required is False and cfg.requires is None
 
 
 # --- query -----------------------------------------------------------------------------------------------

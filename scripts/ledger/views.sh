@@ -297,14 +297,20 @@ _lg_publish_link() {
   jq -nr --arg up "$path" --arg b "$2" '$up + ($b | split("/") | map(@uri) | join("/")) + "/"'
 }
 
-# _lg_publish_selftest_race <remote> <ref>: TEST-ONLY (scripts/test-ledger.sh
-# sets DOC_TOOLS_LEDGER_SELFTEST=publish-race; nothing else reaches it):
-# another publisher pushes an unrelated commit to the views branch first.
+# _lg_publish_selftest_race <remote> <ref> [<tip>]: TEST-ONLY
+# (scripts/test-ledger.sh sets DOC_TOOLS_LEDGER_SELFTEST=publish-race; nothing
+# else reaches it): another publisher pushes an unrelated commit to the views
+# branch first. Its parent is the tip that publish read, so two races in the
+# same second are two commits, not one (the second would be a no-op push).
 # The --force below is the simulated rival's, never publish's own push.
 _lg_publish_selftest_race() {
   local t c
   t=$(git hash-object -t tree -w --stdin < /dev/null) || return 1
-  c=$(git commit-tree "$t" -m "selftest race") || return 1
+  if [ -n "${3:-}" ]; then
+    c=$(git commit-tree "$t" -p "$3" -m "selftest race") || return 1
+  else
+    c=$(git commit-tree "$t" -m "selftest race") || return 1
+  fi
   git push -q --no-verify --force "$1" "$c:$2" >/dev/null 2>&1
 }
 
@@ -443,7 +449,7 @@ cmd_ledger_publish() {
   fi
   case "${DOC_TOOLS_LEDGER_SELFTEST:-}" in
     # TEST-ONLY: a rival publisher wins the race (see _lg_publish_selftest_race).
-    publish-race) _lg_publish_selftest_race "$remote" "refs/heads/$vb" || _lg_die "selftest: the race push failed" ;;
+    publish-race) _lg_publish_selftest_race "$remote" "refs/heads/$vb" "$tip" || _lg_die "selftest: the race push failed" ;;
   esac
   if ! LC_ALL=C git push -q --no-verify "$remote" "$commit:refs/heads/$vb" > "$s.err" 2>&1; then
     err=$(head -n 3 "$s.err" | tr '\n' ' ')
