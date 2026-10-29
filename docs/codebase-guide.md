@@ -36,7 +36,7 @@ doc-superpowers/
 ├── gemini-extension.json # Gemini CLI extension manifest
 ├── package.json          # npm/OpenCode package metadata
 ├── search/               # doc-search: the opt-in MCP server over docs and code — a uv project (Python ≥ 3.11, .python-version 3.12); inert without docs/search/config.json
-│   ├── pyproject.toml    # runtime: semble>=0.7,<0.8, mcp>=2.3,<3, pathspec; extra cloud: google-genai, google-cloud-firestore; extra local-transformer: onnxruntime (1.31; 1.23.2 on Intel macOS), flatbuffers, protobuf, and tokenizers + huggingface-hub (declared; semble already installs them); dev: pytest; console script doc-search
+│   ├── pyproject.toml    # runtime: semble>=0.7,<0.8, mcp>=2.3,<3, pathspec; extra cloud: google-genai, google-cloud-firestore; extra local-transformer: onnxruntime (1.31; 1.23.2 on Intel macOS), flatbuffers, protobuf, and tokenizers + huggingface-hub (declared; semble already installs them); cryptography (declared: mcp imports it but declares it only through pyjwt[crypto]); tool.uv.exclude-dependencies drops hard deps no code path imports (questionary, pyjwt, sympy, coloredlogs, and theirs); dev: pytest; console script doc-search
 │   ├── uv.lock           # Locked (the launcher and CI run with --frozen); no torch; onnxruntime only in the local-transformer extra
 │   ├── src/doc_search/
 │   │   ├── config.py     # docs/search/config.json: defaults, deep merge, validation (unknown keys refused; docs.model transformer:<name> against the registry, docs.threads, code.model refuses the prefix; required, a bool; requires, ">=X.Y.Z" or null), DOC_SEARCH_CLOUD=0; INERT_LINE

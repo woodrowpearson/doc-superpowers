@@ -7,6 +7,9 @@ dependencies = [
     "semble>=0.7,<0.8",
     "mcp>=2.3,<3",
     "pathspec",
+    # mcp 2.3 imports cryptography in mcp.server.request_state but declares it only through
+    # pyjwt[crypto], which tool.uv excludes below
+    "cryptography",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +34,14 @@ doc-search = "doc_search.cli:main"
 dev = [
     "pytest",
 ]
+
+[tool.uv]
+# Hard dependencies of a parent that no doc-search code path imports (checked per profile against a
+# real serve/index run): semble's interactive installer (questionary, and prompt-toolkit and wcwidth
+# with it), mcp's OAuth client (pyjwt), and onnxruntime 1.23's model tools (sympy and mpmath,
+# coloredlogs and humanfriendly; Intel macOS only, 1.24+ no longer requires them).
+# uv older than 0.9.10 warns that it does not know this key; `--frozen` installs the lock either way.
+exclude-dependencies = ["questionary", "pyjwt", "sympy", "coloredlogs"]
 
 [build-system]
 requires = ["hatchling"]
