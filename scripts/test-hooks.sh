@@ -7478,7 +7478,7 @@ test_launcher_gate_tool() {
     "$SRG_LAUNCHER_FIX check" \
     "$SRG_LAUNCHER_FIX check --format text" \
     "sh \"$top/.claude/doc-superpowers/search-mcp.sh\" status --format json" \
-    "sh $top/.claude/doc-superpowers/search-mcp.sh index" \
+    "sh /abs/repo/.claude/doc-superpowers/search-mcp.sh index" \
     "sh \"/a dir/with spaces/.claude/doc-superpowers/search-mcp.sh\" check --format json" \
     "sh \".claude/doc-superpowers/search-mcp.sh\" index"; do
     srg_event "$ev" Bash "$c"
