@@ -1,5 +1,19 @@
 # Release Notes
 
+## v3.11.2 (2026-10-29)
+
+This patch release fixes tool resolution for a skill installed as a symlink. With `~/.claude/skills/doc-superpowers` linked to a plugin's `skills/doc-superpowers`, Claude Code fills `${CLAUDE_SKILL_DIR}` with the link's path, and SKILL.md's *Detect Bundled Tooling* block walked its two `..` lexically into `~/.claude`, so `DOC_TOOLS` named a file that is not there.
+
+### Upgrading from 3.11.1
+Nothing to do. An install that is not a symlink resolves exactly as before.
+
+### Fixes
+- **Symlinked skill directory:** the resolution block's last step is now `cd -P "$ROOT"`, which walks the two levels through the link's target to the plugin root (`references/tool-mappings.md` → *Tool resolution* says why). The resolution test gains a symlinked-skill case under bash and zsh; it fails without the fix.
+- **Test harness:** `test-helpers.sh` unsets the overrides a user may export for the shipped scripts (`DOC_TOOLS`, `DOC_SUPERPOWERS_ROOT`, `DOC_SEARCH_ENV_FILE`, `DOC_SEARCH_GATE`, `CLAUDE_PLUGIN_CACHE`, `CODEX_HOME`). A `DOC_TOOLS` set by a Claude Code settings `env` block had leaked into the suites and failed doc-pr-release's "STRICT, the vendored doc-tools.sh missing" case, on main as well; a test that wants one now sets it itself.
+
+### Other
+- Verified locally (GitHub Actions does not run on this account): `bash scripts/check-ci.sh`, all passed — the seven suites under bash 5.x and `/bin/bash` 3.2 (15551 assertions each), doc-search pytest 863 passed, 2 skipped; self-install, `check-version`, `claude plugin validate .`.
+
 ## v3.11.1 (2026-10-29)
 
 This patch release trims doc-search's install (#65). doc-search no longer installs four hard dependencies that no doc-search code path imports, and the packages they pull in: `questionary` (with `prompt-toolkit` and `wcwidth`, from semble's installer), `pyjwt` (from mcp's client auth), and, on Intel macOS only, `sympy` (with `mpmath`) and `coloredlogs` (with `humanfriendly`, from onnxruntime 1.23's tools). Installed packages on macOS x86_64: base 52 → 48, cloud 74 → 70, local-transformer 59 → 51 (55 → 51 on Linux and arm64).

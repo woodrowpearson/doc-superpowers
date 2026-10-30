@@ -4,7 +4,7 @@ This is the rule that tells an agent what to do with a doc-search verdict when a
 
 `install.sh status --search-gate` reports whether that copy is current: it compares the lines between the markers with this file's.
 
-<!-- doc-superpowers:search-rule v3.11.1 -->
+<!-- doc-superpowers:search-rule v3.11.2 -->
 ## When doc-search is required
 
 **Use when** your session shows a doc-search verdict: the context your session started with, a blocked
