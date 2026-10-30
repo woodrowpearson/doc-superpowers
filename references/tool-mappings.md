@@ -54,7 +54,7 @@ Use the tool that does the same job in your client. Only the skill's own referen
 
 Every client finds the bundled tooling the same way: from the skill's own directory, never from a client-specific install location. SKILL.md's *Detect Bundled Tooling* block sets `ROOT="${CLAUDE_SKILL_DIR}/../.."` — the plugin root, two levels above the directory holding `SKILL.md` — and takes `$ROOT/scripts/doc-tools.sh`, `$ROOT/scripts/hooks/install.sh` and `$ROOT/references/` from it.
 
-- **Claude Code** substitutes `${CLAUDE_SKILL_DIR}` when it loads the skill, so the block runs as written.
+- **Claude Code** substitutes `${CLAUDE_SKILL_DIR}` when it loads the skill, so the block runs as written. For a symlinked skill it substitutes the link's path, hence `cd -P`.
 - **Any other client** leaves it literal: put in the path of the directory the client loaded `SKILL.md` from (the skill path it reports, or the path you read the file at).
 - The Claude Code plugin cache (`~/.claude/plugins/cache/doc-superpowers/doc-superpowers/<version>/`) is only a fallback, tried when `$ROOT` holds no executable `doc-tools.sh`; with neither, the block stops rather than run a tool that is not there.
 - **Terminal command:** `$ROOT/scripts/doc-superpowers` (`setup`, `help`), in every client; `setup` can link it as `~/.local/bin/doc-superpowers`.
