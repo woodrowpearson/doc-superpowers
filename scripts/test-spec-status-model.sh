@@ -364,6 +364,22 @@ assert_contains "$_out" "DOC_TOOLS=$_plug_real/scripts/doc-tools.sh" \
 _out=$(cd "$_rt/work" && env -u CLAUDE_SKILL_DIR HOME="$_rt/home2" "$BASH_BIN" -c "$_resolve_block" 2>&1) || true
 assert_contains "$_out" "DOC_TOOLS=$_cache_real/2.10.0/scripts/doc-tools.sh" \
   "resolution fallback: newest cached version with the tool, numeric order (no sort -V)"
+# 1b. A user skill installed as a symlink (~/.claude/skills/doc-superpowers ->
+#     <plugin>/skills/doc-superpowers): Claude Code substitutes the link's path,
+#     so the two `..` must be walked physically, not lexically (a logical `cd`
+#     would land in ~/.claude).
+mkdir -p "$_rt/home4/.claude/skills"
+ln -s "$_rt/plug/skills/doc-superpowers" "$_rt/home4/.claude/skills/doc-superpowers"
+_sub=$(printf '%s\n' "$_resolve_block" | sed "s|\${CLAUDE_SKILL_DIR}|$_rt/home4/.claude/skills/doc-superpowers|g")
+_out=$(cd "$_rt/work" && HOME="$_rt/home4" "$BASH_BIN" -c "$_sub" 2>&1) || true
+assert_contains "$_out" "DOC_TOOLS=$_plug_real/scripts/doc-tools.sh" \
+  "resolution: a symlinked skill dir resolves to the plugin root it links into"
+if command -v zsh >/dev/null 2>&1; then
+  _out=$(cd "$_rt/work" && HOME="$_rt/home4" zsh -f -c "$_sub" 2>&1) || true
+  assert_contains "$_out" "DOC_TOOLS=$_plug_real/scripts/doc-tools.sh" "…also under zsh"
+else
+  record_skip "symlinked skill dir under zsh (zsh not installed)"
+fi
 # 3. Neither: stop, non-zero.
 _rc=0
 _out=$(cd "$_rt/work" && env -u CLAUDE_SKILL_DIR HOME="$_rt/home3" "$BASH_BIN" -c "$_resolve_block" 2>&1) || _rc=$?

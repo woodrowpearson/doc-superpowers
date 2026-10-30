@@ -121,7 +121,7 @@ if [ ! -x "$DOC_TOOLS" ]; then
   [ -n "$V" ] && ROOT="$C/$V" && DOC_TOOLS="$ROOT/scripts/doc-tools.sh"
 fi
 [ -x "$DOC_TOOLS" ] || { echo "doc-superpowers: $ROOT has no executable scripts/doc-tools.sh — stop" >&2; exit 1; }
-ROOT=$(cd "$ROOT" && pwd -P) && DOC_TOOLS="$ROOT/scripts/doc-tools.sh"
+ROOT=$(cd -P "$ROOT" && pwd -P) && DOC_TOOLS="$ROOT/scripts/doc-tools.sh"
 echo "ROOT=$ROOT"; echo "DOC_TOOLS=$DOC_TOOLS"
 ```
 
