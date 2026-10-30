@@ -112,6 +112,11 @@ _harness_isolate_git_env() {
 }
 _harness_isolate_git_env
 export HOME="$_HARNESS_TMP/home" XDG_CONFIG_HOME="$_HARNESS_TMP/xdg"
+# The overrides a user may export for the shipped scripts (a Claude Code
+# settings env block sets DOC_TOOLS, say): a test that wants one sets it, so
+# none may leak in from the caller.
+unset DOC_TOOLS DOC_SUPERPOWERS_ROOT DOC_SEARCH_ENV_FILE DOC_SEARCH_GATE \
+  CLAUDE_PLUGIN_CACHE CODEX_HOME
 
 # Leave the caller's cwd (usually the real repo): a tool run by a test that
 # forgot setup() must not land in the checkout under test.
