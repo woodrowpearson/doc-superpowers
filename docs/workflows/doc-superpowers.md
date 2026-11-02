@@ -459,7 +459,7 @@ The AI templates are **runnable and bounded**: each PR-triggered one passes `git
 
 #### Claude-Powered AI Workflows
 
-These templates run Claude Code through the SHA-pinned `anthropics/claude-code-action@v1` action to perform AI-driven documentation tasks — there is no direct `claude -p` invocation. Each requires **either** `CLAUDE_CODE_OAUTH_TOKEN` **or** `ANTHROPIC_API_KEY` configured as a repository secret in the GitHub Actions settings; the uniform preflight described above prefers OAuth and fails the job fast when both are unset.
+These templates run Claude Code through the SHA-pinned `anthropics/claude-code-action` (its `base-action` on `push`, which the full action rejects) to perform AI-driven documentation tasks — there is no direct `claude -p` invocation. Each requires **either** `CLAUDE_CODE_OAUTH_TOKEN` **or** `ANTHROPIC_API_KEY` configured as a repository secret in the GitHub Actions settings; the uniform preflight described above prefers OAuth and fails the job fast when both are unset.
 
 | Template | Trigger | Purpose | Permissions / Commits |
 |----------|---------|---------|-----------------------|
