@@ -1,0 +1,3 @@
+# gitleaks false positives, one fingerprint per line, each with its reason above it.
+# Prose about pooling a model's output, in a module docstring.
+40854e90150908d74384758e455e1ea395405cb2:search/src/doc_search/transformer.py:generic-api-key:9

@@ -17,6 +17,9 @@ Workflows:  9 templates.
                      (they need CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY)
 Options:    base branch main, cron "0 9 * * 1", strict off (strict makes a
             stale doc fail the PR check instead of warn).
+Pinned:     the Claude-powered ones fetch the plugin at the commit recorded at
+            install (the one network read of an install); every job installs
+            a checksum-verified jq. Re-run install --ci after upgrading.
 Committed:  .github/workflows/<name>.yml, .github/scripts/ (doc-tools.sh and
             the step scripts the workflows run),
             .claude/doc-superpowers/installed.json.

@@ -140,6 +140,154 @@ test_build_index_hashes_doc() {
   teardown
 }
 
+# _advice_tools <dir> <jq --version> <git --version> <awk --version>: wrappers
+# that print those strings for --version and otherwise run the real tool.
+_advice_tools() {
+  local d="$1" real
+  mkdir -p "$d"
+  for t in "jq|--version|$2" "git|--version|$3" "awk|--version|$4"; do
+    local name="${t%%|*}" rest="${t#*|}"
+    real=$(command -v "$name")
+    cat > "$d/$name" <<EOF
+#!/bin/sh
+if [ "\$1" = "${rest%%|*}" ] || { [ "$name" = git ] && [ "\$1" = version ]; }; then
+  printf '%s\n' '${rest#*|}'
+  exit 0
+fi
+exec '$real' "\$@"
+EOF
+    chmod +x "$d/$name"
+  done
+}
+
+# _advice <jq> <git> <awk>: runs check-freshness with those versions and a new day's
+# stamp; ADVICE_ERR its stderr, ADVICE_RC its exit, ADVICE_OUT its stdout.
+_advice() {
+  local d
+  d=$(harness_mktemp_d advice)
+  _advice_tools "$d" "$1" "$2" "$3"
+  rm -rf "$XDG_CACHE_HOME/doc-superpowers"
+  ADVICE_RC=0
+  ADVICE_OUT=$(PATH="$d:$PATH" DOC_SUPERPOWERS_NO_TOOL_ADVICE= "$DOC_TOOLS" check-freshness 2>"$d/err") || ADVICE_RC=$?
+  ADVICE_ERR=$(cat "$d/err")
+}
+
+test_tool_advice_names_versions_with_known_holes() {
+  echo "test: check_deps warns, once a day, about a jq, git or gawk older than the fixes"
+  local ok_jq=jq-1.8.2 ok_git="git version 2.56.0" ok_awk="awk version 20200816" saved="${XDG_CACHE_HOME:-}"
+  export XDG_CACHE_HOME
+  XDG_CACHE_HOME=$(harness_mktemp_d cache)
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+
+  _advice "$ok_jq" "$ok_git" "$ok_awk"
+  assert_eq "0|" "$ADVICE_RC|$ADVICE_ERR" "current tools: no warning"
+
+  _advice "jq-1.7.1-apple" "$ok_git" "$ok_awk"
+  assert_eq "0" "$ADVICE_RC" "an old jq: still exits 0"
+  assert_contains "$ADVICE_ERR" "WARN: jq 1.7.1" "…a WARN names it"
+  assert_contains "$ADVICE_ERR" "1.8.2" "…and the version with the fixes"
+  assert_contains "$ADVICE_ERR" "DOC_SUPERPOWERS_NO_TOOL_ADVICE" "…and how to silence it"
+  assert_not_contains "$ADVICE_OUT" "WARN" "…on stderr only"
+  _advice "jq-1.6" "$ok_git" "$ok_awk"
+  assert_contains "$ADVICE_ERR" "WARN: jq 1.6" "the floor itself still warns"
+  _advice "jq-master-abc123" "$ok_git" "$ok_awk"
+  assert_eq "" "$ADVICE_ERR" "a jq with no parsable version: nothing to say"
+
+  local v
+  for v in "git version 2.39.5 (Apple Git-154)" "git version 2.43.6" "git version 2.47.2" "git version 2.50.0"; do
+    _advice "$ok_jq" "$v" "$ok_awk"
+    local num="${v#git version }"
+    assert_contains "$ADVICE_ERR" "WARN: git ${num%% *}" "$v: warned (each maintained branch has its own fix)"
+  done
+  for v in "git version 2.43.7" "git version 2.47.3" "git version 2.50.1" "git version 2.51.0"; do
+    _advice "$ok_jq" "$v" "$ok_awk"
+    assert_eq "" "$ADVICE_ERR" "$v: has the fixes"
+  done
+
+  _advice "$ok_jq" "$ok_git" "GNU Awk 5.4.0, API 4.0"
+  assert_contains "$ADVICE_ERR" "WARN: gawk 5.4.0" "gawk 5.4.0: warned"
+  _advice "$ok_jq" "$ok_git" "GNU Awk 5.4.1, API 4.0"
+  assert_eq "" "$ADVICE_ERR" "gawk 5.4.1: has the fixes"
+  _advice "$ok_jq" "$ok_git" "mawk 1.3.4 20200120"
+  assert_eq "" "$ADVICE_ERR" "mawk: nothing to say"
+
+  # On a ledger host, in-flight fetches read a shared remote.
+  _advice "$ok_jq" "git version 2.54.0" "$ok_awk"
+  assert_eq "" "$ADVICE_ERR" "git 2.54 without a ledger: nothing to say"
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  _advice "$ok_jq" "git version 2.54.0" "$ok_awk"
+  assert_contains "$ADVICE_ERR" "WARN: git 2.54.0" "git 2.54 on a ledger host: warned"
+  assert_contains "$ADVICE_ERR" "2.55.0" "…naming the version that masks a remote's control characters"
+  # A ledger host has its own stamp: a run elsewhere that day does not use up
+  # the one warning only a ledger host gets.
+  local h
+  h=$(harness_mktemp_d advice)
+  _advice_tools "$h" "$ok_jq" "git version 2.54.0" "$ok_awk"
+  rm -rf "$XDG_CACHE_HOME/doc-superpowers" docs/ledger
+  PATH="$h:$PATH" DOC_SUPERPOWERS_NO_TOOL_ADVICE= "$DOC_TOOLS" check-freshness > /dev/null 2>&1 || true
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  assert_contains "$(PATH="$h:$PATH" DOC_SUPERPOWERS_NO_TOOL_ADVICE= "$DOC_TOOLS" check-freshness 2>&1 >/dev/null || true)" "WARN: git 2.54.0" \
+    "a ledger host warns after a non-ledger run the same day"
+  rm -rf docs/ledger
+
+  # A hook that discards stderr must not spend the day's advice.
+  assert_contains "$(grep -F '"$DOC_TOOLS" claims "$@" </dev/null 2>/dev/null' "$SCRIPT_DIR/hooks/git/pre-push")" "DOC_SUPERPOWERS_NO_TOOL_ADVICE=1" "pre-push's silent claims call"
+  assert_contains "$(grep -F 'check-freshness --tree "$tree" --code-refs-from - 2>"$work/err.scoped"' "$SCRIPT_DIR/hooks/git/pre-commit")" "DOC_SUPERPOWERS_NO_TOOL_ADVICE=1" "pre-commit's captured freshness call"
+
+  # Once a day, and off when asked.
+  local d second
+  d=$(harness_mktemp_d advice)
+  _advice_tools "$d" "jq-1.7.1" "$ok_git" "$ok_awk"
+  rm -rf "$XDG_CACHE_HOME/doc-superpowers"
+  PATH="$d:$PATH" DOC_SUPERPOWERS_NO_TOOL_ADVICE= "$DOC_TOOLS" check-freshness > /dev/null 2>&1 || true
+  second=$(PATH="$d:$PATH" DOC_SUPERPOWERS_NO_TOOL_ADVICE= "$DOC_TOOLS" check-freshness 2>&1 >/dev/null) || true
+  assert_eq "" "$second" "the second run of the day says nothing"
+  rm -rf "$XDG_CACHE_HOME/doc-superpowers"
+  second=$(PATH="$d:$PATH" DOC_SUPERPOWERS_NO_TOOL_ADVICE=1 "$DOC_TOOLS" check-freshness 2>&1 >/dev/null) || true
+  assert_eq "" "$second" "DOC_SUPERPOWERS_NO_TOOL_ADVICE=1: nothing, on any day"
+  teardown
+  XDG_CACHE_HOME="$saved"
+}
+
+test_hostile_index_fields_never_reach_arithmetic() {
+  echo "test: separators in an index's fields cannot forge a record: a crafted index runs nothing"
+  local marker out rc payload
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  # A name relative to the repository: the harness root holds a space.
+  marker=injected-ran
+  payload="f[\$(touch $marker)]"
+  # A legacy entry (no code_oids) passes field 7 to an array slice, which bash
+  # evaluates as an expression. The separators shift the attacker's text there.
+  jq --arg p "$payload" '.docs["docs/architecture.md"] |= (del(.code_oids) | .code_refs = ["."] | .content_hash = "h\u001fcc\u001flegacy\u001f\($p)\u001fzz")' \
+    docs/.doc-index.json > docs/.i.tmp && mv docs/.i.tmp docs/.doc-index.json
+  rc=0
+  out=$("$DOC_TOOLS" check-freshness 2>/dev/null) || rc=$?
+  assert_file_not_exists "$marker" "check-freshness: \\x1f in content_hash runs nothing"
+  assert_eq "0" "$rc" "…and exits 0"
+  assert_eq "docs/architecture.md" "$(jq -r '.docs | keys | join(",")' <<<"$out")" "…reporting the one doc"
+  "$DOC_TOOLS" status docs/architecture.md > /dev/null 2>&1 || true
+  assert_file_not_exists "$marker" "status <doc>: the same"
+  # A NUL ends a record, so what follows it would be a whole forged record.
+  jq --arg p "$payload" '.docs["docs/architecture.md"].content_hash = "h\u0000docs/architecture.md\u001fs\u001ft\u001fv\u001fh\u001fcc\u001flegacy\u001f\($p)\u001f."' \
+    docs/.doc-index.json > docs/.i.tmp && mv docs/.i.tmp docs/.doc-index.json
+  "$DOC_TOOLS" check-freshness > /dev/null 2>&1 || true
+  assert_file_not_exists "$marker" "check-freshness: NUL in content_hash runs nothing"
+  # The same through the two other kinds of field: a ref, and the doc's key.
+  jq --arg p "$payload" '.docs["docs/architecture.md"] |= (.content_hash = "h" | .code_refs = ["a\u001f\($p)\u001fb"])' \
+    docs/.doc-index.json > docs/.i.tmp && mv docs/.i.tmp docs/.doc-index.json
+  "$DOC_TOOLS" check-freshness > /dev/null 2>&1 || true
+  assert_file_not_exists "$marker" "check-freshness: \\x1f in a code ref runs nothing"
+  jq --arg p "$payload" '.docs["k\u001fs\u001ft\u001fv\u001fh\u001fcc\u001flegacy\u001f\($p)\u001fz"] = {code_refs: ["."]}' \
+    docs/.doc-index.json > docs/.i.tmp && mv docs/.i.tmp docs/.doc-index.json
+  "$DOC_TOOLS" check-freshness > /dev/null 2>&1 || true
+  assert_file_not_exists "$marker" "check-freshness: \\x1f in a doc's key runs nothing"
+  teardown
+}
+
 test_build_index_stores_code_commit() {
   echo "test: build-index stores latest code commit"
   setup
@@ -8533,6 +8681,10 @@ run_tests() {
   test_gh21_gh23_batches_scale
   test_gh23_set_doc_type_stdin
   test_gh23_set_code_refs_stdin
+
+  # --- Hostile index content (security posture, arithmetic contexts) ---
+  test_hostile_index_fields_never_reach_arithmetic
+  test_tool_advice_names_versions_with_known_holes
 
   print_summary
 }

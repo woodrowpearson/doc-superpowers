@@ -117,6 +117,14 @@ export HOME="$_HARNESS_TMP/home" XDG_CONFIG_HOME="$_HARNESS_TMP/xdg"
 # none may leak in from the caller.
 unset DOC_TOOLS DOC_SUPERPOWERS_ROOT DOC_SEARCH_ENV_FILE DOC_SEARCH_GATE \
   CLAUDE_PLUGIN_CACHE CODEX_HOME
+# The suites never touch the network: install --ci takes this for the AI
+# templates' commit pin instead of asking the marketplace URL. A test of the
+# lookup unsets it.
+export DOC_SUPERPOWERS_PLUGIN_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+# Every fixture has a fresh HOME, so without this the first doc-tools.sh call of
+# each would print the day's tool advice on a host with an old jq or git. A test
+# of the advice sets it empty.
+export DOC_SUPERPOWERS_NO_TOOL_ADVICE=1
 
 # Leave the caller's cwd (usually the real repo): a tool run by a test that
 # forgot setup() must not land in the checkout under test.

@@ -36,6 +36,7 @@ concurrency:
 
 env:
   DOC_SUPERPOWERS_VERSION: "__VERSION__"
+  DOC_SUPERPOWERS_COMMIT: "__PLUGIN_COMMIT__"
   DOC_SUPERPOWERS_MARKETPLACE_URL: "__MARKETPLACE_URL__"
 
 jobs:
@@ -57,8 +58,12 @@ jobs:
       # starts from the tip the earlier runs left.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          persist-credentials: false
           ref: ${{ github.ref_name }}
           fetch-depth: 0
+
+      - name: Pin jq (checksum-verified)
+        run: .github/scripts/doc-superpowers-steps/install-jq.sh
 
       - name: Scope — docs this branch leaves stale or missing
         id: scope
@@ -81,9 +86,11 @@ jobs:
 
       - name: Audit and update docs
         if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.count != '0'
-        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88
+        # base-action: the full action throws on a push event, before any agent
+        # runs. This one reads no event and touches no git config, and the agent
+        # needs no token: the commit step pushes.
+        uses: anthropics/claude-code-action/base-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88
         with:
-          github_token: ${{ github.token }}
           claude_code_oauth_token: ${{ steps.auth.outputs.use_oauth == 'true' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           anthropic_api_key: ${{ steps.auth.outputs.use_oauth == 'false' && secrets.ANTHROPIC_API_KEY || '' }}
           plugin_marketplaces: ${{ steps.plugin.outputs.marketplace }}
@@ -109,6 +116,7 @@ jobs:
       - name: Commit doc updates
         if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.count != '0'
         env:
+          DOC_SUPERPOWERS_GIT_TOKEN: ${{ github.token }}
           EXPECTED_HEAD: ${{ steps.plugin.outputs.head }}
           PUSH_TO: ${{ github.ref_name }}
         # prepare-agent.sh's pre-agent copy of the checker: an integrity check
