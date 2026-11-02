@@ -22,6 +22,15 @@
 #                      or three and never touches the network. Not in --fast.
 #   self-install       the self-installed CI tier and the .gitattributes block
 #                      match what the installer writes (check-self-install.sh)
+#   zizmor             workflow security: the templates, rendered, and this
+#                      repository's workflows (a pinned zizmor through uvx,
+#                      offline). An accepted finding is an inline `zizmor:
+#                      ignore` with its reason. Not in --fast.
+#   dep-audit          every package of search/uv.lock, extras included, against
+#                      the advisory databases (a pinned pip-audit through uvx;
+#                      it needs the network). Not in --fast.
+#   gitleaks           the whole git history for secrets. A false positive goes
+#                      in .gitleaksignore. Not in --fast.
 #   check-version      the five manifests carry RELEASE-NOTES.md's version
 #   tag                v<version> is a tag on origin (check-version --tag;
 #                      tests.yml runs it on pushes to main only, so the default
@@ -46,9 +55,10 @@
 #               and its FAIL lines, on a failure — is printed.
 #
 # As in CI, DOC_SP_REQUIRE_YAML_PARSER, DOC_SP_REQUIRE_NODE,
-# DOC_SP_REQUIRE_SHELLCHECK and DOC_SP_REQUIRE_UV default to 1, so a missing
-# tool is a FAIL, never a SKIP. Export one as 0 to accept that SKIP locally
-# (DOC_SP_REQUIRE_UV=0: a host without uv skips the search check, loudly).
+# DOC_SP_REQUIRE_SHELLCHECK, DOC_SP_REQUIRE_UV and DOC_SP_REQUIRE_GITLEAKS
+# default to 1, so a missing tool is a FAIL, never a SKIP. Export one as 0 to
+# accept that SKIP locally (DOC_SP_REQUIRE_UV=0: a host without uv skips search,
+# zizmor and dep-audit, loudly).
 #
 # Exit status: 0 when every check passed, 1 when one failed, 2 on a usage
 # error.
@@ -57,12 +67,16 @@ set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SUITES="doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger"
 FAST_SUITES="spec-status-model doc-pr-release merge-driver"
-CHECKS="toolchain $SUITES search self-install check-version tag plugin-validate"
+CHECKS="toolchain $SUITES search self-install zizmor dep-audit gitleaks check-version tag plugin-validate"
+# What uvx fetches for the security checks: moved on purpose, like any pin.
+ZIZMOR_VERSION=1.31.1
+PIP_AUDIT_VERSION=2.10.1
 
 export DOC_SP_REQUIRE_YAML_PARSER="${DOC_SP_REQUIRE_YAML_PARSER:-1}"
 export DOC_SP_REQUIRE_NODE="${DOC_SP_REQUIRE_NODE:-1}"
 export DOC_SP_REQUIRE_SHELLCHECK="${DOC_SP_REQUIRE_SHELLCHECK:-1}"
 export DOC_SP_REQUIRE_UV="${DOC_SP_REQUIRE_UV:-1}"
+export DOC_SP_REQUIRE_GITLEAKS="${DOC_SP_REQUIRE_GITLEAKS:-1}"
 
 usage() {
   awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
@@ -261,6 +275,43 @@ run_search() {
   fi
 }
 
+# tool_there <check> <tool> <flag's value> <flag's name>: 0 when <tool> is on
+# PATH; otherwise records a FAIL, or a loud SKIP when the flag is 0.
+tool_there() {
+  command -v "$2" >/dev/null 2>&1 && return 0
+  echo "--- $1"
+  if [ "$3" = 0 ]; then
+    echo "SKIP: $2 not on PATH — $1 did not run"
+    record "SKIP  $1 (no $2 on PATH)"
+  else
+    err "$2 not found — $1 would not run ($4=0 accepts the SKIP)"
+    record "FAIL  $1 (no $2 on PATH)"
+    FAILED=1
+  fi
+  return 1
+}
+
+# The AI and shell templates hold placeholders zizmor cannot parse (a cron), so
+# it reads them as install --ci renders them.
+check_zizmor() {
+  local dir="$LOGS/rendered" t
+  mkdir -p "$dir/.github/workflows" || return 1
+  for t in scripts/hooks/ci/*.yml; do
+    [ -f "$t" ] || continue
+    sed -e 's/__BASE_BRANCH__/main/g' -e 's/__VERSION__/v0.0.0/g' \
+      -e 's/__PLUGIN_COMMIT__/0000000000000000000000000000000000000000/g' \
+      -e 's/__CRON_SCHEDULE__/0 9 * * 1/g' -e 's/__CI_STRICT__/0/g' \
+      -e 's|__MARKETPLACE_URL__|https://example.com/plugin.git|g' "$t" > "$dir/.github/workflows/${t##*/}" || return 1
+  done
+  uvx "zizmor@$ZIZMOR_VERSION" --offline --no-progress "$dir" .github/workflows
+}
+
+check_dep_audit() {
+  local req="$LOGS/search-requirements.txt"
+  uv export --project search --frozen --all-extras --no-dev --no-emit-project --format requirements-txt -o "$req" >/dev/null || return 1
+  uvx "pip-audit@$PIP_AUDIT_VERSION" --disable-pip --no-deps -r "$req"
+}
+
 # run_check <name> <command…>
 run_check() {
   local name="$1" rc=0
@@ -281,6 +332,17 @@ for c in $RUN; do
     self-install) run_check self-install env BASH_BIN="$FIRST_BASH" "$FIRST_BASH" scripts/check-self-install.sh ;;
     check-version) run_check check-version "$FIRST_BASH" scripts/doc-tools.sh check-version ;;
     search) run_search ;;
+    zizmor)
+      if tool_there zizmor uv "$DOC_SP_REQUIRE_UV" DOC_SP_REQUIRE_UV; then run_check zizmor check_zizmor; fi
+      ;;
+    dep-audit)
+      if tool_there dep-audit uv "$DOC_SP_REQUIRE_UV" DOC_SP_REQUIRE_UV; then run_check dep-audit check_dep_audit; fi
+      ;;
+    gitleaks)
+      if tool_there gitleaks gitleaks "$DOC_SP_REQUIRE_GITLEAKS" DOC_SP_REQUIRE_GITLEAKS; then
+        run_check gitleaks gitleaks git --no-banner --redact .
+      fi
+      ;;
     tag)
       if [ -n "$NAMED" ]; then
         run_check tag "$FIRST_BASH" scripts/doc-tools.sh check-version --tag

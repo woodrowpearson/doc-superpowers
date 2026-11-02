@@ -75,6 +75,26 @@
 # implementation of "the branch moved during the run" for every writer.
 set -euo pipefail
 
+# doc-superpowers:git-token
+# The job's token, for this step's git calls only. The workflow's checkout keeps
+# none (persist-credentials: false), so .git/config holds no token for an agent
+# earlier in the job to read. git asks this helper, scoped to the job's own
+# GitHub host, and it reads the token from this step's env: nothing reaches disk
+# or a command line. The empty first entry drops any helper the checkout's
+# config names.
+if [ -n "${DOC_SUPERPOWERS_GIT_TOKEN:-}" ]; then
+  _git_host="${GITHUB_SERVER_URL:-https://github.com}"
+  # After any entries the step's env already holds (core.hooksPath, say).
+  _git_n="${GIT_CONFIG_COUNT:-0}"
+  export "GIT_CONFIG_KEY_$_git_n=credential.$_git_host.helper" "GIT_CONFIG_VALUE_$_git_n="
+  _git_n=$((_git_n + 1))
+  # shellcheck disable=SC2016  # the helper's own shell text
+  export "GIT_CONFIG_KEY_$_git_n=credential.$_git_host.helper" \
+    "GIT_CONFIG_VALUE_$_git_n="'!f() { [ "$1" = get ] || return 0; echo username=x-access-token; echo "password=$DOC_SUPERPOWERS_GIT_TOKEN"; }; f'
+  export GIT_CONFIG_COUNT=$((_git_n + 1))
+fi
+# /doc-superpowers:git-token
+
 err() {
   echo "::error::doc-superpowers: $*"
   exit 1

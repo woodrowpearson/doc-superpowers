@@ -48,6 +48,9 @@
 #   GIT_USER_NAME    commit author name  (default: github-actions[bot])
 #   GIT_USER_EMAIL   commit author email (default: 41898282+github-actions[bot]@users.noreply.github.com)
 #
+# Env DOC_SUPERPOWERS_GIT_TOKEN: the job token for this step's git network
+# calls (the block below).
+#
 # Exit codes:
 #   0  committed and pushed; nothing to commit (no fragment, or unchanged);
 #      superseded; or the branch is gone
@@ -56,6 +59,26 @@
 #      push) or git failed
 #   2  bad arguments
 set -euo pipefail
+
+# doc-superpowers:git-token
+# The job's token, for this step's git calls only. The workflow's checkout keeps
+# none (persist-credentials: false), so .git/config holds no token for an agent
+# earlier in the job to read. git asks this helper, scoped to the job's own
+# GitHub host, and it reads the token from this step's env: nothing reaches disk
+# or a command line. The empty first entry drops any helper the checkout's
+# config names.
+if [ -n "${DOC_SUPERPOWERS_GIT_TOKEN:-}" ]; then
+  _git_host="${GITHUB_SERVER_URL:-https://github.com}"
+  # After any entries the step's env already holds (core.hooksPath, say).
+  _git_n="${GIT_CONFIG_COUNT:-0}"
+  export "GIT_CONFIG_KEY_$_git_n=credential.$_git_host.helper" "GIT_CONFIG_VALUE_$_git_n="
+  _git_n=$((_git_n + 1))
+  # shellcheck disable=SC2016  # the helper's own shell text
+  export "GIT_CONFIG_KEY_$_git_n=credential.$_git_host.helper" \
+    "GIT_CONFIG_VALUE_$_git_n="'!f() { [ "$1" = get ] || return 0; echo username=x-access-token; echo "password=$DOC_SUPERPOWERS_GIT_TOKEN"; }; f'
+  export GIT_CONFIG_COUNT=$((_git_n + 1))
+fi
+# /doc-superpowers:git-token
 
 PR_NUMBER="${1:-}"
 if [ -z "$PR_NUMBER" ]; then
