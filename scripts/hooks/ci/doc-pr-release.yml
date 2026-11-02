@@ -321,7 +321,7 @@ jobs:
         env:
           EXPECTED_HEAD: ${{ steps.plugin.outputs.head }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
-        run: '"$RUNNER_TEMP"/doc-superpowers-steps/commit-changes.sh --check-only --allow "RELEASE-NOTES.next/PR-${PR_NUMBER}.md" --ignore .doc-pr-release/'
+        run: '"$RUNNER_TEMP"/doc-superpowers-steps/commit-changes.sh --check-only --allow "RELEASE-NOTES.next/PR-${PR_NUMBER}.md" --ignore .doc-pr-release/ --action-config'
 
       # Seals the fragment (writes its hash), commits only it, and pushes only
       # while the branch is still at the checkout: someone else's push during

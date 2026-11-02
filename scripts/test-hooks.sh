@@ -4518,10 +4518,26 @@ test_ci_plugin_commit_pin() {
   assert_contains "$IOUT" "$annotated" "…and the one the tag holds now"
   assert_contains "$IOUT" "DOC_SUPERPOWERS_PLUGIN_COMMIT" "…and how to accept it"
   assert_eq "$before" "$(cat .github/workflows/doc-release.yml)" "…the workflow unchanged"
-  # An unreachable URL keeps the pin it has.
-  DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-release --marketplace-url "$url/absent.git"
+  # The URL that holds the pin cannot answer now: it keeps the pin it has.
+  mv "$dir/market.git" "$dir/market.away"
+  DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-release --marketplace-url "$url/market.git"
   assert_eq "0" "$IRC" "the URL cannot answer, a pin is installed: exits 0"
   assert_contains "$(cat .github/workflows/doc-release.yml)" "DOC_SUPERPOWERS_COMMIT: \"$tagged\"" "…the pin stays"
+  mv "$dir/market.away" "$dir/market.git"
+  # Another URL is another source: its tag is not a tag that moved.
+  git init -q --bare "$dir/fork.git"
+  git -C "$src" push -q "$dir/fork.git" "v$version"
+  DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-release --marketplace-url "$url/fork.git"
+  assert_eq "0" "$IRC" "switching the marketplace URL is not a moved tag: exits 0"
+  assert_contains "$(cat .github/workflows/doc-release.yml)" "DOC_SUPERPOWERS_COMMIT: \"$annotated\"" "…and pins that URL's commit"
+  assert_contains "$(cat .github/workflows/doc-release.yml)" "fork.git" "…with that URL"
+  DOC_SUPERPOWERS_PLUGIN_COMMIT="$tagged" inst install --ci --workflows=doc-release --marketplace-url "$url/market.git"
+  # A new URL that cannot answer would clear a pin that works.
+  before=$(cat .github/workflows/doc-release.yml)
+  DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-release --marketplace-url "$url/absent.git"
+  assert_eq "1" "$IRC" "another URL that cannot answer: install --ci refuses"
+  assert_contains "$IOUT" "Nothing was installed" "…saying so"
+  assert_eq "$before" "$(cat .github/workflows/doc-release.yml)" "…the workflow unchanged"
   # Accepted on purpose.
   DOC_SUPERPOWERS_PLUGIN_COMMIT="$annotated" inst install --ci --workflows=doc-release --marketplace-url "$url/market.git"
   assert_eq "0" "$IRC" "DOC_SUPERPOWERS_PLUGIN_COMMIT accepts the moved tag"
@@ -4532,6 +4548,24 @@ test_ci_plugin_commit_pin() {
   DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-release --marketplace-url "$url/market.git"
   assert_eq "0" "$IRC" "an upgrade from another version: exits 0"
   assert_contains "$(cat .github/workflows/doc-release.yml)" "DOC_SUPERPOWERS_COMMIT: \"$annotated\"" "…pinning the new version's commit"
+  # An upgrade whose tag cannot be read (a mirror that lags) leaves working
+  # workflows working, pinned or from before the pin.
+  sed -i.bak "s/DOC_SUPERPOWERS_VERSION: .*/DOC_SUPERPOWERS_VERSION: \"v0.0.1\"/; s/DOC_SUPERPOWERS_COMMIT: .*/DOC_SUPERPOWERS_COMMIT: \"$tagged\"/" .github/workflows/doc-release.yml
+  rm -f .github/workflows/doc-release.yml.bak
+  before=$(cat .github/workflows/doc-release.yml)
+  mv "$dir/market.git" "$dir/market.away"
+  DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-release --marketplace-url "$url/market.git"
+  assert_eq "1" "$IRC" "an upgrade whose tag cannot be read: install --ci refuses"
+  assert_contains "$IOUT" "DOC_SUPERPOWERS_PLUGIN_COMMIT" "…naming the offline way to give it"
+  assert_contains "$IOUT" "Nothing was installed" "…saying so"
+  assert_eq "$before" "$(cat .github/workflows/doc-release.yml)" "…the workflow unchanged"
+  sed -i.bak '/DOC_SUPERPOWERS_COMMIT:/d' .github/workflows/doc-release.yml
+  rm -f .github/workflows/doc-release.yml.bak
+  before=$(cat .github/workflows/doc-release.yml)
+  DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-release --marketplace-url "$url/market.git"
+  assert_eq "1" "$IRC" "…and so does an upgrade from before the pin"
+  assert_eq "$before" "$(cat .github/workflows/doc-release.yml)" "…the workflow unchanged"
+  mv "$dir/market.away" "$dir/market.git"
   rm -rf .github .claude
   # An annotated tag: the commit under it, not the tag object.
   DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-release --marketplace-url "$url/market.git"
@@ -4547,9 +4581,11 @@ test_ci_plugin_commit_pin() {
   # The offline override: used as it is when it is a commit id, refused when not.
   DOC_SUPERPOWERS_PLUGIN_COMMIT=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb inst install --ci --workflows=doc-release --marketplace-url "$url/market.git"
   assert_contains "$(cat .github/workflows/doc-release.yml)" 'DOC_SUPERPOWERS_COMMIT: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "DOC_SUPERPOWERS_PLUGIN_COMMIT replaces the lookup"
-  DOC_SUPERPOWERS_PLUGIN_COMMIT='x"; evil' inst install --ci --workflows=doc-release --marketplace-url "$url/absent.git"
-  assert_contains "$(cat .github/workflows/doc-release.yml)" 'DOC_SUPERPOWERS_COMMIT: ""' "a DOC_SUPERPOWERS_PLUGIN_COMMIT that is no commit id is not rendered"
-  assert_contains "$IOUT" "WARN" "…with a WARN"
+  before=$(cat .github/workflows/doc-release.yml)
+  DOC_SUPERPOWERS_PLUGIN_COMMIT='x"; evil' inst install --ci --workflows=doc-release --marketplace-url "$url/market.git"
+  assert_eq "1" "$IRC" "a DOC_SUPERPOWERS_PLUGIN_COMMIT that is no commit id: install --ci refuses"
+  assert_contains "$IOUT" "Nothing was installed" "…saying so"
+  assert_eq "$before" "$(cat .github/workflows/doc-release.yml)" "…the workflow and its pin unchanged"
   # The shell workflows hold no pin, so they ask no one.
   rm -rf .github .claude
   DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-freshness-pr --marketplace-url "$url/absent.git"
