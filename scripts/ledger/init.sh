@@ -458,7 +458,7 @@ _lg_init_report() {
   local report="$1" s dec prop=docs/ledger/ledgers.proposed.json files=1 gh=off ghreq="" ghwhy="" src
   local reg="" regpath="" regsrc="" regsha="" ad cfgad hosted="" ix di rc=0 ok
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   dec="$report.decisions.tsv"
   case "$report" in
     */|.|..) _lg_usage "--report needs a file name (got '$report')" ;;
@@ -1324,7 +1324,7 @@ _lg_init_accept() {
   local hstub=false nhosted want id slug hosted p base n taken nl
   [ "$_OPT_dry_run" != 1 ] || dry=1
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   [ -f "$tsv" ] || _lg_die "--accept $tsv: no such file"
   today=$(date +%Y-%m-%d) || _lg_die "date failed"
 
@@ -1801,7 +1801,7 @@ _lg_init_import() {
   local s ad today rc ref title created slug path base n imported=0 failed="" listed done_n i rec op rest name count a body
   local nl=$'\n' taken
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_adapter_path items || _lg_die "init --import: $_LG_ADP_ERR"
   [ -n "$_LG_ADP" ] || _lg_die "init --import: no items adapter (config items.adapter): nothing to import"
   if [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" = 1 ]; then _lg_die "init --import: offline (DOC_TOOLS_LEDGER_OFFLINE=1)"; fi

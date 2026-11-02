@@ -125,7 +125,7 @@ _lg_ix_blob_ids() {
   local src="$1" in="$2" out="$3" s d tree="" imode
   local specs=()
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   LC_ALL=C awk -v specs="$s.specs" '
     BEGIN { printf "" > specs }
     index($0, "\001") == 0 {
@@ -188,7 +188,7 @@ _lg_ix_json_obj() {
 _lg_ix_claims() {
   local src="$1" out="$2" s p
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   : > "$s.cz"
   case "$src" in
     worktree)
@@ -227,7 +227,7 @@ _lg_ix_claims() {
 _lg_ix_candidates() {
   local src="$1" di="$2" out="$3" col g s gsrc
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   jq -r --slurpfile c "$_LG_CFG" '
     ($c[0].doc_columns // {}) as $dc
     | .docs as $d
@@ -285,7 +285,7 @@ _LG_AWK_EVENTS='
 _lg_ix_events_header() {
   local s
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_ix_shallow
   { printf 'ledger-dates/3\n'; cat "$1"; printf 'shallow %s\n' "$_LG_SHALLOW"; } > "$s.sig" || _lg_die "cannot write $s.sig"
   _hash_one "$s.sig"
@@ -294,7 +294,7 @@ _lg_ix_events_header() {
 _lg_ix_events_plan() {
   local commit="$1" dirs="$2" s c oid first
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_ix_events_header "$dirs"
   _LG_EP_F="$_LG_CACHE/dates-$commit.tsv"
   _LG_EP_HIT=0
@@ -352,7 +352,7 @@ _lg_ix_prefetch() {
   _lg_ix_events_plan "$commit" "$2"
   [ "$_LG_EP_HIT" = 0 ] || return 0
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _LG_PF_N=$((_LG_PF_N + 1))
   i=$_LG_PF_N
   printf -v "_LG_PF_C_$i" '%s' "$commit"
@@ -377,7 +377,7 @@ _lg_ix_prefetch() {
 _lg_ix_events() {
   local commit="$1" dirs="$2" s f tmp range anc="" i pid="" rc=0 log err c
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   log="$s.log"
   err="$s.err"
   i=1
@@ -447,7 +447,7 @@ _lg_adoption_commit() {
     return 0
   fi
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   git -c log.showSignature=false log --no-color --reverse --diff-filter=A --format=%H "$B" -- docs/ledger/config.json \
     > "$s.adds" 2> "$s.err" || _lg_die "git log failed (the adoption commit): $(head -n 3 "$s.err" 2>/dev/null)"
   A=""
@@ -527,7 +527,7 @@ _lg_ix_adoption() {
     return 0
   fi
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   while IFS= read -r d; do
     specs+=("$d")
   done < "$dirs"
@@ -570,7 +570,7 @@ _lg_ix_graph() {
     return 0
   fi
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   mkdir -p -- "$_LG_CACHE" 2>/dev/null || _lg_die "cannot create $_LG_CACHE"
   tmp=$(mktemp "$_LG_CACHE/.graph.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
   git rev-list --parents "$c" > "$tmp" 2> "$s.err" || { rm -f "$tmp"; _lg_die "git rev-list failed: $(head -n 3 "$s.err")"; }
@@ -607,7 +607,7 @@ _lg_ix_events_base() {
   fi
   _lg_ix_trace "dates-derive $H"
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   f="$_LG_CACHE/dates-$B.tsv"
   tmp=$(mktemp "$_LG_CACHE/.dates.XXXXXX") || _lg_die "cannot create a temp file in $_LG_CACHE"
   LC_ALL=C awk -v graph="$graph" '
@@ -636,7 +636,7 @@ _lg_ix_events_base() {
 _lg_ix_dates() {
   local commit="$1" items="$2" usemtime="$3" out="$4" formers="$5" s ev n m p e
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   ev=/dev/null
   if [ -n "$commit" ]; then
     _lg_cfg '[(.items.globs // [])[]?, (.items.archive_globs // [])[]?] | .[] | strings | select(. != "")' > "$s.globs"
@@ -899,7 +899,7 @@ BEGIN {
 _lg_ix_docs() {
   local src="$1" cands="$2" keys="$3" formers="$4" out="$5" s rc=0
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   : > "$out"
   [ -s "$cands" ] || return 0
   if [ "$src" = worktree ]; then
@@ -1238,7 +1238,7 @@ _lg_ix_valid() {
 _lg_ix_prune() {
   local ixdir="$1" stamp="$_LG_CACHE/prune.stamp" s f d
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   # shellcheck disable=SC2012  # cache names are index-<hex>.json
   ls -t "$ixdir"/index-*.json 2>/dev/null | tail -n +4 > "$s.old" || true
   while IFS= read -r f; do
@@ -1275,7 +1275,7 @@ _lg_ix_prune() {
 _lg_ix_key_specs() {
   local di="$1" legacy="$2" out="$3" s
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_cfg '[(.items.globs // [])[]?, (.items.archive_globs // [])[]?,
             ((.doc_columns // {})[] | objects | (.globs // [])[]?)] | .[] | strings | select(. != "")' > "$s.globs"
   : > "$s.dirs"
@@ -1303,7 +1303,7 @@ _lg_ix_key_listing() {
   local mode="$1" specsf="$2" listing="$3" dirty="$4" s p n m
   local specs=()
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   while IFS= read -r p; do
     specs+=("$p")
   done < "$specsf"
@@ -1340,7 +1340,7 @@ _lg_ix_key_listing() {
 _lg_ix_effective() {
   local listing="$1" dirty="$2" out="$3" s
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_parse_lst "$listing" "$s.ls"
   LC_ALL=C awk -v ls="$s.ls" '
     BEGIN {
@@ -1366,7 +1366,7 @@ _lg_ix_effective() {
 _lg_ix_refs() {
   local recs="$1" out="$2" s map
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   jq -r '.blob | strings' "$recs" > "$s.blobs" || return 1
   map="$_LG_CACHE/blob-sha256.tsv"
   [ -f "$map" ] || map=/dev/null
@@ -1495,7 +1495,7 @@ _lg_ix_pr_numbers() {
 _lg_ix_pr_fetch() {
   local s url rc=0
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_cfg '(.keys.remote | if type == "string" and . != "" then . else "origin" end), ('"$_LG_RTTL_JQ"'),
     (.inflight.pull_refs | if type == "string" and . != "" then "1" else "" end)' > "$s.cfg"
   { IFS= read -r _LG_IX_PR_REMOTE; IFS= read -r _LG_RTTL; IFS= read -r _LG_IX_PR_PULL; } < "$s.cfg" \
@@ -1528,7 +1528,7 @@ _lg_ix_pr_prepare() {
   : > "$p.prheads"
   : > "$_SCRATCH/lg-pr.mark"
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   if _lg_adapter_path pr; then
     if [ -z "$_LG_ADP" ]; then
       printf 'pr unconfigured\n' > "$p.prkey" || _lg_die "cannot write $p.prkey"
@@ -1730,7 +1730,7 @@ _lg_ix_items_prepare() {
   : > "$_SCRATCH/lg-items.mark"
   rm -f -- "$_SCRATCH/lg-items.note" "$_SCRATCH/lg-items.refs"
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   if _lg_adapter_path items; then
     _lg_ix_items_km "$remote"
     _LG_RTTL=$3
@@ -1869,7 +1869,7 @@ _lg_ix_claim_trailers() {
 _lg_ix_base_claims() {
   local B="$1" s f first hdr c oid anc="" tmp rc=0
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _LG_BCLAIMS="$s.bclaims"
   : > "$_LG_BCLAIMS"
   [ -n "$B" ] || return 0
@@ -1992,7 +1992,7 @@ _lg_ix_pr_claims() {
   : > "$out" || _lg_die "cannot write $out"
   [ -s "$heads" ] && [ -n "$B" ] || return 0
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   while IFS= read -r d; do
     specs+=("$d")
   done < "$dirs"
@@ -2028,7 +2028,7 @@ _lg_index() {
   esac
   _lg_parse_prep
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   head=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || head=""
   case "$mode" in
     worktree) src=worktree; dcommit=$head; usemtime=1 ;;

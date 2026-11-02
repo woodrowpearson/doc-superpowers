@@ -2,7 +2,7 @@
 # scripts/ledger/glob.sh — the ledger's one glob grammar (item globs,
 # registry paths/residual_paths, contracts' defined_in), glob → ERE, path
 # filtering, and the registry's ownership map. Sourced by lib.sh; uses
-# lib.sh's _lg_die, _lg_cfg and parse.sh's _LG_SN / _lg_scratch_name.
+# lib.sh's _lg_die, _lg_cfg and parse.sh's _LG_SCRATCH_NAME / _lg_scratch_name.
 #
 # Grammar (a path is matched whole, relative to the top level):
 #   **/        zero or more directories (at the start, after "/", "{" or ",")
@@ -153,8 +153,8 @@ _lg_paths_filter() {
     lst=$in
     hit=$out
   else
-    lst="$_LG_SN.lst"
-    hit="$_LG_SN.hit"
+    lst="$_LG_SCRATCH_NAME.lst"
+    hit="$_LG_SCRATCH_NAME.hit"
     tr '\n\000' '\001\n' < "$in" > "$lst" || _lg_die "cannot read the path list $in"
   fi
   msg=$(LC_ALL=C awk -v globs="$globs" -v out="$hit" -v q="'" "$_LG_AWK_GLOB"'
@@ -210,9 +210,9 @@ _lg_owner_map() {
   local paths="$1" out="$2" reg="${3:-}" rc=0
   if [ -z "$reg" ]; then reg=$(_lg_registry) || exit "$?"; fi
   _lg_scratch_name
-  _lg_registry_globs "$reg" "$_LG_SN.globs" active
-  tr '\n\000' '\001\n' < "$paths" > "$_LG_SN.lst" || _lg_die "cannot read the path list $paths"
-  LC_ALL=C awk -v globs="$_LG_SN.globs" "$_LG_AWK_GLOB"'
+  _lg_registry_globs "$reg" "$_LG_SCRATCH_NAME.globs" active
+  tr '\n\000' '\001\n' < "$paths" > "$_LG_SCRATCH_NAME.lst" || _lg_die "cannot read the path list $paths"
+  LC_ALL=C awk -v globs="$_LG_SCRATCH_NAME.globs" "$_LG_AWK_GLOB"'
     BEGIN {
       FS = "\t"
       while ((getline line < globs) > 0) {
@@ -247,6 +247,6 @@ _lg_owner_map() {
       if (n == 0) own = "-"
       else if (n > 1) own = "multi:" own
       print $0 "\t" own
-    }' "$_LG_SN.lst" > "$out" || rc=$?
+    }' "$_LG_SCRATCH_NAME.lst" > "$out" || rc=$?
   [ "$rc" = 0 ] || _lg_die "cannot build the ownership map (awk rc $rc)"
 }
