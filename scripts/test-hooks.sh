@@ -8044,7 +8044,7 @@ ci_fixture() {
   # shellcheck disable=SC2016
   printf '%s\n' '#!/bin/sh' 'echo "uvx $*" >> "'"$CI_LOG"'"' 'case "$1" in' \
     'zizmor@*)' '  for a in "$@"; do [ -d "$a/.github/workflows" ] || continue' \
-    '    for f in "$a"/.github/workflows/*.yml; do' \
+    '    for f in "$a"/.github/workflows/*.yml; do [ -f "$f" ] || continue' \
     '      echo "rendered:${f##*/}" >> "'"$CI_LOG"'"' \
     '      if grep -q "__[A-Z_]*__" "$f"; then echo placeholder-left >> "'"$CI_LOG"'"; fi' \
     '    done; done' '  exit "${STUB_RC_zizmor:-0}" ;;' \
