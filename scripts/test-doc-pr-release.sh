@@ -2140,6 +2140,17 @@ test_ai_steps_use_an_action_their_triggers_can_reach() {
   done
 }
 
+test_pr_event_commit_steps_expect_the_actions_restore() {
+  echo "test: an AI step on a PR event checks its change with --action-config; a base-action step does not"
+  local t
+  for t in doc-pr-full-cycle doc-pr-release; do
+    assert_contains "$(grep 'commit-changes.sh' "$TEMPLATE_DIR/$t.yml")" "--action-config" "$t: the action restores config paths on its PR events"
+  done
+  for t in doc-audit-update doc-release; do
+    assert_not_contains "$(grep 'commit-changes.sh' "$TEMPLATE_DIR/$t.yml")" "--action-config" "$t: base-action restores nothing"
+  done
+}
+
 test_pr_prompts_survive_the_actions_shallow_fetch() {
   echo "Test: the action's own --depth=1 fetch makes the clone shallow before the agent starts, so a PR's prompt names a merge base found before it"
   local repo out rc base head mb wf
@@ -2292,6 +2303,33 @@ test_i8_commit_changes() {
   assert_eq "0|true" "$rc|$(_out "$out" changed)" "--check-only, an allowed change: exits 0, changed=true …"
   assert_eq "$head" "$(git -C "$clone" rev-parse HEAD)" "…and commits nothing"
   _cc_reset "$dir"
+
+  # On a PR event the action puts these paths back to the base branch's copy
+  # before the agent runs: a PR that changes them shows them as changed.
+  mkdir -p "$clone/.claude"
+  echo x > "$clone/.claude/settings.json"
+  echo x > "$clone/.mcp.json"
+  echo x > "$clone/.claude.json"
+  echo x > "$clone/.gitmodules"
+  echo x > "$clone/.ripgreprc"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" --check-only --allow docs/d.md || rc=$?
+  assert_eq "1" "$rc" "without --action-config the action's restored paths are a violation"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" --check-only --allow docs/d.md --action-config || rc=$?
+  assert_eq "0|false" "$rc|$(_out "$out" changed)" "--action-config: the paths the action restores are no violation, and no change"
+  echo x > "$clone/.mcp.json.bak"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" --check-only --allow docs/d.md --action-config || rc=$?
+  assert_eq "1" "$rc" "…those paths exactly: .mcp.json.bak is a violation"
+  rm -f "$clone/.mcp.json.bak"
+  echo '# D5' > "$clone/docs/d.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" --action-config || rc=$?
+  assert_eq "0|true" "$rc|$(_out "$out" committed)" "--action-config with an allowed change: committed"
+  assert_eq "docs/d.md" "$(git -C "$clone" show --name-only --format= HEAD)" "…only the allowed path: the restored copies never reach the branch"
+  head=$(git -C "$clone" rev-parse HEAD)
+  rm -rf "$clone/.claude" "$clone/.mcp.json" "$clone/.claude.json" "$clone/.gitmodules" "$clone/.ripgreprc"
 
   # Hooks and an fsmonitor the agent could plant in .git never run.
   local marks="$dir/marks" evil="$dir/evil-hooks"
@@ -2472,6 +2510,7 @@ test_shipped_files_name_no_personal_url
 test_templates_keep_no_git_token_on_disk
 test_templates_pin_jq_before_any_step_script
 test_ai_steps_use_an_action_their_triggers_can_reach
+test_pr_event_commit_steps_expect_the_actions_restore
 test_pr_prompts_survive_the_actions_shallow_fetch
 test_install_jq
 test_git_token_helper_answers_only_for_the_jobs_host

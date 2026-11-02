@@ -130,20 +130,37 @@ ci_version() {
   fi
 }
 
-# The pin an installed workflow already holds for this version, if any.
+# The pin an installed workflow already holds for this version from this URL, if
+# any: another URL is another source, so its tag cannot be one that moved.
 installed_plugin_commit() {
   local f c
   for f in .github/workflows/*.yml; do
     [ -f "$f" ] || continue
-    c=$(awk -v want="DOC_SUPERPOWERS_VERSION: \"v$VERSION\"" '
+    c=$(WANT_URL="DOC_SUPERPOWERS_MARKETPLACE_URL: \"$1\"" awk -v want="DOC_SUPERPOWERS_VERSION: \"v$VERSION\"" '
       index($0, want) { same = 1 }
+      index($0, ENVIRON["WANT_URL"]) { from = 1 }
       /DOC_SUPERPOWERS_COMMIT: "[0-9a-f]+"/ { pin = $2; gsub(/"/, "", pin) }
-      END { if (same) print pin }' "$f")
+      END { if (same && from) print pin }' "$f")
     if [ -n "$c" ]; then
       printf '%s' "$c"
       return 0
     fi
   done
+}
+
+# A workflow about to be rendered that fetches the plugin and does not hold an
+# empty pin (that one already fails), on stdout.
+working_plugin_workflow() {
+  local w f
+  for w in $CI_RENDER; do
+    f=".github/workflows/$w.yml"
+    [ -f "$f" ] || continue
+    grep -q 'DOC_SUPERPOWERS_MARKETPLACE_URL: "[^"]' "$f" || continue
+    grep -q 'DOC_SUPERPOWERS_COMMIT: ""' "$f" && continue
+    printf '%s' "$f"
+    return 0
+  done
+  return 1
 }
 
 # The commit the plugin's release tag names at the marketplace URL, into
@@ -153,17 +170,24 @@ installed_plugin_commit() {
 # access of an install. DOC_SUPERPOWERS_PLUGIN_COMMIT replaces it, where the URL
 # cannot be reached or to accept a tag that moved: a tag at another commit than
 # this version's installed pin is refused, or a routine refresh would re-pin
-# exactly what the pin is there to catch. A failed read keeps an installed pin.
-# With no version or URL to ask for, the WARN already given says what to do.
+# exactly what the pin is there to catch. A failed read keeps an installed pin,
+# refuses to clear a pin (or an unpinned workflow) that works, and otherwise
+# warns. With no version or URL to ask for, the WARN already given says what to do.
 ci_plugin_commit() {
-  local market="$1" c="${DOC_SUPERPOWERS_PLUGIN_COMMIT:-}" why have
+  local market="$1" c="${DOC_SUPERPOWERS_PLUGIN_COMMIT:-}" why have working
   if [ -n "$c" ]; then
-    why="DOC_SUPERPOWERS_PLUGIN_COMMIT is not a commit id"
+    if ! [[ "$c" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+      {
+        echo "ERROR: DOC_SUPERPOWERS_PLUGIN_COMMIT is '$c', not a commit id."
+        echo "Nothing was installed."
+      } >&2
+      exit 1
+    fi
     have=""
   else
     [ -n "$market" ] && valid_marketplace_url "$market" && [ -n "$VERSION" ] && [ "$VERSION" != unknown ] || return 0
     why="cannot read tag v$VERSION at $market"
-    have=$(installed_plugin_commit)
+    have=$(installed_plugin_commit "$market")
     c=$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags -- "$market" "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}" 2>/dev/null </dev/null \
       | awk '{ last = $1; if ($2 ~ /\^\{\}$/) peeled = $1 } END { print (peeled != "" ? peeled : last) }') || c=""
   fi
@@ -181,6 +205,13 @@ ci_plugin_commit() {
   elif [ -n "$have" ]; then
     echo "  $why; keeping the installed DOC_SUPERPOWERS_COMMIT $have" >&2
     R_COMMIT="$have"
+  elif working=$(working_plugin_workflow); then
+    {
+      echo "ERROR: $why, and this install would leave $working unable to fetch the plugin."
+      echo "  Install again once the tag can be read, or give its commit: DOC_SUPERPOWERS_PLUGIN_COMMIT=<the tag's commit>."
+      echo "Nothing was installed."
+    } >&2
+    exit 1
   else
     echo "  WARN: $why; the Claude-powered workflows get DOC_SUPERPOWERS_COMMIT \"\", and their plugin step fails until you re-install where it can be read (or with DOC_SUPERPOWERS_PLUGIN_COMMIT=<the tag's commit>)" >&2
   fi
@@ -2595,7 +2626,8 @@ preflight_ci() {
       break
     fi
   done
-  # Like both: a commit that cannot be read does not abort the install.
+  # Like both on a first install: a commit that cannot be read does not abort
+  # it. Over a workflow that works, it does (ci_plugin_commit).
   for w in $CI_RENDER; do
     if grep -q '__PLUGIN_COMMIT__' "$SCRIPT_DIR/ci/$w.yml"; then
       ci_plugin_commit "$market"

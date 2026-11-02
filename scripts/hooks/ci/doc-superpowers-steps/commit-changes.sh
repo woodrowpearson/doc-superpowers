@@ -16,7 +16,7 @@
 # job's agent can reach", says what to protect.
 #
 # Usage:
-#   commit-changes.sh [--allow <path>|<dir/>]... [--allow-index-keys] [--ignore <dir>]...
+#   commit-changes.sh [--allow <path>|<dir/>]... [--allow-index-keys] [--ignore <dir>]... [--action-config]
 #                     (--check-only | --message <subject> --push-to <branch>
 #                      [--open-pr <base> | --superseded-fails])
 #
@@ -28,6 +28,11 @@
 #   --ignore <dir>       the workflow's own scratch directory (a trailing /
 #                        is implied: --ignore .x never covers .x-y/): never
 #                        committed, never a violation
+#   --action-config      an agent step ran claude-code-action on a PR event: it
+#                        puts .claude/, .mcp.json, .claude.json, .gitmodules and
+#                        .ripgreprc back to the base branch's copy, so a PR that
+#                        changes them shows them as changed. Never committed,
+#                        never a violation.
 #   --check-only         check only; the caller commits (doc-pr-release.yml
 #                        runs doc-pr-release/commit-and-push.sh next)
 #   --message <subject>  the commit subject
@@ -157,11 +162,11 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
 fi
 
 usage() {
-  echo "Usage: $0 [--allow <path>|<dir/>]... [--allow-index-keys] [--ignore <dir>]... (--check-only | --message <subject> --push-to <branch> [--open-pr <base> | --superseded-fails])" >&2
+  echo "Usage: $0 [--allow <path>|<dir/>]... [--allow-index-keys] [--ignore <dir>]... [--action-config] (--check-only | --message <subject> --push-to <branch> [--open-pr <base> | --superseded-fails])" >&2
   exit 2
 }
 
-ALLOW=() IGNORE=() INDEX_KEYS=0 CHECK_ONLY=0 MESSAGE="" PUSH_TO="" OPEN_PR="" SUPERSEDED_FAILS=0
+ALLOW=() IGNORE=() INDEX_KEYS=0 ACTION_CONFIG=0 CHECK_ONLY=0 MESSAGE="" PUSH_TO="" OPEN_PR="" SUPERSEDED_FAILS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --allow | --ignore | --message | --push-to | --open-pr)
@@ -174,6 +179,10 @@ while [ $# -gt 0 ]; do
         --open-pr) OPEN_PR="$2" ;;
       esac
       shift 2
+      ;;
+    --action-config)
+      ACTION_CONFIG=1
+      shift
       ;;
     --allow-index-keys)
       INDEX_KEYS=1
@@ -237,6 +246,11 @@ allowed() {
 }
 ignored() {
   local i
+  if [ "$ACTION_CONFIG" = 1 ]; then
+    case "$1" in
+      .claude | .claude/* | .mcp.json | .claude.json | .gitmodules | .ripgreprc) return 0 ;;
+    esac
+  fi
   for i in ${IGNORE[@]+"${IGNORE[@]}"}; do
     case "$1" in
       "$i"*) return 0 ;;

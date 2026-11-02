@@ -147,4 +147,4 @@ jobs:
         # prepare-agent.sh's pre-agent copy of the checker: an integrity check
         # against agent mistakes, not a sandbox (a steered agent reaches the
         # job's secrets and its token's permissions — references/hooks.md).
-        run: '"$RUNNER_TEMP"/doc-superpowers-steps/commit-changes.sh --allow docs/ --allow-index-keys --message "[doc-superpowers] pr docs: review, update, diagrams, sync" --push-to "$PUSH_TO" --superseded-fails'
+        run: '"$RUNNER_TEMP"/doc-superpowers-steps/commit-changes.sh --allow docs/ --allow-index-keys --action-config --message "[doc-superpowers] pr docs: review, update, diagrams, sync" --push-to "$PUSH_TO" --superseded-fails'
