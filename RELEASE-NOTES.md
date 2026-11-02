@@ -1,5 +1,15 @@
 # Release Notes
 
+## v3.12.1 (2026-11-02)
+
+This patch release renames two identifiers in the ledger scripts. The kit ships those scripts for projects to vendor, so its identifiers should be whole-word names that a downstream token scan won't match by accident.
+
+### Upgrading from 3.12.0
+Nothing to do: behaviour is unchanged. A project that vendors the ledger helper set gets the new names at its next `hooks install --ci`.
+
+### Fixes
+- **Ledger identifiers:** the scratch-name shell variable is now `_LG_SCRATCH_NAME`, and an awk array in the same scripts is now `VM_NAMES` (12 files under `scripts/ledger/`).
+
 ## v3.12.0 (2026-11-02)
 
 This release hardens what doc-superpowers runs in other people's environments, following a security review of the dependencies, the CI templates and the shell. It fixes one real code-execution bug: a crafted `docs/.doc-index.json` could run commands on `check-freshness`, and so on `git pull` with the git tier installed. Upgrade if you run the plugin over repositories or branches you do not fully trust.
