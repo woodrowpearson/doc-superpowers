@@ -149,7 +149,7 @@ _why() {
 # could not run) and claims_lines.
 _claims_call() {
   local out tally why
-  out=$("$DOC_TOOLS" claims "$@" </dev/null 2>/dev/null)
+  out=$(DOC_SUPERPOWERS_NO_TOOL_ADVICE=1 "$DOC_TOOLS" claims "$@" </dev/null 2>/dev/null)
   tally=$(jq -r --arg verb "$1" 'if type == "object" and (.exit | type) == "number" then
       "\((.findings // []) | length) \(((.indeterminate // []) | length) + (if .error then 1 else 0 end))",
       (.findings[]?, .indeterminate[]?

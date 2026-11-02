@@ -103,7 +103,7 @@ An unscoped form (`docs: …`) is fine for a change with no single area. A proje
 
 - Keep PRs focused on a single change
 - Test skill changes by running `/doc-superpowers init` on a sample project before merging
-- Run what CI runs, `bash scripts/check-ci.sh` (every shell test suite under both bash 5.x and `/bin/bash` 3.2, the doc-search pytest suite — the `search` check, which needs `uv` — the self-install drift check, `check-version`; see **Testing** below) — all must pass before merge. The suite list, their assertion counts and the command are in [CLAUDE.md → Conventions](../CLAUDE.md#conventions), the one place they are kept. `bash scripts/install-maintainer-hooks.sh` installs an opt-in pre-push hook that runs `check-ci.sh --fast`
+- Run what CI runs, `bash scripts/check-ci.sh` (every shell test suite under both bash 5.x and `/bin/bash` 3.2, the doc-search pytest suite — the `search` check, which needs `uv` — the self-install drift check, the `zizmor`, `dep-audit` and `gitleaks` audits, `check-version`; see **Testing** below) — all must pass before merge. The suite list, their assertion counts and the command are in [CLAUDE.md → Conventions](../CLAUDE.md#conventions), the one place they are kept. `bash scripts/install-maintainer-hooks.sh` installs an opt-in pre-push hook that runs `check-ci.sh --fast`
 - A change to a CI template, `scripts/doc-tools.sh` or a CI helper script also re-runs `bash scripts/hooks/install.sh install --ci` and commits what it writes: this repository installs its own CI tier, and `.github/workflows/tests.yml` fails when the installed copies drift from their sources. The same step fails when `.gitattributes` no longer routes `docs/.doc-index.json` to the doc-index merge driver, and then names `bash scripts/hooks/install.sh install --git` (commit the `.gitattributes` it writes)
 - Include before/after examples for behavior changes
 
@@ -205,6 +205,7 @@ Optional tools trigger fallbacks; a missing required tool fails, naming itself:
 | Doc-index (first run) | `check-freshness` exits 1 ("doc-index.json not found"); `init` builds it |
 | `git` or `jq` (required) | `doc-tools.sh` exits non-zero: "required command not found: jq" (or `git`) |
 | A `jq` older than 1.6 (required) | `doc-tools.sh` exits non-zero naming the requirement (`jq >= 1.6`: the index writers use `--args` / `$ARGS.positional`) and the version found |
+| A `jq`, `git` or `gawk` older than the security fixes (`SECURITY.md`) | It runs: `check_deps` prints one WARN per tool on stderr, at most once a day (`DOC_SUPERPOWERS_NO_TOOL_ADVICE=1` silences it) |
 | Both `sha256sum` and `shasum` (one is required) | `doc-tools.sh` exits non-zero: "required command not found: sha256sum or shasum" |
 | User-provided scripts | Bundled tooling handles core operations; optional scripts are listed, never auto-run (Safety Rules) |
 
@@ -302,7 +303,7 @@ Search-enabled projects only: `docs/search/config.json` turns doc-search on, and
 doc-superpowers documents itself, but its own `docs/` does not follow every row of the *Scope → Generated Docs Matrix* (`skills/doc-superpowers/SKILL.md`). The owner ruled these exemptions on 2026-10-14. Audits record them and do not re-raise them, and `update` must not create the files.
 
 - **`docs/specs/` and `docs/adr/`**, the README and template pairs from the matrix's "Always" row: the templates' single source is `references/doc-spec.md` (the `docs/specs/template.md` and `docs/adr/template.md` sections). A copy under `docs/` would drift from it. This repo has no specs or ADRs of its own: its design decisions live in `docs/superpowers/specs/` (design docs) and in `docs/architecture/system-overview.md` (Key Decisions).
-- **`docs/ci-cd.md` and `docs/workflows/deployment.md`**, the `ci-cd` scope, which is detected from `.github/workflows/`: this repo deploys nothing. Its CI is `tests.yml` (the suites, `check-version` and the self-install drift check) plus the self-installed freshness workflows, all described in `CLAUDE.md` (Testing, Self-installed tiers) and in `references/hooks.md`.
+- **`docs/ci-cd.md` and `docs/workflows/deployment.md`**, the `ci-cd` scope, which is detected from `.github/workflows/`: this repo deploys nothing. Its CI is `tests.yml` (the suites, the audits, `check-version` and the self-install drift check) plus the self-installed freshness workflows, all described in `CLAUDE.md` (Testing, Self-installed tiers) and in `references/hooks.md`.
 - **`docs/workflows/agentic/`**, the `agentic` scope: the skill's agentic workflow is documented in `docs/workflows/doc-superpowers.md`. This is a structural decision already recorded by the 2026-07-24 and 2026-09-28 audits.
 
 ### Diagram Co-location

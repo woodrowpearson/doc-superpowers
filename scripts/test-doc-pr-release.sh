@@ -1194,9 +1194,9 @@ test_workflow_yaml_placeholders() {
   tmp=$(harness_mktemp_d yaml)
   for f in "$TEMPLATE_DIR"/doc-*.yml; do
     name=$(basename "$f")
-    sed -e 's/__BASE_BRANCH__/main/g' -e 's/__VERSION__/9.9.9/g' -e 's/__CRON_SCHEDULE__/0 0 * * 0/g' -e 's/__CI_STRICT__/false/g' \
+    sed -e 's/__BASE_BRANCH__/main/g' -e 's/__VERSION__/9.9.9/g' -e 's/__PLUGIN_COMMIT__/abc/g' -e 's/__CRON_SCHEDULE__/0 0 * * 0/g' -e 's/__CI_STRICT__/false/g' \
       -e 's|__MARKETPLACE_URL__|https://git.example.com/acme/doc-superpowers.git|g' "$f" > "$tmp/$name"
-    if grep -E '__BASE_BRANCH__|__VERSION__|__CRON_SCHEDULE__|__CI_STRICT__|__MARKETPLACE_URL__' "$tmp/$name" >/dev/null; then
+    if grep -E '__BASE_BRANCH__|__VERSION__|__CRON_SCHEDULE__|__CI_STRICT__|__MARKETPLACE_URL__|__PLUGIN_COMMIT__' "$tmp/$name" >/dev/null; then
       detail="${detail}    $name still contains an unsubstituted placeholder"$'\n'
       fail=1
     fi
@@ -1361,7 +1361,8 @@ _yaml_json() {
 }
 
 AI_WORKFLOWS="doc-audit-update doc-review-pr doc-release doc-spec-verify doc-pr-full-cycle doc-pr-release"
-AI_USES="anthropics/claude-code-action@"
+# The action and its base-action, which the push-triggered workflows use.
+AI_USES="anthropics/claude-code-action"
 ALL_REPO=$(installed_repo --all --workflows=all) || ALL_REPO=""
 # --workflows=all skips doc-ledger-publish on a host without
 # docs/ledger/config.json (final review OPS-I2); named, it installs: every
@@ -1428,7 +1429,7 @@ test_i8_ai_steps_runnable_and_scoped() {
       # shellcheck disable=SC2016  # jq program
       out=$(jq -r "$_JQ_TOOLS"'
         "\(.wf) / \(.job) / \(.step)" as $id
-        | ( (if .with.github_token != "${{ github.token }}" then "github_token is not ${{ github.token }}" else empty end),
+        | ( (if (.wf != "doc-audit-update" and .wf != "doc-release") and .with.github_token != "${{ github.token }}" then "github_token is not ${{ github.token }}" else empty end),
             (if ((.with.plugins // "") | split("\n") | map(gsub("^\\s+|\\s+$"; "")) | any(. == "doc-superpowers@doc-superpowers")) | not
              then "plugins does not install doc-superpowers@doc-superpowers" else empty end),
             (if ((.with.plugin_marketplaces // "") | test("^\\$\\{\\{ *steps\\.[A-Za-z0-9_-]+\\.outputs\\.marketplace *\\}\\}$")) | not
@@ -1479,6 +1480,7 @@ test_i8_pins_carry_exact_versions() {
         *"uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1") ;;
         *"uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0") ;;
         *"uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88") ;;
+        *"uses: anthropics/claude-code-action/base-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88") ;;
         *) bad="${bad}    $(basename "$f"):$l"$'\n' ;;
       esac
     done < <(grep -E '^[[:space:]]*(-[[:space:]]+)?uses:' "$f")
@@ -1897,12 +1899,13 @@ marketplace_remote() {
 
 test_i8_prepare_agent() {
   echo "Test: prepare-agent.sh — the plugin marketplace at exactly the installed version's tag, and the checkout's head"
-  local url repo out rc mp v
+  local url repo out rc mp v pin
   url=$(marketplace_remote 1.2.3) || { assert_true "marketplace fixture" false; return 0; }
+  pin=$(git --git-dir="${url#file://}" rev-parse 'v1.2.3^{commit}')
   repo=$(new_repo)
   out="$(harness_mktemp_d step)/out"
   rc=0
-  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v1.2.3 DOC_SUPERPOWERS_MARKETPLACE_URL="$url" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
+  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v1.2.3 DOC_SUPERPOWERS_COMMIT="$pin" DOC_SUPERPOWERS_MARKETPLACE_URL="$url" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
   assert_eq "0" "$rc" "the installed version's tag → exits 0"
   mp=$(_out "$out" marketplace)
   case "$mp" in
@@ -1923,18 +1926,260 @@ test_i8_prepare_agent() {
     assert_contains "$(cat "$out.log")" "::error::" "version '$v': an ::error:: says why"
   done
   rc=0
-  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v2.0.0 DOC_SUPERPOWERS_MARKETPLACE_URL="$url" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
+  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v2.0.0 DOC_SUPERPOWERS_COMMIT="$pin" DOC_SUPERPOWERS_MARKETPLACE_URL="$url" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
   assert_eq "1|" "$rc|$(_out "$out" marketplace)" "no such tag: exits 1, no marketplace"
   rc=0
-  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v9.0.0 DOC_SUPERPOWERS_MARKETPLACE_URL="$url" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
+  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v9.0.0 DOC_SUPERPOWERS_COMMIT="$pin" DOC_SUPERPOWERS_MARKETPLACE_URL="$url" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
   assert_eq "1|" "$rc|$(_out "$out" marketplace)" "a tag whose manifests name another version: exits 1"
   assert_contains "$(cat "$out.log")" "1.2.3" "…naming the version found"
   # No default: the URL is the workflow's env, rendered by the installer.
   rc=0
-  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v1.2.3 -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
+  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v1.2.3 DOC_SUPERPOWERS_COMMIT="$pin" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
   assert_eq "1|" "$rc|$(_out "$out" marketplace)" "no DOC_SUPERPOWERS_MARKETPLACE_URL: exits 1, no marketplace"
   assert_contains "$(cat "$out.log")" "::error::doc-superpowers: DOC_SUPERPOWERS_MARKETPLACE_URL is not set" "…an ::error:: names the missing env"
   assert_contains "$(cat "$out.log")" "install --ci" "…and the re-install that renders it"
+  # The tag is only a name: the installed commit is what runs with the job's
+  # secrets, so a tag moved after the install stops here, before any of it runs.
+  for v in "" nothex "$(printf 'a%.0s' 1 2 3)"; do
+    rc=0
+    run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v1.2.3 DOC_SUPERPOWERS_COMMIT="$v" DOC_SUPERPOWERS_MARKETPLACE_URL="$url" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
+    assert_eq "1|" "$rc|$(_out "$out" marketplace)" "commit pin '$v' is not a commit: exits 1, no marketplace"
+    assert_contains "$(cat "$out.log")" "install --ci" "commit pin '$v': the ::error:: names the re-install that renders it"
+  done
+  rc=0
+  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v1.2.3 DOC_SUPERPOWERS_COMMIT=0123456789abcdef0123456789abcdef01234567 DOC_SUPERPOWERS_MARKETPLACE_URL="$url" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
+  assert_eq "1|" "$rc|$(_out "$out" marketplace)" "the tag at another commit than the installed one: exits 1, no marketplace"
+  assert_contains "$(cat "$out.log")" "$pin" "…naming the commit the tag holds now"
+  assert_contains "$(cat "$out.log")" "0123456789abcdef0123456789abcdef01234567" "…and the installed one"
+  assert_eq "" "$(find "$out.tmp" -name plugin.json 2>/dev/null)" "…and no fetched copy of the plugin is left behind"
+}
+
+test_templates_keep_no_git_token_on_disk() {
+  echo "Test: no workflow leaves the job's token in .git/config: checkouts persist none, the AI action adds none, the steps that push get it in their env"
+  local wf bad=""
+  for wf in "$ALL_REPO"/.github/workflows/*.yml; do
+    bad="$bad$(_yaml_json "$wf" | jq -r --arg wf "${wf##*/}" --arg u "$AI_USES" '
+      .jobs | to_entries[] | .key as $job | .value.steps[]
+      | if ((.uses // "") | startswith("actions/checkout@")) and (.with["persist-credentials"] != false)
+        then "\($wf) / \($job): a checkout without persist-credentials: false\n"
+        elif ((.uses // "") | startswith($u + "@")) and ((.with.use_commit_signing | tostring) != "true")
+        then "\($wf) / \($job): the AI action without use_commit_signing (it would write the token into the remote URL)\n"
+        elif ((.run // "") | test("commit-changes\\.sh --allow|commit-and-push\\.sh|ledger-publish\\.sh")) and (.env.DOC_SUPERPOWERS_GIT_TOKEN != "${{ github.token }}") and ((.run // "") | test("--check-only") | not)
+        then "\($wf) / \($job): a step that pushes without DOC_SUPERPOWERS_GIT_TOKEN\n"
+        else empty end')"
+  done
+  assert_eq "" "$bad" "every checkout, AI step and pushing step"
+  # On a PR event the action fetches the base branch itself (and tag mode the
+  # PR branch) before the agent starts: on a private repository that needs the
+  # helper. A push or dispatch run fetches nothing.
+  local helper
+  bad=""
+  for wf in doc-review-pr doc-spec-verify doc-pr-full-cycle doc-pr-release; do
+    bad="$bad$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r --arg wf "$wf" --arg u "$AI_USES" '
+      .jobs | to_entries[] | .key as $job | .value.steps[] | select((.uses // "") | startswith($u))
+      | if .env.DOC_SUPERPOWERS_GIT_TOKEN != "${{ github.token }}" or .env.GIT_CONFIG_COUNT != "2"
+           or .env.GIT_CONFIG_KEY_1 != "credential.${{ github.server_url }}.helper"
+        then "\($wf) / \($job): the AI step cannot fetch on a private repository\n" else empty end')"
+  done
+  assert_eq "" "$bad" "every AI step on a PR event has the credential helper"
+  # The same helper text as the step scripts' block, so one test covers both.
+  helper=$(_yaml_json "$ALL_REPO/.github/workflows/doc-review-pr.yml" | jq -r --arg u "$AI_USES" \
+    '.jobs.respond.steps[] | select((.uses // "") | startswith($u)) | .env.GIT_CONFIG_VALUE_1')
+  assert_contains "$(_git_token_block "$STEPS_DIR/commit-changes.sh")" "$helper" "…the same helper as the step scripts' block"
+}
+
+# The block between the marker lines, as the scripts that push carry it.
+_git_token_block() {
+  sed -n '/^# doc-superpowers:git-token$/,/^# \/doc-superpowers:git-token$/p' "$1"
+}
+
+test_git_token_helper_answers_only_for_the_jobs_host() {
+  echo "Test: the steps that push read the token from their env, for the job's own host only"
+  local block f out
+  block=$(_git_token_block "$STEPS_DIR/commit-changes.sh")
+  assert_true "commit-changes.sh holds the block" test -n "$block"
+  for f in "$HELPERS_DIR/commit-and-push.sh" "$STEPS_DIR/ledger-publish.sh"; do
+    assert_eq "$block" "$(_git_token_block "$f")" "${f##*/} holds the same bytes"
+  done
+  local repo probe
+  repo=$(new_repo)
+  probe() {
+    ( cd "$repo" && DOC_SUPERPOWERS_GIT_TOKEN=tok-123 GITHUB_SERVER_URL=https://github.com GIT_TERMINAL_PROMPT=0 \
+      "$BASH_BIN" -c "$block"$'\n''printf "protocol=https\nhost=%s\n\n" "$0" | git credential fill' "$1" 2>/dev/null )
+  }
+  assert_contains "$(probe github.com)" "password=tok-123" "the job's host gets the token"
+  assert_not_contains "$(probe evil.example)" "tok-123" "another host never does (a redirected remote)"
+  git -C "$repo" config credential.helper '!f() { echo password=from-repo-config; }; f'
+  assert_contains "$(probe github.com)" "password=tok-123" "a helper in the checkout's config is not asked first"
+  # doc-pr-release's commit step sets core.hooksPath the same way: it stays.
+  out=$(cd "$repo" && DOC_SUPERPOWERS_GIT_TOKEN=tok-123 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null \
+    "$BASH_BIN" -c "$block"$'\n''git config core.hooksPath; printf "protocol=https\nhost=github.com\n\n" | git credential fill' 2>/dev/null)
+  assert_contains "$out" "/dev/null" "entries the step's env already holds are kept"
+  assert_contains "$out" "password=tok-123" "…and the token is still answered"
+  out=$(cd "$repo" && env -u DOC_SUPERPOWERS_GIT_TOKEN "$BASH_BIN" -c "$block"$'\n''echo "count=${GIT_CONFIG_COUNT:-none}"')
+  assert_eq "count=none" "$out" "no token in the env: git is left as it is"
+}
+
+test_templates_pin_jq_before_any_step_script() {
+  echo "Test: every job runs install-jq.sh before anything else from .github/scripts"
+  local wf bad=""
+  for wf in "$ALL_REPO"/.github/workflows/*.yml; do
+    bad="$bad$(_yaml_json "$wf" | jq -r --arg wf "${wf##*/}" '
+      .jobs | to_entries[] | .key as $job
+      | [.value.steps[] | .run // "" | select(contains(".github/scripts/"))] as $r
+      | select($r | length > 0)
+      | if $r[0] != ".github/scripts/doc-superpowers-steps/install-jq.sh"
+        then "\($wf) / \($job): first runs \($r[0][0:70])\n" else empty end')"
+  done
+  assert_eq "" "$bad" "install-jq.sh is each job's first step script"
+}
+
+# A fake curl (writes <bytes>, or fails with "fail") and a jq the "download" is
+# not, so a run reaches the checksum.
+_fake_jq_tools() {
+  local d="$1" what="$2"
+  mkdir -p "$d"
+  cat > "$d/curl" <<EOF
+#!/bin/sh
+[ "$what" != fail ] || exit 22
+out=
+while [ \$# -gt 0 ]; do [ "\$1" = -o ] && out=\$2; shift; done
+cat "$d/bytes" > "\$out"
+EOF
+  printf '#!/bin/sh\necho jq-1.7.1\n' > "$d/jq"
+  chmod +x "$d/curl" "$d/jq"
+}
+
+test_install_jq() {
+  echo "Test: install-jq.sh — the pinned jq, verified, on the job's PATH; a wrong checksum always stops the job"
+  local repo out d rc copy sum
+  repo=$(new_repo)
+  out="$(harness_mktemp_d step)/out"
+  d=$(harness_mktemp_d fakejq)
+  _fake_jq_tools "$d" ok
+  printf 'tampered' > "$d/bytes"
+  : > "$out.path"
+  rc=0
+  run_installed "$repo" "$out" PATH="$d:$BASH_PATH" GITHUB_PATH="$out.path" -- "$STEPS_DIR/install-jq.sh" || rc=$?
+  assert_eq "1" "$rc" "bytes that do not match the pinned checksum: exits 1"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error::"
+  assert_eq "" "$(cat "$out.path")" "…and nothing joins the PATH"
+  assert_eq "" "$(find "$out.tmp" -type f -perm -u+x 2>/dev/null)" "…and nothing executable is left"
+
+  # The real checksums name real builds, so a run that passes them is checked
+  # on a copy whose table names the fake build's own digest.
+  printf '#!/bin/sh\necho jq-1.8.2\n' > "$d/bytes"
+  sum=$(sha256sum < "$d/bytes" 2>/dev/null || shasum -a 256 < "$d/bytes")
+  sum=${sum%% *}
+  copy="$d/install-jq.sh"
+  sed -E "s/sum=[0-9a-f]{64}/sum=$sum/" "$STEPS_DIR/install-jq.sh" > "$copy"
+  : > "$out.path"
+  rc=0
+  run_installed "$repo" "$out" PATH="$d:$BASH_PATH" GITHUB_PATH="$out.path" -- "$copy" || rc=$?
+  assert_eq "0" "$rc" "the pinned checksum: exits 0"
+  assert_eq "jq-1.8.2" "$("$(cat "$out.path")/jq" --version 2>/dev/null)" "…the verified jq's directory joins the PATH"
+  case "$(cat "$out.path")" in
+    "$out.tmp"/*) assert_true "…under \$RUNNER_TEMP" true ;;
+    *) assert_true "…under \$RUNNER_TEMP (got '$(cat "$out.path")')" false ;;
+  esac
+
+  # A build that passes the checksum and is not the pinned version: refused.
+  printf '#!/bin/sh\necho jq-1.6\n' > "$d/bytes"
+  sum=$(sha256sum < "$d/bytes" 2>/dev/null || shasum -a 256 < "$d/bytes")
+  sed -E "s/sum=[0-9a-f]{64}/sum=${sum%% *}/" "$STEPS_DIR/install-jq.sh" > "$copy"
+  : > "$out.path"
+  rc=0
+  run_installed "$repo" "$out" PATH="$d:$BASH_PATH" GITHUB_PATH="$out.path" -- "$copy" || rc=$?
+  assert_eq "1|" "$rc|$(cat "$out.path")" "a build naming another version: exits 1, nothing on the PATH"
+
+  # The download itself failing is an outage, not an attack: the runner's jq
+  # carries on with a warning, unless the workflow is strict.
+  _fake_jq_tools "$d" fail
+  : > "$out.path"
+  rc=0
+  run_installed "$repo" "$out" PATH="$d:$BASH_PATH" GITHUB_PATH="$out.path" -- "$STEPS_DIR/install-jq.sh" || rc=$?
+  assert_eq "0|" "$rc|$(cat "$out.path")" "a failed download: exits 0, the PATH unchanged"
+  assert_contains "$(cat "$out.log")" "::warning::" "…with a ::warning::"
+  rc=0
+  run_installed "$repo" "$out" PATH="$d:$BASH_PATH" GITHUB_PATH="$out.path" DOC_SUPERPOWERS_STRICT=1 -- "$STEPS_DIR/install-jq.sh" || rc=$?
+  assert_eq "1" "$rc" "…under DOC_SUPERPOWERS_STRICT=1: exits 1"
+
+  # Already the pinned version: nothing to fetch.
+  printf '#!/bin/sh\necho jq-1.8.2\n' > "$d/jq"
+  : > "$out.path"
+  rc=0
+  run_installed "$repo" "$out" PATH="$d:$BASH_PATH" GITHUB_PATH="$out.path" -- "$STEPS_DIR/install-jq.sh" || rc=$?
+  assert_eq "0|" "$rc|$(cat "$out.path")" "the runner's jq is the pinned version: exits 0, no download"
+
+  # A platform with no pinned build.
+  printf '#!/bin/sh\necho jq-1.7.1\n' > "$d/jq"
+  printf '#!/bin/sh\ncase "$1" in -s) echo Plan9 ;; *) echo mips ;; esac\n' > "$d/uname"
+  chmod +x "$d/uname"
+  rc=0
+  run_installed "$repo" "$out" PATH="$d:$BASH_PATH" GITHUB_PATH="$out.path" -- "$STEPS_DIR/install-jq.sh" || rc=$?
+  assert_eq "0" "$rc" "no pinned build for this platform: exits 0"
+  assert_contains "$(cat "$out.log")" "::warning::" "…with a ::warning::"
+}
+
+test_ai_steps_use_an_action_their_triggers_can_reach() {
+  echo "Test: a workflow triggered by push uses base-action: the full action throws on a push event, so its agent would never run"
+  local wf
+  for wf in doc-audit-update doc-release; do
+    assert_eq "true" "$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq '(.on // .true) | has("push")')" "$wf runs on push"
+    assert_eq "base-action" "$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r --arg u "$AI_USES" \
+      '[.jobs[].steps[] | select((.uses // "") | startswith($u)) | .uses | capture("claude-code-action(?:/(?<b>[a-z-]+))?@") | .b // "action"] | unique | join(",")')" \
+      "…through base-action"
+    assert_eq "" "$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r --arg u "$AI_USES" \
+      '.jobs[].steps[] | select((.uses // "") | startswith($u)) | .with | keys[] | select(. == "github_token" or . == "use_commit_signing")')" \
+      "…passing it no input it does not have"
+  done
+  for wf in doc-review-pr doc-spec-verify doc-pr-full-cycle doc-pr-release; do
+    assert_eq "action" "$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r --arg u "$AI_USES" \
+      '[.jobs[].steps[] | select((.uses // "") | startswith($u)) | .uses | capture("claude-code-action(?:/(?<b>[a-z-]+))?@") | .b // "action"] | unique | join(",")')" \
+      "$wf (PR events): the full action"
+  done
+}
+
+test_pr_event_commit_steps_expect_the_actions_restore() {
+  echo "test: an AI step on a PR event checks its change with --action-config; a base-action step does not"
+  local t
+  for t in doc-pr-full-cycle doc-pr-release; do
+    assert_contains "$(grep 'commit-changes.sh' "$TEMPLATE_DIR/$t.yml")" "--action-config" "$t: the action restores config paths on its PR events"
+  done
+  for t in doc-audit-update doc-release; do
+    assert_not_contains "$(grep 'commit-changes.sh' "$TEMPLATE_DIR/$t.yml")" "--action-config" "$t: base-action restores nothing"
+  done
+}
+
+test_pr_prompts_survive_the_actions_shallow_fetch() {
+  echo "Test: the action's own --depth=1 fetch makes the clone shallow before the agent starts, so a PR's prompt names a merge base found before it"
+  local repo out rc base head mb wf
+  repo=$(new_repo)
+  mb=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" checkout -q -b feature
+  git -C "$repo" commit -q --allow-empty -m feature
+  head=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" checkout -q main
+  git -C "$repo" commit -q --allow-empty -m "base moved on"
+  base=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" checkout -q feature
+  local url pin
+  url=$(marketplace_remote 1.2.3) || { assert_true "marketplace fixture" false; return 0; }
+  pin=$(git --git-dir="${url#file://}" rev-parse 'v1.2.3^{commit}')
+  out="$(harness_mktemp_d step)/out"
+  rc=0
+  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v1.2.3 DOC_SUPERPOWERS_COMMIT="$pin" DOC_SUPERPOWERS_MARKETPLACE_URL="$url" BASE_SHA="$base" HEAD_SHA="$head" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
+  assert_eq "0" "$rc" "prepare-agent.sh with a PR's two commits: exits 0"
+  assert_eq "$mb" "$(_out "$out" merge_base)" "merge_base= the commit the branch forked from"
+  rc=0
+  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v1.2.3 DOC_SUPERPOWERS_COMMIT="$pin" DOC_SUPERPOWERS_MARKETPLACE_URL="$url" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
+  assert_eq "0|" "$rc|$(_out "$out" merge_base)" "not a PR's job: no merge_base"
+  for wf in doc-review-pr doc-spec-verify doc-pr-full-cycle; do
+    assert_not_contains "$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r '[.jobs[].steps[].with.prompt // empty] | join("\n")')" "base.sha" \
+      "$wf: the prompt does not range from the base's tip"
+    assert_contains "$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r '[.jobs[].steps[].with.prompt // empty] | join("\n")')" 'steps.plugin.outputs.merge_base' \
+      "$wf: …but the merge base found before the agent"
+  done
 }
 
 test_shipped_files_name_no_personal_url() {
@@ -2058,6 +2303,33 @@ test_i8_commit_changes() {
   assert_eq "0|true" "$rc|$(_out "$out" changed)" "--check-only, an allowed change: exits 0, changed=true …"
   assert_eq "$head" "$(git -C "$clone" rev-parse HEAD)" "…and commits nothing"
   _cc_reset "$dir"
+
+  # On a PR event the action puts these paths back to the base branch's copy
+  # before the agent runs: a PR that changes them shows them as changed.
+  mkdir -p "$clone/.claude"
+  echo x > "$clone/.claude/settings.json"
+  echo x > "$clone/.mcp.json"
+  echo x > "$clone/.claude.json"
+  echo x > "$clone/.gitmodules"
+  echo x > "$clone/.ripgreprc"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" --check-only --allow docs/d.md || rc=$?
+  assert_eq "1" "$rc" "without --action-config the action's restored paths are a violation"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" --check-only --allow docs/d.md --action-config || rc=$?
+  assert_eq "0|false" "$rc|$(_out "$out" changed)" "--action-config: the paths the action restores are no violation, and no change"
+  echo x > "$clone/.mcp.json.bak"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" --check-only --allow docs/d.md --action-config || rc=$?
+  assert_eq "1" "$rc" "…those paths exactly: .mcp.json.bak is a violation"
+  rm -f "$clone/.mcp.json.bak"
+  echo '# D5' > "$clone/docs/d.md"
+  rc=0
+  run_installed "$clone" "$out" EXPECTED_HEAD="$head" -- "$cc" "${args[@]}" --action-config || rc=$?
+  assert_eq "0|true" "$rc|$(_out "$out" committed)" "--action-config with an allowed change: committed"
+  assert_eq "docs/d.md" "$(git -C "$clone" show --name-only --format= HEAD)" "…only the allowed path: the restored copies never reach the branch"
+  head=$(git -C "$clone" rev-parse HEAD)
+  rm -rf "$clone/.claude" "$clone/.mcp.json" "$clone/.claude.json" "$clone/.gitmodules" "$clone/.ripgreprc"
 
   # Hooks and an fsmonitor the agent could plant in .git never run.
   local marks="$dir/marks" evil="$dir/evil-hooks"
@@ -2235,6 +2507,13 @@ test_i8_freshness_audit
 test_i8_freshness_scope
 test_i8_prepare_agent
 test_shipped_files_name_no_personal_url
+test_templates_keep_no_git_token_on_disk
+test_templates_pin_jq_before_any_step_script
+test_ai_steps_use_an_action_their_triggers_can_reach
+test_pr_event_commit_steps_expect_the_actions_restore
+test_pr_prompts_survive_the_actions_shallow_fetch
+test_install_jq
+test_git_token_helper_answers_only_for_the_jobs_host
 test_i8_commit_changes
 test_i8_pr_guard
 
@@ -2539,7 +2818,8 @@ test_i9_pr_release_template() {
   assert_eq "" "$(jq -r '[.jobs[].steps[] | .if // empty | select(contains("new_commits_len"))] | join(" ; ")' <<<"$json")" \
     "no step gates on new_commits_len (a skipped context step left it '', and '' != '0' ran the agent)"
   gates=$(jq -r '[.jobs[].steps[] | select(.id != "pr" and .id != "sentinel" and .id != "context")
-    | select((.uses // "") | startswith("actions/checkout@") | not) | (.if // "none")] | unique | join(" ; ")' <<<"$json")
+    | select((.uses // "") | startswith("actions/checkout@") | not)
+    | select((.run // "") | endswith("install-jq.sh") | not) | (.if // "none")] | unique | join(" ; ")' <<<"$json")
   assert_eq "steps.context.outputs.run == 'true'" "$gates" "every step after the context step runs only when run == 'true'"
   ai=$(jq -c --arg u "$AI_USES" '[.jobs[].steps[] | select((.uses // "") | startswith($u))][0]' <<<"$json")
   tools=$(jq -r "$_JQ_TOOLS"' tools | join(",")' <<<"$ai")
@@ -3741,7 +4021,9 @@ test_ledger_publish_template() {
   assert_eq "doc-ledger-publish|false" "$(jq -r '"\(.concurrency.group)|\(.concurrency["cancel-in-progress"])"' <<<"$json")" \
     "one publisher at a time, never cancelled midway (a second run queues)"
   assert_eq "number" "$(jq -r '[.jobs[]["timeout-minutes"] | type] | first' <<<"$json")" "the job has a timeout"
-  assert_eq "1" "$(jq '[.jobs[].steps[] | select(.run != null)] | length' <<<"$json")" "one run: step"
+  assert_eq ".github/scripts/doc-superpowers-steps/install-jq.sh" "$(jq -r '[.jobs[].steps[] | select(.run != null)] | first | .run' <<<"$json")" "the jq pin first"
+  json=$(jq 'del(.jobs[].steps[] | select((.run // "") | endswith("install-jq.sh")))' <<<"$json")
+  assert_eq "1" "$(jq '[.jobs[].steps[] | select(.run != null)] | length' <<<"$json")" "then one run: step"
   assert_eq ".github/scripts/doc-superpowers-steps/ledger-publish.sh|.github/scripts/ledger/lib.sh" \
     "$(jq -r '[.jobs[].steps[] | select(.run != null)] | first | "\(.run | rtrimstr("\n"))|\(.env.LEDGER_HELPERS)"' <<<"$json")" \
     "…the publish step script, told where the vendored ledger helper set is"

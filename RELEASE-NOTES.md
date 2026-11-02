@@ -1,5 +1,37 @@
 # Release Notes
 
+## v3.12.0 (2026-11-02)
+
+This release hardens what doc-superpowers runs in other people's environments, following a security review of the dependencies, the CI templates and the shell. It fixes one real code-execution bug: a crafted `docs/.doc-index.json` could run commands on `check-freshness`, and so on `git pull` with the git tier installed. Upgrade if you run the plugin over repositories or branches you do not fully trust.
+
+### Upgrading from 3.11.x
+- **CI tier users: re-run `hooks install --ci` and commit what it writes.** The workflows and step scripts are copies in your repository, and the fixes below reach CI only through them. A pull request branch cut before that fails at the new jq step until it merges the base, because those jobs run the branch's own copy of the step scripts.
+- **Claude-powered workflows:** `install --ci` now reads the commit of the plugin's release tag from the marketplace URL (`git ls-remote`). Offline, set `DOC_SUPERPOWERS_PLUGIN_COMMIT=<the tag's commit>`, or the plugin step fails until a re-install.
+- **New stderr line:** `doc-tools.sh` warns once a day about an old jq, git or gawk, and stock macOS triggers it. `DOC_SUPERPOWERS_NO_TOOL_ADVICE=1` silences it. No floor changed.
+- **`hooks install --search` users:** the launcher reads `outdated` until you re-run it, as after any release.
+
+### Security
+- **Code execution through a crafted doc index:** `check-freshness` joined an entry's fields with `\x1f` and read them back into an array. A `\x1f` or NUL in `content_hash`, a code ref or a doc's key shifted attacker text into the ref count, which reaches an array slice, and bash evaluates that as an expression. It ran on `check-freshness`, `status` and every hook that calls them, on bash 3.2 and 5.x. The extract now replaces both separators in every field, and the count is checked before use.
+- **`ledger init --import`:** a NUL in an adapter's field name could forge a stream record, and its text reached an arithmetic expression. Field names are cleaned now.
+- **The plugin a project's CI fetches is pinned to a commit:** the AI templates carry `DOC_SUPERPOWERS_COMMIT`, and `prepare-agent.sh` stops the job if the release tag holds any other commit. `install --ci` refuses the same move for a version already installed from that URL, keeps the pin when that URL cannot be read, and refuses a failed read that would leave a working workflow with an empty pin. Before this, anyone who could move a `v*` tag ran code in every consumer's CI, with its secrets.
+- **No job token in `.git/config`:** every checkout sets `persist-credentials: false`, and the AI steps set `use_commit_signing: true`, because `claude-code-action` otherwise writes the token into the remote URL. The steps that push, and the AI steps on a PR event (the action fetches the base branch itself), get the token from their env through a credential helper scoped to the job's own host. The token is still in the agent's process environment: `references/hooks.md` says what this does and does not close.
+- **CI runs a checksum-verified jq 1.8.2:** every job's first step script is the new `install-jq.sh`, because these jobs run jq over PR content and the runners' jq is 1.7.1. A wrong digest fails the job. A failed download warns and uses the runner's jq, or fails in `doc-freshness-pr` under `--ci-strict`.
+- **Tool version warnings:** `check_deps` names a jq below 1.8.2, a git below the fix on its branch (2.43.7 and up), a git below 2.55.0 on a ledger host, and a gawk below 5.4.1. The floors stay, because distributions backport fixes under old version strings.
+- **`SECURITY.md`:** how to report a vulnerability, what is treated as data and what as code, and the tool-version table. It states plainly that repository config is code: with the ledger or claims tiers installed, committing on a hostile branch can run that branch's command.
+
+### Fixes
+- **`doc-audit-update` and `doc-release` reach their agent:** `claude-code-action` throws on a `push` event, so these two jobs never got past it. They now use its `base-action`, at the same pinned commit.
+- **PR prompts survive the action's fetch:** on a PR event the action re-fetches the base branch with `--depth=1`, which leaves no merge base for `<base>...<head>`. `prepare-agent.sh` works it out before that fetch, and `doc-review-pr`, `doc-spec-verify` and `doc-pr-full-cycle` use it.
+- **A PR that changes `.claude/` or `.mcp.json` no longer fails the commit step:** on PR events the action restores those paths and `.claude.json`, `.gitmodules` and `.ripgreprc` from the base branch, and `commit-changes.sh` blamed the agent for the difference. `doc-pr-full-cycle` and `doc-pr-release` now pass `--action-config`; those paths are never committed.
+
+### Dependencies
+- **`pyasn1` 0.6.5** in `search/uv.lock`, for CVE-2026-119194 to -119197 (the cloud extra). The new `dep-audit` check found these. `.github/dependabot.yml` now watches the lock.
+
+### Other
+- **`check-ci.sh` gains `zizmor`, `dep-audit` and `gitleaks`**, with steps in `tests.yml`. zizmor reads the templates as rendered; its one accepted finding, `issue_comment` in `doc-review-pr.yml`, is an inline ignore with the reason. A gitleaks scan of the whole history found one false positive, recorded in `.gitleaksignore`.
+- **`release` step 10** re-checks these pins and the advised versions against upstream, in this repository.
+- Verified locally (GitHub Actions does not run on this account): the seven suites under bash 5.x and `/bin/bash` 3.2 (15716 assertions each), the doc-search pytest suite (863 passed, the 2 live tests skipped), the self-install check, `zizmor`, `dep-audit`, `gitleaks`, `check-version` and `claude plugin validate .`. **The template changes have not run on GitHub Actions**: the private-repository credential paths were traced through the pinned action's source, not exercised.
+
 ## v3.11.2 (2026-10-29)
 
 This patch release fixes tool resolution for a skill installed as a symlink. With `~/.claude/skills/doc-superpowers` linked to a plugin's `skills/doc-superpowers`, Claude Code fills `${CLAUDE_SKILL_DIR}` with the link's path, and SKILL.md's *Detect Bundled Tooling* block walked its two `..` lexically into `~/.claude`, so `DOC_TOOLS` named a file that is not there.

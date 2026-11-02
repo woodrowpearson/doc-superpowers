@@ -10309,6 +10309,33 @@ test_lg_items_gh_get() {
   teardown
 }
 
+test_lg_init_import_field_name_forges_no_record() {
+  echo "test: init --import — a NUL in an adapter's field name forges no stream record, and its text reaches no arithmetic"
+  lg_fixture
+  lg_accept_remote
+  # A name relative to the repository: the harness root holds a space.
+  local marker=injected-ran
+  mkdir -p tools
+  cat > tools/items.sh <<EOF
+#!/bin/sh
+item='{"ref":"jira#5","url":"https://jira.example/5","title":"T","body":"","created":"2026-02-05T10:00:00Z","status":"Open","labels":[],"fields":{"a\\u0000X\\u0001f[\$(touch $marker)]\\u0000":"v"}}'
+case "\$1" in
+list) printf '%s\n' '{"ref":"jira#5","url":"https://jira.example/5","status":"Open","fields":{},"labels":[]}' ;;
+get) printf '%s\n' "\$item" ;;
+note) exit 0 ;;
+*) exit 3 ;;
+esac
+EOF
+  chmod +x tools/items.sh
+  lg_enable '{"items":{"adapter":"tools/items.sh"}}'
+  git add -A && git commit -qm config
+  lg init --import
+  assert_file_not_exists "$marker" "the forged text runs nothing"
+  assert_eq "2" "$LG_RC" "the writer refuses the name (exit 2)"
+  assert_contains "$LG_ERR" "not a frontmatter field name" "…saying why, not with an arithmetic error"
+  teardown
+}
+
 test_lg_init_import_converts_once() {
   echo "test: init --import — each hosted item becomes docs/issues/<created>-<slug>.md (fields, imported_from, url; # title + body), linked back with a note, nothing closed; a partial failure exits 2 and keeps the adapter; a re-run skips the imported ones and then sets items.adapter to null"
   lg_fixture
@@ -15481,6 +15508,7 @@ run_tests() {
   test_lg_init_hub_floor
   test_lg_init_crash_fallback_not_enabled
   test_lg_init_custom_items_adapter_no_gh
+  test_lg_init_import_field_name_forges_no_record
   test_lg_init_legacy_rows_and_links
   test_lg_init_split_boundary_40
   test_lg_init_files_umask_mode

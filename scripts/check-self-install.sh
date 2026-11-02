@@ -66,9 +66,11 @@ for t in scripts/hooks/ci/*.yml; do
     fi
     market=$(esc "$market")
   fi
+  # The plugin commit is read from the tag when installed: the file's own.
+  pin=$(sed -n 's/^ *DOC_SUPERPOWERS_COMMIT: "\([0-9a-f]*\)".*/\1/p' "$f" | head -n 1)
   sed -e "s|__BASE_BRANCH__|$base|g" -e "s|__VERSION__|$version|g" \
     -e "s|__CRON_SCHEDULE__|$cron|g" -e "s|__CI_STRICT__|$strict|g" \
-    -e "s|__MARKETPLACE_URL__|$market|g" \
+    -e "s|__MARKETPLACE_URL__|$market|g" -e "s|__PLUGIN_COMMIT__|$pin|g" \
     "$t" > "$work/$w.rendered.yml"
   diff -u "$work/$w.rendered.yml" "$f" \
     || drift "$f" "differs from $t rendered with the choices in $state"

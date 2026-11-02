@@ -118,7 +118,7 @@ doc-superpowers/
 │           │   ├── fragment-lib.sh            # Sourced by commit-and-push, extract-context and verify-fragment: the fragment line rules (markers, hash line, sha256)
 │           │   ├── commit-and-push.sh         # Seals the fragment, refuses one the release would skip (fragments list), commits only it ([doc-superpowers] prefix + Drafted-From trailer), pushes only while the branch is at the checkout (a workflow step, never the agent)
 │           │   └── RELEASE-NOTES.next.README.md # Fragment-format spec dropped into consuming repos (only if missing)
-│           └── doc-superpowers-steps/     # run: step bodies of every template — freshness-check (freshness gate/audit, AI scope gate), resolve-auth, prepare-agent (pinned plugin), commit-changes (checked commit), pr-guard (same-repo), sentinel-check, write-context, verify-fragment, precheck, claims-check (spec claims: `pr` and `scheduled` modes), ledger-publish (`ledger publish`, refusing to run without the vendored ledger set); each installed while a workflow runs it (install.sh `needed_steps`, read from the workflow files and the scripts' `"$(dirname "$0")/<name>.sh"` calls)
+│           └── doc-superpowers-steps/     # run: step bodies of every template — install-jq (the jq pin, every job's first), freshness-check (freshness gate/audit, AI scope gate), resolve-auth, prepare-agent (pinned plugin), commit-changes (checked commit), pr-guard (same-repo), sentinel-check, write-context, verify-fragment, precheck, claims-check (spec claims: `pr` and `scheduled` modes), ledger-publish (`ledger publish`, refusing to run without the vendored ledger set); each installed while a workflow runs it (install.sh `needed_steps`, read from the workflow files and the scripts' `"$(dirname "$0")/<name>.sh"` calls)
 ├── references/
 │   ├── doc-spec.md       # Templates for all generated doc types + Mermaid syntax + naming conventions
 │   ├── agent-prompt-template.md   # Review agent prompt template + scope focus areas
@@ -157,6 +157,7 @@ doc-superpowers/
 ├── README.md             # User-facing: install, usage, examples
 ├── CLAUDE.md             # Quick-reference for Claude Code sessions
 ├── LICENSE               # MIT License
+├── SECURITY.md           # Reporting, threat model, tool versions
 ├── RELEASE-NOTES.md      # Semantic versioned changelog
 ├── evals/
 │   ├── evals.json        # Skill behavior evaluations with machine-checkable fields (path / pattern / command)
