@@ -205,6 +205,7 @@ Optional tools trigger fallbacks; a missing required tool fails, naming itself:
 | Doc-index (first run) | `check-freshness` exits 1 ("doc-index.json not found"); `init` builds it |
 | `git` or `jq` (required) | `doc-tools.sh` exits non-zero: "required command not found: jq" (or `git`) |
 | A `jq` older than 1.6 (required) | `doc-tools.sh` exits non-zero naming the requirement (`jq >= 1.6`: the index writers use `--args` / `$ARGS.positional`) and the version found |
+| A `jq`, `git` or `gawk` older than the security fixes (`SECURITY.md`) | It runs: `check_deps` prints one WARN per tool on stderr, at most once a day (`DOC_SUPERPOWERS_NO_TOOL_ADVICE=1` silences it) |
 | Both `sha256sum` and `shasum` (one is required) | `doc-tools.sh` exits non-zero: "required command not found: sha256sum or shasum" |
 | User-provided scripts | Bundled tooling handles core operations; optional scripts are listed, never auto-run (Safety Rules) |
 
