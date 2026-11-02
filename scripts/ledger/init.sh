@@ -1779,7 +1779,7 @@ _LG_JQ_IMPORT_RECS='
   def ops:
     ([{k: "imported_from", v: .ref}, {k: "url", v: (.url // "")}]
      + ((.fields // {}) + {status: .status} | to_entries | sort_by(.key)
-        | map(select(.value != null) | {k: ((($F[.key] // [])[0]) // .key), v: (.value | v)})))[]
+        | map(select(.value != null) | {k: (((($F[.key] // [])[0]) // .key) | tostring | one), v: (.value | v)})))[]
     | if (.v | type) == "array" then
         [.v[] | if type == "string" then one else tojson | one end] as $l
         | "setlist\u0001\(.k)\u0001\($l | length)\u0001\($l | join("\u0001"))\u0000"
@@ -1920,6 +1920,9 @@ _lg_init_import() {
           break
         fi ;;
       X)
+        case "$rest" in
+          '' | *[!0123456789]*) rest=0 ;;
+        esac
         [ -n "$failed" ] || failed="$(sed -n "$((rest + 1))p" "$s.refs"): the items adapter's get printed no {ref, title, body, fields} object"
         break ;;
     esac

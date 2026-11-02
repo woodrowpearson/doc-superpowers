@@ -1097,7 +1097,11 @@ _check_tree_opt() {
 # mode is "record" for a record doc (no refs follow: it is never compared),
 # "oids" when the entry has code_oids (then the stored object id of each ref
 # follows the refs, "" for a ref code_oids lacks), else "legacy". Refs are
-# the stored strings minus empties (a legacy "" is not a path).
+# the stored strings minus empties (a legacy "" is not a path). A field holding
+# \x1f or \0 (only a hand-made index has one) has them replaced: they would
+# shift the fields after them, and the ref count reaches an array slice, which
+# bash evaluates as an expression, so index text could run commands. The test
+# looks at one join per entry, so a clean index pays no regex.
 #
 # A record doc describes a point in time — a plan, an issue, an audit, a
 # design spec, or anything archived — so the code moving on does not make it
@@ -1143,6 +1147,8 @@ _JQ_FRESH_EXTRACT='
      + (if $mode == "oids"
         then [$refs[] as $r | $v.code_oids[$r] | if type == "string" then . else "" end]
         else [] end))
+  | (if (join("") | (split("\u001f") | length) > 1 or (split("\u0000") | length) > 1)
+     then map(gsub("[\u0000\u001f]"; "_")) else . end)
   | join("\u001f") + "\u0000"'
 
 # jq (after $_JQ_REC_FIELDS): the _freshness_scan stream as def results:
@@ -1310,6 +1316,9 @@ _freshness_scan() {
           IFS= read -r hash <&4 || _die "cannot read the doc hashes"
           if [ "$hash" = "${f[4]}" ]; then mod=false; else mod=true; fi
           n="${f[7]}"
+          case "$n" in
+            '' | *[!0123456789]*) _die "a record of $INDEX_FILE has no ref count" ;;
+          esac
           if [ "${f[6]}" = oids ]; then
             changed="" gpaths=""
             j=0
