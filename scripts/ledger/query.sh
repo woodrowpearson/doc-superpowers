@@ -179,7 +179,7 @@ cmd_ledger_show() {
   _LG_IX_NEED_CONTRACTS=1
   if [ -n "$_OPT_refresh" ]; then _LG_REMOTE_FORCE=1; fi
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_q_run "$_LG_JQ_SHOW" "$s.out" --arg ref "$ref" --arg mode "$_LG_FORMAT"
   case "$_LG_QHEAD" in
     ok|archived) _lg_q_finish "$s.out" ;;
@@ -236,7 +236,7 @@ cmd_ledger_ls() {
   fi
   if [ -n "$_OPT_refresh" ]; then _LG_REMOTE_FORCE=1; fi
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_q_run "$_LG_JQ_LS" "$s.out" --arg mode "$_LG_FORMAT" --arg ledger "$_OPT_ledger" --arg sev "$_OPT_sev" \
     --arg open "$_OPT_open" --arg status "$status" --arg cluster "$_OPT_cluster"
   case "$_LG_QHEAD" in
@@ -286,7 +286,7 @@ cmd_ledger_find() {
     *) _lg_usage "give the words to look for" ;;
   esac
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_q_run "$_LG_JQ_FIND" "$s.out" --arg mode "$_LG_FORMAT" --arg words "$words"
   case "$_LG_QHEAD" in
     ok) _lg_q_finish "$s.out" ;;
@@ -421,7 +421,7 @@ cmd_ledger_link() {
      (if $srn == "1" then {f: "relations", v: $rn} else empty end)]') || _lg_die "jq failed (link values)"
   _LG_IX_NEED_CONTRACTS=1
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_q_run "$_LG_JQ_LINK" "$s.out" --arg ref "$ref" --argjson ops "$ops"
   case "$_LG_QHEAD" in
     ok) ;;
@@ -591,7 +591,7 @@ END { printf "%d %d %d %d %d\n", found, ins, NR, (cr > 0 ? 1 : 0), (last ~ /[^ \
 _lg_note_append() {
   local file="$1" hd="$2" line="$3" s found=0 ins=0 nr=0 cr=0 lastblank=0 eol=$'\n' finalnl=1
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   printf '%s\n' "$_LG_AWK_NOTE" > "$s.awk" || _lg_die "cannot write $s.awk"
   _lg_awkv "$hd"
   LC_ALL=C awk -v mode=lib -v head="$_LG_AV" -v bom="$_LG_BOM" -f "$_LG_LIB/frontmatter.awk" -f "$s.awk" < "$file" > "$s.pos" 2> "$s.err" \
@@ -627,7 +627,7 @@ _lg_note_append() {
 _lg_note_owed() {
   local file="$1" v="$2" s n first=""
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_cfg '.fields.owed | if type == "array" then .[] elif type == "string" then . else empty end | strings | select(. != "")' > "$s.on"
   { IFS= read -r first; } < "$s.on" 2>/dev/null || true
   if [ -z "$first" ]; then first=owed; printf 'owed\n' > "$s.on"; fi
@@ -681,7 +681,7 @@ cmd_ledger_note() {
       text="" ;;
   esac
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   ix=$(_lg_index) || exit "$?"
   jq -c --arg ref "$ref" --slurpfile c "$_LG_CFG" "$_LG_JQ_NOTE" "$ix" > "$s.res" || _lg_die "jq failed (resolving '$ref')"
   jq -r '.r, (.hosted // false), (.key // ""), (.v // "")' "$s.res" > "$s.f" || _lg_die "jq failed (resolving '$ref')"

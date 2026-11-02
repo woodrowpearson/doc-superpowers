@@ -173,7 +173,7 @@ _lg_ifl_load() {
     *) return 0 ;;
   esac
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   # shellcheck disable=SC2016  # jq source
   _lg_cfg 'def l: if type == "string" and (test("[\\n\\r]") | not) then . elif . == null then "" else "\u0007" + tojson end;
     (.inflight.enabled == true),
@@ -293,7 +293,7 @@ _lg_ifl_heads_check() {
   local s bad
   case "$_LG_IFL_PREFIX" in refs/heads/?*) ;; *) return 0 ;; esac
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   git for-each-ref --format='%(refname)%09%(upstream)%09%(worktreepath)' "$_LG_IFL_PREFIX/" > "$s.hc" 2> "$s.err" \
     || _lg_die "git for-each-ref failed (checking $_LG_IFL_PREFIX): $(head -n 1 "$s.err")"
   bad=$(LC_ALL=C awk -F '\t' -v ip="$_LG_IFL_PREFIX/" "$_LG_AWK_IFL_SHAPED"'
@@ -346,7 +346,7 @@ _lg_ifl_heads_check() {
 _lg_ifl_mirror_sync() {
   local snap="$1" s rec recf tmp n list adopt=0 heads=0 r l o
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   recf="$_LG_CACHE/remote/inflight-mirror.${_LG_IFL_PREFIX//\//%}.tsv"
   rec=$recf
   if [ ! -f "$rec" ]; then
@@ -451,7 +451,7 @@ _lg_ifl_mirror_sync() {
 _lg_ifl_fetch_produce() {
   local s
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   git for-each-ref --format='%(objectname) %(refname)' "$_LG_IFL_TMP/" > "$s.snap" 2> "$s.err" \
     || { head -n 1 "$s.err" >&2; return 1; }
   set -- "+$_LG_IFL_PREFIX/*:$_LG_IFL_TMP/*"
@@ -609,7 +609,7 @@ END {
 _lg_ifl_anc() {
   local s af a b r v tmp mb nl=$'\n'
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   af="$_LG_CACHE/branch/anc.tsv"
   [ -f "$af" ] || af=/dev/null
   : > "$s.new"
@@ -676,7 +676,7 @@ _lg_ifl_anc() {
 _lg_ifl_dedup() {
   local s
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   # Every ordered pair of a key's tips.
   LC_ALL=C awk -F '\t' '
     $1 != k { k = $1; n = 0 }
@@ -709,7 +709,7 @@ _lg_ifl_scan() {
     refs/heads/?*) rm="refs/remotes/$_LG_IFL_REMOTE/${_LG_IFL_PREFIX#refs/heads/}/" ;;
   esac
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   if [ "$_LG_IFL_AGE" -gt 0 ] 2>/dev/null; then
     now=${_LG_RNOW:-}
     [ -n "$now" ] || now=$(date +%s) || _lg_die "date failed"
@@ -971,7 +971,7 @@ _lg_ifl_sig() {
   local s
   [ -z "${_LG_IFL_SIG:-}" ] || [ "$_LG_IFL_SIGSRC" != "$_LG_IFL_SRC" ] || return 0
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_trailers "$_SCRATCH/lg-ifl-tr"
   _lg_tr_since
   _lg_ifl_plans "$_LG_IFL_SRC" "$_SCRATCH/lg-ifl-plans"
@@ -991,7 +991,7 @@ _lg_ifl_sig() {
 _lg_ifl_cold() {
   local tips="$1" mbs="$2" s dir o mb d n tmpd
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   dir="$_LG_CACHE/branch"
   _lg_ifl_sig
   { printf '^%s\n' "$_LG_IFL_B"; cat "$tips"; } > "$s.revs" || _lg_die "cannot write $s.revs"
@@ -1132,7 +1132,7 @@ END { printf "%s\n", (nr ? nr "\t" rs (m > 3 ? ", …" : "") : "") > refs }'
 _lg_ifl_resolve() {
   local cands="$1" out="$2" check="${3:-0}" s dir mbf tmp
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   dir="$_LG_CACHE/branch"
   _lg_ix_shallow
   mbf="$dir/mb-$_LG_IFL_B${_LG_SHALLOW:+.$_LG_SHALLOW}.tsv"
@@ -1173,7 +1173,7 @@ _lg_ifl_prepare() {
   _LG_IFL_CANDS=""
   [ "$_LG_IFL_ON" = 1 ] || return 0
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   if [ -z "$_LG_IFL_ME" ]; then _LG_IFL_ME=$(_lg_host_id "$_LG_IFL_HOSTCFG") || exit "$?"; fi
   # The base's commit, the current branch and the base's full name: one
   # call (two when HEAD is unborn or the base does not resolve). The
@@ -1437,7 +1437,7 @@ def dec: if test("[\u0001\u0002]") then gsub("\u0001"; "\n") | gsub("\u0002"; "\
 _lg_ifl_join() {
   local ix="$1" scan="$2" files="$3" out="$4" s prl heads ixd dir k tmp
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   prl="$_SCRATCH/lg-pr.prl"
   heads="$_SCRATCH/lg-pr.heads"
   [ -f "$prl" ] || prl=/dev/null
@@ -1480,7 +1480,7 @@ _lg_ifl_join() {
 _lg_ifl_join_lines() {
   local s
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   LC_ALL=C awk -F '\t' '{ print (NR - 1) "\t" $0 }' "$2" \
     | LC_ALL=C awk -v ixd="$1" -v heads="$5" -v me="$_LG_IFL_ME" -v files="$3" "$_LG_AWK_GLOB$_LG_AWK_IFL_JOIN" > "$s.join" \
     || _lg_die "cannot join the in-flight branches with the index"
@@ -1498,7 +1498,7 @@ _lg_ifl_overlay() {
   _LG_IFL_OV=""
   [ -n "$_LG_IFL_SCAN" ] || return 0
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   # An index built from a commit (publish) keeps its overlays apart.
   case "$ix" in
     */rev/index-*) dir="$_LG_CACHE/inflight/rev" ;;
@@ -1574,7 +1574,7 @@ _lg_branch_facts() {
   _lg_ifl_load
   [ "$_LG_IFL_ON" = 1 ] || _lg_die "in-flight awareness is off (config inflight.enabled)"
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _LG_IFL_ME=$(_lg_host_id "$_LG_IFL_HOSTCFG") || exit "$?"
   _LG_IFL_B=$(git rev-parse -q --verify "$_LG_IFL_BASEREF^{commit}" 2>/dev/null) || _lg_die "the base '$_LG_IFL_BASEREF' does not resolve"
   o=$(git rev-parse -q --verify "$o^{commit}" 2>/dev/null) || _lg_die "unknown commit: '$1'"
@@ -1672,7 +1672,7 @@ _lg_ifl_range_facts() {
     fi
   fi
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   # --raw -z: ":<mode> <mode> <blob> <blob> <status>" NUL <path> NUL per
   # file (--no-renames: always one path), the post-image blob in full.
   git diff --raw --no-abbrev -z --no-renames "$mb" "$t" -- > "$s.dz" 2> "$s.err" \
@@ -1717,7 +1717,7 @@ _lg_ifl_range_facts() {
 _lg_ifl_rel() {
   local scan="$1" bh="$2" bn="$3" bo="$4" out="$5" s
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   git rev-list "$bo" "^$_LG_IFL_B" -- > "$s.rl" 2> "$s.err" \
     || _lg_die "git rev-list failed (the branches behind '$bn'): $(head -n 1 "$s.err")"
   # Pass 1 lists the pairs to ask ("<a> <b>": is a an ancestor of b?) into
@@ -1865,7 +1865,7 @@ _lg_ifl_notices() {
   local ix="$1" br="$2" bh="$3" bn="$4" rel="$5" out="$6" s d n o ov oid
   local -a dg
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   # shellcheck disable=SC2016  # jq source
   jq -L "$_LG_LIB" -r --slurpfile br "$br" --rawfile rel "$rel" --arg bh "$bh" --arg bn "$bn" --arg base "$_LG_IFL_BASEREF" \
     --arg me "$_LG_IFL_ME" "$_LG_JQ_INCLUDE$_LG_JQ_NTC_FIND" "$ix" > "$s.find" || _lg_die "jq failed (the notices)"
@@ -1961,7 +1961,7 @@ cmd_ledger_notices() {
   if [ -n "$_OPT_fetch" ]; then fetch=1; fi
   want=${_OPT_branch:-}
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_ifl_load
   if [ "$_LG_IFL_ON" != 1 ]; then
     if [ -n "${_OPT_hook:-}" ]; then _lg_hook_done; fi
@@ -2204,7 +2204,7 @@ _lg_ifl_prune() {
   [ "${DOC_TOOLS_LEDGER_OFFLINE:-}" != 1 ] || return 0
   [ -n "${_LG_IFL_URL:-}" ] || return 0
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   rm -f -- "$s.note" "$s.die" "$s.sent" "$s.pruned"
   # The work in a subshell, errexit live there: whatever stops it — a
   # _lg_die (redefined there to leave its message), a failed command, an
@@ -2341,7 +2341,7 @@ cmd_ledger_inflight() {
   _lg_init inflight
   [ "${#_ARGS[@]}" = 0 ] || _lg_usage "unexpected argument '${_ARGS[0]}'"
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_ifl_load
   if [ -n "$_OPT_push" ]; then
     [ -z "$_OPT_fetch" ] && [ -z "${_OPT_branch:-}" ] || _lg_usage "--push takes no --fetch or --branch"

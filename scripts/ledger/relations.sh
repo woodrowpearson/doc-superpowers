@@ -164,7 +164,7 @@ _lg_tr_since() {
   local v="" base_ref="" b c="" s
   [ -z "$_LG_TR_SINCE_SET" ] || return 0
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   # shellcheck disable=SC2016  # jq source
   _lg_cfg '(.trailers.since | if . == null then "n" elif type == "string" then "s" + (gsub("[\n\r]"; " ")) else "b" end),
     (.base | if type == "string" then . else "" end)' > "$s.cfg"
@@ -217,7 +217,7 @@ _lg_tr_incl() {
   printf 'on\n' > "$out" || _lg_die "cannot write $out"
   [ "$_LG_TR_MODE" = commit ] || return 0
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   # The tips: "<a>..<tip>" → <tip>; a "^<bottom>" is no tip.
   { printf '^%s\n' "$_LG_TR_SINCE"
     LC_ALL=C awk '/^\^/ || $0 == "" { next } { i = index($0, ".."); print (i ? substr($0, i + 2) : $0) }' "$revs"; } > "$s.revs" \
@@ -245,7 +245,7 @@ _lg_msg_claims() {
     case "$a" in -*|'') _lg_die "internal: _lg_msg_claims: not a revision: '$a'" ;; esac
   done
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_trailers "$s.tr"
   printf '%s\n' "$@" > "$s.revl" || _lg_die "cannot write $s.revl"
   _lg_tr_incl "$s.tri" "$s.revl"
@@ -514,7 +514,7 @@ _lg_ix_recheck() {
   [ -n "$B" ] || return 0
   grep -q '^O' "$tab" || return 0
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
 
   # The sources terminal at B (see the header).
   LC_ALL=C awk -v o="$s.src" 'BEGIN { FS = "\002"; printf "" > (o ".p"); printf "" > (o ".t") }
@@ -703,7 +703,7 @@ cmd_ledger_related() {
   fi
   _LG_IX_NEED_CONTRACTS=1
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_q_run "$_LG_JQ_RELATED" "$s.out" --arg ref "$_LG_RREF" --arg mode "$_LG_FORMAT" --argjson depth "$depth"
   _lg_r_finish related "$s.out"
 }
@@ -816,7 +816,7 @@ cmd_ledger_suggest() {
   _lg_sg_top
   _LG_IX_NEED_CONTRACTS=1
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_q_run "$_LG_JQ_SUGGEST" "$s.out" --arg ref "$_LG_RREF" --arg mode "$_LG_FORMAT" --argjson top "$_LG_SG_TOP"
   _lg_r_finish suggest "$s.out"
 }
@@ -828,7 +828,7 @@ cmd_ledger_suggest() {
 _lg_suggest_into() {
   local s
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_q_run "$_LG_JQ_SUGGEST" "$s.sg" --arg ref "$1" --arg mode json --argjson top "$_LG_SG_TOP"
   [ "$_LG_QHEAD" = ok ] || _lg_die "internal: ledger new --suggest-contracts: '$1' did not resolve ($_LG_QHEAD)"
   jq -L "$_LG_LIB" -r "$_LG_JQ_INCLUDE$_LG_JQ_SG_TEXT_DEFS"'lg_sg_text(false)' "$s.sg" | tr -d '\000-\010\013-\037' >> "$2" \
@@ -888,7 +888,7 @@ cmd_ledger_recheck() {
   _lg_r_ref
   _LG_IX_NEED_CONTRACTS=1
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_q_run "$_LG_JQ_RECHECK" "$s.out" --arg ref "$_LG_RREF" --arg mode "$_LG_FORMAT"
   _lg_r_finish recheck "$s.out"
 }
@@ -1022,7 +1022,7 @@ _lg_r_plan_scan() {
 _lg_r_file_contracts() {
   local ix="$1" files="$2" out="$3" field="${4:-defined_in}" s
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   jq -r --arg f "$field" '(.contracts // [])[] | .id as $i | (.[$f] // [])[] | select(test("[[:cntrl:]]") | not) | "\($i)\u0001\(.)"' \
     "$ix" > "$s.g" || _lg_die "jq failed (contract globs)"
   LC_ALL=C awk -v globs="$s.g" "$_LG_AWK_GLOB"'
@@ -1099,7 +1099,7 @@ cmd_ledger_sweep() {
     _lg_usage "give --plan <path>, --files <path>…, --contracts <id>… or --keys <key>…"
   fi
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   : > "$s.files"
   : > "$s.spans"
   : > "$s.cells"
