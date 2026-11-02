@@ -476,6 +476,7 @@ doc-superpowers/
 │   └── conventions.md
 ├── README.md
 ├── LICENSE               # MIT
+├── SECURITY.md           # Reporting, threat model, tool versions
 ├── RELEASE-NOTES.md
 └── CLAUDE.md
 ```
@@ -488,12 +489,16 @@ The skill runs the bundled tooling in `scripts/` and reads `references/` from it
 |-----------|----------|-------|
 | `bash` | Yes, **≥ 3.2** | macOS's `/bin/bash` (3.2) is supported; nothing needs bash 4 |
 | `git` | Yes; **≥ 2.36** in a claims-enabled project | Already required by doc-superpowers. A claims check over a commit range that holds a merge reads the merge with `git show --remerge-diff` (git 2.36+); an older git makes that check indeterminate (exit 2) |
-| `jq` | Yes, **≥ 1.6** | `brew install jq` / `apt install jq`. 1.6 is the floor: the index writers use `--args` / `$ARGS.positional`. `doc-tools.sh` refuses an older jq with a clear error |
+| `jq` | Yes, **≥ 1.6**; 1.8.2 advised | `brew install jq` / `apt install jq`. 1.6 is the floor: the index writers use `--args` / `$ARGS.positional`. `doc-tools.sh` refuses an older jq with a clear error, and warns once a day below the versions in [SECURITY.md](SECURITY.md) (jq, git, gawk) |
 | `sha256sum` or `shasum` | Yes | Standard on Linux/macOS respectively |
 | `uv` | Only for doc-search (a project with `docs/search/config.json`) | It runs the `search/` package (Python 3.12, which uv fetches if missing); see `references/search.md` |
 | `gh` (GitHub CLI), authenticated | Only for the work ledger's GitHub adapters | `doc-superpowers:ledger-pr-gh`, `doc-superpowers:ledger-items-gh` and `ledger init --sources github`, when a project's `docs/ledger/config.json` names them |
 
 Everything else is the POSIX userland (`awk`, `sed`, `grep`, `mktemp`, …) as stock macOS and Linux ship it: no GNU-only tool (GNU sed, ripgrep) is needed. Where `awk` is mawk (Debian, Ubuntu), it must be 1.3.4 or newer: older mawk lacks the POSIX character classes (`[[:space:]]`) the tools use.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for how to report a vulnerability, what is treated as data and what as code, and which tool versions have known holes.
 
 ## Contributing
 

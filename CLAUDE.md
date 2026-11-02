@@ -8,6 +8,7 @@ Documentation orchestrator skill for Claude Code. Generates, audits, and maintai
 doc-superpowers/
 ├── .gitignore            # Git ignore rules (incl. the per-user Claude tier and index lock/temp files)
 ├── .gitattributes        # Self-installed git tier: docs/.doc-index.json → the doc-index merge driver
+├── .gitleaksignore       # Reviewed gitleaks false positives (check-ci.sh gitleaks)
 ├── .worktrees/           # Parallel-agent worktree location (gitignored; not created by the skill)
 ├── .claude/
 │   └── doc-superpowers/
@@ -22,6 +23,7 @@ doc-superpowers/
 ├── .codex/               # Codex installation guide
 │   └── INSTALL.md
 ├── .github/              # Self-installed CI tier (install.sh install --ci: installer output, never hand-edited)
+│   ├── dependabot.yml    # Dependabot over search/uv.lock (hand-written, not installer output)
 │   ├── scripts/          # Vendored byte copies: doc-tools.sh + doc-superpowers-steps/ (the step scripts the workflows run)
 │   │                     #   (no ledger/ or adapters/: the ledger helper set ships only with docs/ledger/config.json)
 │   └── workflows/
@@ -101,7 +103,7 @@ doc-superpowers/
 │           │   ├── commit-and-push.sh    # Seal + commit the fragment; push only while the branch is at the checkout
 │           │   ├── fragment-lib.sh       # Sourced fragment line rules (markers, hash line, sha256) the helpers share
 │           │   └── RELEASE-NOTES.next.README.md # Fragment-format spec (producer/consumer contract)
-│           └── doc-superpowers-steps/    # run: step bodies of every template (freshness-check, resolve-auth, prepare-agent, commit-changes, pr-guard, sentinel-check, write-context, verify-fragment, precheck, claims-check, ledger-publish)
+│           └── doc-superpowers-steps/    # run: step bodies of every template (install-jq, freshness-check, resolve-auth, prepare-agent, commit-changes, pr-guard, sentinel-check, write-context, verify-fragment, precheck, claims-check, ledger-publish)
 ├── references/
 │   ├── doc-spec.md       # Templates for generated docs (C4, ERD, workflows, agentic, specs, ADRs)
 │   ├── agent-prompt-template.md   # Review agent prompt template + scope focus areas
@@ -142,6 +144,7 @@ doc-superpowers/
 │   └── fixtures/         # lib.sh + <eval>/setup.sh — builds each eval's scenario in an empty dir, self-checked
 ├── README.md             # Installation, usage, examples
 ├── LICENSE               # MIT
+├── SECURITY.md           # Reporting, threat model (what is data, what is code), tool versions
 ├── RELEASE-NOTES.md      # Semantic versioned changelog
 └── CLAUDE.md             # This file
 ```
@@ -172,7 +175,7 @@ doc-superpowers/
 | `scripts/test-spec-status-model.sh` | Test suite pinning the canonical Spec Status Model wording and its call sites, and the skill prompt ↔ tool contract: tool resolution, index-write routing, review-pr base, safety rules, templates, the prompts' `--allowedTools`, and `evals/evals.json` (fields, regexes, fixtures run); also the cross-client packaging (manifests, INSTALL pins) and the OpenCode plugin, run under `node` (a loud SKIP without node locally; `DOC_SP_REQUIRE_NODE=1`, set by tests.yml, makes it a FAIL), with a 12,000-char ceiling on the text its transform emits; the `SKILL.md` frontmatter (description ≤ 1,536 chars, no block scalar) and every `references/` / `scripts/` path it names; the help text and the dispatcher's routes; the `setup` and `help` actions and `references/setup.md` (its sections, every flag `setup.sh` parses, every catalog id); and the leak scan (`leak-scan.sh`) on a fixture and on this checkout | Changing spec status transition rules, roles, or vocabulary; changing what SKILL.md / references tell an agent to run; adding an eval; changing a manifest or the OpenCode plugin; growing `references/tool-mappings.md` past the ceiling |
 | `scripts/test-doc-pr-release.sh` | Test suite for the CI workflow helpers (extract-context, update-pr-body, commit-and-push, the `run:` step scripts in doc-superpowers-steps/) + YAML placeholder substitution, template structure/wiring, and the installed templates' fail-closed / least-privilege properties | Adding tests for fragment-producer, CI-step or template features |
 | `scripts/hooks/ci/doc-pr-release.yml` | AI per-PR release-notes fragment producer — drafts `RELEASE-NOTES.next/PR-<N>.md` on every push | Changing the producer workflow, prompt, or post-Claude verification |
-| `scripts/hooks/ci/doc-pr-release/*.sh`, `scripts/hooks/ci/doc-superpowers-steps/*.sh` | Producer helpers (extract-context, update-pr-body, commit-and-push, and `fragment-lib.sh`, the fragment line rules they source; shipped to `.github/scripts/doc-pr-release/` while `doc-pr-release` is installed) and every template's `run:` step bodies (each shipped to `.github/scripts/doc-superpowers-steps/` while an installed workflow runs it, or runs a step script that runs it; `prepare-agent.sh` has no marketplace-URL default: the AI templates' env carries the installer-rendered `DOC_SUPERPOWERS_MARKETPLACE_URL`) | Changing fragment context schema, PR-body editing, push logic, or any workflow step body |
+| `scripts/hooks/ci/doc-pr-release/*.sh`, `scripts/hooks/ci/doc-superpowers-steps/*.sh` | Producer helpers (extract-context, update-pr-body, commit-and-push, and `fragment-lib.sh`, the fragment line rules they source; shipped to `.github/scripts/doc-pr-release/` while `doc-pr-release` is installed) and every template's `run:` step bodies (each shipped to `.github/scripts/doc-superpowers-steps/` while an installed workflow runs it, or runs a step script that runs it; `prepare-agent.sh` has no marketplace-URL default: the AI templates' env carries the installer-rendered `DOC_SUPERPOWERS_MARKETPLACE_URL` and `DOC_SUPERPOWERS_COMMIT`, the pin it checks; `install-jq.sh` holds the jq pin and its digests; `commit-changes.sh`, `commit-and-push.sh` and `ledger-publish.sh` carry the same marked git-token block) | Changing fragment context schema, PR-body editing, push logic, or any workflow step body |
 | `scripts/hooks/ci/doc-pr-release/RELEASE-NOTES.next.README.md` | Fragment-format spec — producer/consumer contract for `RELEASE-NOTES.next/PR-*.md` | Changing fragment markers, hash protocol, or consumer rules |
 | `scripts/merge-doc-index.sh` | Custom git merge driver for .doc-index.json — base-aware per-key three-way merge during merge/rebase/revert; conflict markers + exit 1 when it cannot decide | Changing merge conflict resolution logic |
 | `scripts/test-merge-driver.sh` | Test suite for merge-doc-index.sh | Adding tests for merge driver features |
@@ -196,13 +199,14 @@ doc-superpowers/
 | `GEMINI.md`, `.cursor-plugin/INSTALL.md`, `.codex/INSTALL.md`, `.opencode/INSTALL.md` | Per-client install guides, and Gemini CLI's context file (`gemini-extension.json` loads `GEMINI.md`); each links to `references/tool-mappings.md` instead of copying it | Adding or changing a client's install steps (pinned by `test-spec-status-model.sh`) |
 | `.opencode/plugins/doc-superpowers.js` | OpenCode ESM plugin | Changing skill registration or tool mapping injection |
 | `.github/workflows/tests.yml` | This repo's CI: the seven suites under bash 5.x (ubuntu) and `/bin/bash` 3.2 (macOS), the doc-search pytest suite on both legs (after `astral-sh/setup-uv`, pinned by sha), the self-install drift check, `check-version`, and on pushes to `main` the release tag on origin (`check-version --tag`) — every step a `scripts/check-ci.sh <check>` call, so it carries no check body of its own | Adding a suite, a CI requirement, or a self-installed tier (add the check to `check-ci.sh` first) |
-| `scripts/check-ci.sh` | Maintainer: runs locally exactly what tests.yml runs — the toolchain check, the seven suites under every bash it detects (5.x and `/bin/bash` 3.2), `search` (the doc-search pytest suite, once: `uv run --project search --frozen --all-extras pytest -q`), `self-install`, `check-version`, `tag` (`--warn` locally), and `claude plugin validate .` when the claude CLI is on PATH (not in CI: no authenticated CLI there); `DOC_SP_REQUIRE_{YAML_PARSER,NODE,SHELLCHECK,UV}` default to 1. `--fast` (no `search`): one interpreter (3.2 when present), the quick suites, self-install, check-version. `--bash PATH` (repeatable), a check name to run just that one, `--verbose` to stream | Adding a CI check (then a tests.yml step naming it) |
+| `scripts/check-ci.sh` | Maintainer: runs locally exactly what tests.yml runs — the toolchain check, the seven suites under every bash it detects (5.x and `/bin/bash` 3.2), `search` (the doc-search pytest suite, once: `uv run --project search --frozen --all-extras pytest -q`), `self-install`, `zizmor` (the rendered templates and this repo's workflows), `dep-audit` (search/uv.lock's known vulnerabilities; needs the network), `gitleaks` (the history), `check-version`, `tag` (`--warn` locally), and `claude plugin validate .` when the claude CLI is on PATH (not in CI: no authenticated CLI there); `DOC_SP_REQUIRE_{YAML_PARSER,NODE,SHELLCHECK,UV,GITLEAKS}` default to 1. `--fast` (no `search`): one interpreter (3.2 when present), the quick suites, self-install, check-version. `--bash PATH` (repeatable), a check name to run just that one, `--verbose` to stream | Adding a CI check (then a tests.yml step naming it) |
 | `scripts/check-self-install.sh` | Maintainer: the self-installed CI tier is what `install --ci` writes today, and `.gitattributes` routes the index to the merge driver (was tests.yml's inline drift step) | Changing what the installer vendors or renders |
 | `scripts/install-maintainer-hooks.sh` | Maintainer: `install \| uninstall \| status` of an opt-in pre-push block running `check-ci.sh --fast` (stdin untouched; after a shell hook's `#!`; refuses the git tier's whole-file hook — uninstall `--git`, install this, re-install `--git`); `DOC_SP_SKIP_CHECK_CI=1` skips it | Changing the maintainer hook |
 | `scripts/leak-scan.sh` | Leak scan over `git ls-files`: home-dir paths, `/Volumes/…`, emails (example / test / noreply domains allowed), token-shaped strings; dated `docs/plans/` and `docs/issues/` records, `docs/archive/`, `docs/superpowers/` are allowlisted for paths only; a `leak-scan:allow` marker skips a line. Run by `test-spec-status-model.sh` | Changing a leak class or the allowlist |
 | `.github/workflows/doc-freshness-*.yml`, `.github/scripts/`, `.claude/doc-superpowers/installed.json` | This repo's own installed CI tier — installer output | Never by hand: after changing a CI template, `doc-tools.sh` or a CI helper script, run `bash scripts/hooks/install.sh install --ci` and commit what it writes (tests.yml fails on drift) |
 | `.gitattributes` | The git tier's one committed piece: the `docs/.doc-index.json` merge-driver block — installer output | Never by hand: `bash scripts/hooks/install.sh install --git` writes it (tests.yml's drift step fails without it, and names `install --git`) |
 | `RELEASE-NOTES.md` | Version history | Every release |
+| `SECURITY.md` | Reporting, supported versions, the threat model, the tool-version table | Changing what repository content can run, or a floor or pin (with `_tool_advice` in `doc-tools.sh` and `install-jq.sh`) |
 | `README.md` | User-facing docs | Feature changes |
 
 ## Commands

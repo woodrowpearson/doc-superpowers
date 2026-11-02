@@ -7,7 +7,7 @@
 - [ ] [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - [ ] Git installed — **2.36 or newer** in a project that opts in to spec claims (`docs/spec-claims/`): a claims check over a commit range that holds a merge reads its hand resolutions with `git show --remerge-diff`, and an older git makes that check indeterminate (exit 2)
 - [ ] bash **3.2 or newer** — macOS's `/bin/bash` is enough; nothing needs bash 4
-- [ ] `jq` **1.6 or newer** installed (`brew install jq` / `apt install jq`) — required by bundled freshness tooling, which refuses an older jq
+- [ ] `jq` **1.6 or newer** installed (`brew install jq` / `apt install jq`) — required by bundled freshness tooling (1.8.2 or newer has the security fixes: see `SECURITY.md`), which refuses an older jq
 - [ ] `sha256sum` (Linux) or `shasum` (macOS) — one of them; the bundled tooling refuses to run with neither
 - [ ] A project to document (any language, any framework)
 
