@@ -63,6 +63,9 @@ jobs:
       - name: Fetch the doc-superpowers plugin (the installed version)
         id: plugin
         if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.affected != '0'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: .github/scripts/doc-superpowers-steps/prepare-agent.sh
 
       - name: Verify spec compliance
@@ -104,7 +107,7 @@ jobs:
             Run /doc-superpowers spec-verify --mode=review for pull request
             #${{ github.event.pull_request.number }}, against the specs in docs/specs/
             that govern its changes. Its --changed-files are the files
-            `git diff --name-only --no-renames ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}`
+            `git diff --name-only --no-renames ${{ steps.plugin.outputs.merge_base }}...${{ github.event.pull_request.head.sha }}`
             lists (git prints a name holding a non-ASCII byte, `"`, `\` or a tab
             in double quotes with C escapes: pass it unquoted).
             Skip review step 3c (Claims): this workflow's `claims` job runs

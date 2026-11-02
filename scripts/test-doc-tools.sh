@@ -220,7 +220,22 @@ test_tool_advice_names_versions_with_known_holes() {
   _advice "$ok_jq" "git version 2.54.0" "$ok_awk"
   assert_contains "$ADVICE_ERR" "WARN: git 2.54.0" "git 2.54 on a ledger host: warned"
   assert_contains "$ADVICE_ERR" "2.55.0" "…naming the version that masks a remote's control characters"
+  # A ledger host has its own stamp: a run elsewhere that day does not use up
+  # the one warning only a ledger host gets.
+  local h
+  h=$(harness_mktemp_d advice)
+  _advice_tools "$h" "$ok_jq" "git version 2.54.0" "$ok_awk"
+  rm -rf "$XDG_CACHE_HOME/doc-superpowers" docs/ledger
+  PATH="$h:$PATH" DOC_SUPERPOWERS_NO_TOOL_ADVICE= "$DOC_TOOLS" check-freshness > /dev/null 2>&1 || true
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  assert_contains "$(PATH="$h:$PATH" DOC_SUPERPOWERS_NO_TOOL_ADVICE= "$DOC_TOOLS" check-freshness 2>&1 >/dev/null || true)" "WARN: git 2.54.0" \
+    "a ledger host warns after a non-ledger run the same day"
   rm -rf docs/ledger
+
+  # A hook that discards stderr must not spend the day's advice.
+  assert_contains "$(grep -F '"$DOC_TOOLS" claims "$@" </dev/null 2>/dev/null' "$SCRIPT_DIR/hooks/git/pre-push")" "DOC_SUPERPOWERS_NO_TOOL_ADVICE=1" "pre-push's silent claims call"
+  assert_contains "$(grep -F 'check-freshness --tree "$tree" --code-refs-from - 2>"$work/err.scoped"' "$SCRIPT_DIR/hooks/git/pre-commit")" "DOC_SUPERPOWERS_NO_TOOL_ADVICE=1" "pre-commit's captured freshness call"
 
   # Once a day, and off when asked.
   local d second

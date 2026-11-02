@@ -1361,7 +1361,8 @@ _yaml_json() {
 }
 
 AI_WORKFLOWS="doc-audit-update doc-review-pr doc-release doc-spec-verify doc-pr-full-cycle doc-pr-release"
-AI_USES="anthropics/claude-code-action@"
+# The action and its base-action, which the push-triggered workflows use.
+AI_USES="anthropics/claude-code-action"
 ALL_REPO=$(installed_repo --all --workflows=all) || ALL_REPO=""
 # --workflows=all skips doc-ledger-publish on a host without
 # docs/ledger/config.json (final review OPS-I2); named, it installs: every
@@ -1428,7 +1429,7 @@ test_i8_ai_steps_runnable_and_scoped() {
       # shellcheck disable=SC2016  # jq program
       out=$(jq -r "$_JQ_TOOLS"'
         "\(.wf) / \(.job) / \(.step)" as $id
-        | ( (if .with.github_token != "${{ github.token }}" then "github_token is not ${{ github.token }}" else empty end),
+        | ( (if (.wf != "doc-audit-update" and .wf != "doc-release") and .with.github_token != "${{ github.token }}" then "github_token is not ${{ github.token }}" else empty end),
             (if ((.with.plugins // "") | split("\n") | map(gsub("^\\s+|\\s+$"; "")) | any(. == "doc-superpowers@doc-superpowers")) | not
              then "plugins does not install doc-superpowers@doc-superpowers" else empty end),
             (if ((.with.plugin_marketplaces // "") | test("^\\$\\{\\{ *steps\\.[A-Za-z0-9_-]+\\.outputs\\.marketplace *\\}\\}$")) | not
@@ -1479,6 +1480,7 @@ test_i8_pins_carry_exact_versions() {
         *"uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1") ;;
         *"uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0") ;;
         *"uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88") ;;
+        *"uses: anthropics/claude-code-action/base-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88") ;;
         *) bad="${bad}    $(basename "$f"):$l"$'\n' ;;
       esac
     done < <(grep -E '^[[:space:]]*(-[[:space:]]+)?uses:' "$f")
@@ -1960,7 +1962,7 @@ test_templates_keep_no_git_token_on_disk() {
       .jobs | to_entries[] | .key as $job | .value.steps[]
       | if ((.uses // "") | startswith("actions/checkout@")) and (.with["persist-credentials"] != false)
         then "\($wf) / \($job): a checkout without persist-credentials: false\n"
-        elif ((.uses // "") | startswith($u)) and ((.with.use_commit_signing | tostring) != "true")
+        elif ((.uses // "") | startswith($u + "@")) and ((.with.use_commit_signing | tostring) != "true")
         then "\($wf) / \($job): the AI action without use_commit_signing (it would write the token into the remote URL)\n"
         elif ((.run // "") | test("commit-changes\\.sh --allow|commit-and-push\\.sh|ledger-publish\\.sh")) and (.env.DOC_SUPERPOWERS_GIT_TOKEN != "${{ github.token }}") and ((.run // "") | test("--check-only") | not)
         then "\($wf) / \($job): a step that pushes without DOC_SUPERPOWERS_GIT_TOKEN\n"
@@ -2117,6 +2119,56 @@ test_install_jq() {
   run_installed "$repo" "$out" PATH="$d:$BASH_PATH" GITHUB_PATH="$out.path" -- "$STEPS_DIR/install-jq.sh" || rc=$?
   assert_eq "0" "$rc" "no pinned build for this platform: exits 0"
   assert_contains "$(cat "$out.log")" "::warning::" "…with a ::warning::"
+}
+
+test_ai_steps_use_an_action_their_triggers_can_reach() {
+  echo "Test: a workflow triggered by push uses base-action: the full action throws on a push event, so its agent would never run"
+  local wf
+  for wf in doc-audit-update doc-release; do
+    assert_eq "true" "$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq '(.on // .true) | has("push")')" "$wf runs on push"
+    assert_eq "base-action" "$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r --arg u "$AI_USES" \
+      '[.jobs[].steps[] | select((.uses // "") | startswith($u)) | .uses | capture("claude-code-action(?:/(?<b>[a-z-]+))?@") | .b // "action"] | unique | join(",")')" \
+      "…through base-action"
+    assert_eq "" "$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r --arg u "$AI_USES" \
+      '.jobs[].steps[] | select((.uses // "") | startswith($u)) | .with | keys[] | select(. == "github_token" or . == "use_commit_signing")')" \
+      "…passing it no input it does not have"
+  done
+  for wf in doc-review-pr doc-spec-verify doc-pr-full-cycle doc-pr-release; do
+    assert_eq "action" "$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r --arg u "$AI_USES" \
+      '[.jobs[].steps[] | select((.uses // "") | startswith($u)) | .uses | capture("claude-code-action(?:/(?<b>[a-z-]+))?@") | .b // "action"] | unique | join(",")')" \
+      "$wf (PR events): the full action"
+  done
+}
+
+test_pr_prompts_survive_the_actions_shallow_fetch() {
+  echo "Test: the action's own --depth=1 fetch makes the clone shallow before the agent starts, so a PR's prompt names a merge base found before it"
+  local repo out rc base head mb wf
+  repo=$(new_repo)
+  mb=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" checkout -q -b feature
+  git -C "$repo" commit -q --allow-empty -m feature
+  head=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" checkout -q main
+  git -C "$repo" commit -q --allow-empty -m "base moved on"
+  base=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" checkout -q feature
+  local url pin
+  url=$(marketplace_remote 1.2.3) || { assert_true "marketplace fixture" false; return 0; }
+  pin=$(git --git-dir="${url#file://}" rev-parse 'v1.2.3^{commit}')
+  out="$(harness_mktemp_d step)/out"
+  rc=0
+  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v1.2.3 DOC_SUPERPOWERS_COMMIT="$pin" DOC_SUPERPOWERS_MARKETPLACE_URL="$url" BASE_SHA="$base" HEAD_SHA="$head" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
+  assert_eq "0" "$rc" "prepare-agent.sh with a PR's two commits: exits 0"
+  assert_eq "$mb" "$(_out "$out" merge_base)" "merge_base= the commit the branch forked from"
+  rc=0
+  run_installed "$repo" "$out" DOC_SUPERPOWERS_VERSION=v1.2.3 DOC_SUPERPOWERS_COMMIT="$pin" DOC_SUPERPOWERS_MARKETPLACE_URL="$url" -- "$STEPS_DIR/prepare-agent.sh" || rc=$?
+  assert_eq "0|" "$rc|$(_out "$out" merge_base)" "not a PR's job: no merge_base"
+  for wf in doc-review-pr doc-spec-verify doc-pr-full-cycle; do
+    assert_not_contains "$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r '[.jobs[].steps[].with.prompt // empty] | join("\n")')" "base.sha" \
+      "$wf: the prompt does not range from the base's tip"
+    assert_contains "$(_yaml_json "$ALL_REPO/.github/workflows/$wf.yml" | jq -r '[.jobs[].steps[].with.prompt // empty] | join("\n")')" 'steps.plugin.outputs.merge_base' \
+      "$wf: …but the merge base found before the agent"
+  done
 }
 
 test_shipped_files_name_no_personal_url() {
@@ -2419,6 +2471,8 @@ test_i8_prepare_agent
 test_shipped_files_name_no_personal_url
 test_templates_keep_no_git_token_on_disk
 test_templates_pin_jq_before_any_step_script
+test_ai_steps_use_an_action_their_triggers_can_reach
+test_pr_prompts_survive_the_actions_shallow_fetch
 test_install_jq
 test_git_token_helper_answers_only_for_the_jobs_host
 test_i8_commit_changes
