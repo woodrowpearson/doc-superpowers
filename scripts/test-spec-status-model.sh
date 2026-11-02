@@ -461,7 +461,7 @@ assert_contains "$_review" '[ -s "$CHANGED" ] ||' "review-pr: an empty diff stop
 # The range a CI prompt names (its base and head SHAs) is the form review-pr
 # takes from the caller.
 assert_contains "$_review" '<base-sha>...<head-sha>' "review-pr takes the caller's <base-sha>...<head-sha> range"
-assert_contains "$(cat "$CI/doc-review-pr.yml")" 'base.sha }}...${{ github.event.pull_request.head.sha }}' \
+assert_contains "$(cat "$CI/doc-review-pr.yml")" 'merge_base }}...${{ github.event.pull_request.head.sha }}' \
   "…which is the form doc-review-pr's prompt passes"
 # Execute review-pr's changed-file block the way an agent would, in four layouts.
 _review_block=$(_bash_block_after "$_review" '2. **Identify changed files.**')

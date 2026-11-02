@@ -57,6 +57,9 @@ _tool_advice() {
   local cache="${XDG_CACHE_HOME:-${HOME:-}/.cache}" stamp today seen="" floor v
   [ "$cache" != /.cache ] || return 0
   stamp="$cache/doc-superpowers/tool-advice"
+  # A ledger host has one more thing to say: its own stamp, so that a run in
+  # another repository that day does not use it up.
+  [ ! -f docs/ledger/config.json ] || stamp="$stamp-ledger"
   today=$(date +%Y-%m-%d)
   { [ ! -r "$stamp" ] || IFS= read -r seen < "$stamp"; } 2>/dev/null || true
   [ "$seen" != "$today" ] || return 0

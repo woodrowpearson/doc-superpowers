@@ -95,12 +95,11 @@ jobs:
 
       - name: Draft release notes
         if: steps.precheck.outputs.skip != 'true'
-        uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88
+        # base-action: the full action throws on a push event, before any agent
+        # runs. This one reads no event and touches no git config, and the agent
+        # needs no token: the commit step pushes.
+        uses: anthropics/claude-code-action/base-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88
         with:
-          # No token in the remote URL: without this the action writes it into
-          # .git/config, where the agent can read it. The agent commits nothing.
-          use_commit_signing: true
-          github_token: ${{ github.token }}
           claude_code_oauth_token: ${{ steps.auth.outputs.use_oauth == 'true' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           anthropic_api_key: ${{ steps.auth.outputs.use_oauth == 'false' && secrets.ANTHROPIC_API_KEY || '' }}
           plugin_marketplaces: ${{ steps.plugin.outputs.marketplace }}

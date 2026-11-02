@@ -226,7 +226,7 @@ trap 'rm -rf "$work"' EXIT
 # shellcheck disable=SC2329  # run by _bounded
 _check() {
   local result added refs wide
-  result=$(printf '%s\n' "$staged" | "$DOC_TOOLS" check-freshness --tree "$tree" --code-refs-from - 2>"$work/err.scoped") \
+  result=$(printf '%s\n' "$staged" | DOC_SUPERPOWERS_NO_TOOL_ADVICE=1 "$DOC_TOOLS" check-freshness --tree "$tree" --code-refs-from - 2>"$work/err.scoped") \
     || { cat "$work/err.scoped" >&2; return 1; }
   if grep -qxF docs/.doc-index.json <<<"$staged"; then
     added=$( { git cat-file blob "$tree:docs/.doc-index.json" \

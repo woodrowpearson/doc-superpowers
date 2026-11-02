@@ -20,6 +20,12 @@
 #                                    (the plugin's own repository, or install
 #                                    --ci --marketplace-url). No default: a
 #                                    project's vendored copy names no URL
+#   BASE_SHA, HEAD_SHA               a PR's two commits, on a PR's job. On a PR
+#                                    event the action runs `git fetch --depth=1`
+#                                    of the base before the agent starts, which
+#                                    makes the clone shallow at the base's tip: a
+#                                    base that moved on then has no merge base
+#                                    with the head. So it is found here.
 #   RUNNER_TEMP, GITHUB_OUTPUT       set by the runner
 #
 # The agent edits files in the checkout, and a mistake could reach the
@@ -34,6 +40,7 @@
 #
 # Outputs: marketplace=<absolute directory>; head=<the checkout's HEAD> (the
 # commit step checks the agent left it there); checker=<the checker snapshot>.
+# merge_base=<the PR's merge base>, when BASE_SHA and HEAD_SHA are given.
 #
 # Exit codes: 0; 1 (with an ::error::) when the version is not a release, the
 # commit pin is not a commit id, the marketplace URL is not set, its tag cannot
@@ -91,5 +98,9 @@ esac
 mkdir -p "${checker%/*}" && rm -f "$checker" && cp "$src" "$checker" && chmod 0555 "$checker" \
   || err "cannot snapshot the commit checker to $checker"
 
-printf 'marketplace=%s\nhead=%s\nchecker=%s\n' "$mp" "$head" "$checker" >> "$GITHUB_OUTPUT"
+merge_base=""
+if [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
+  merge_base=$(git merge-base "$BASE_SHA" "$HEAD_SHA") || err "no merge base of $BASE_SHA and $HEAD_SHA (the checkout needs fetch-depth: 0)"
+fi
+printf 'marketplace=%s\nhead=%s\nchecker=%s\nmerge_base=%s\n' "$mp" "$head" "$checker" "$merge_base" >> "$GITHUB_OUTPUT"
 echo "doc-superpowers $VERSION marketplace at $mp; the agent starts from $head."

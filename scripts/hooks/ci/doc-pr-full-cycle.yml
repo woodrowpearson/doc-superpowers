@@ -81,6 +81,9 @@ jobs:
       - name: Fetch the doc-superpowers plugin (the installed version)
         id: plugin
         if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.affected != '0'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: .github/scripts/doc-superpowers-steps/prepare-agent.sh
 
       - name: Review, update, diagram, and sync docs
@@ -122,7 +125,7 @@ jobs:
 
             Run these doc-superpowers actions, in order, on pull request
             #${{ github.event.pull_request.number }} (its changes:
-            `git diff ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}`):
+            `git diff ${{ steps.plugin.outputs.merge_base }}...${{ github.event.pull_request.head.sha }}`):
 
             1. /doc-superpowers review-pr — the documentation impact; stale or
                missing docs.
