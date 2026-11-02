@@ -44,7 +44,7 @@ _LG_CONTRACT_RE='\A[a-z][a-z0-9_-]*:[^[:space:]]+\z'
 _lg_registry_findings() {
   local reg="$1" tracked="$2" out="$3" s declares rc=0
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   jq -c --arg cre "$_LG_CONTRACT_RE" '
     def strlist: type == "array" and all(.[]; type == "string");
     def f($c; $d): {class: $c, detail: $d};
@@ -124,7 +124,7 @@ _lg_validate_registry() {
   local reg s rc=0
   reg=$(_lg_registry) || exit "$?"
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   git ls-files -z --cached > "$s.tracked" 2> "$s.err" \
     || _lg_die "git ls-files failed: $(head -n 3 "$s.err" 2>/dev/null)"
   _lg_registry_findings "$reg" "$s.tracked" "$s.findings"
@@ -522,7 +522,7 @@ BEGIN {
   close(toks)
   while ((getline vm_l < fin) > 0) { vm_i = index(vm_l, "\t"); if (vm_i) VM_FIN[substr(vm_l, 1, vm_i - 1)] = substr(vm_l, vm_i + 1) }
   close(fin)
-  vm_nsn = split(supn, VM_SN, " ")
+  vm_nsn = split(supn, VM_NAMES, " ")
   vm_k = 0
   while ((getline vm_l < globs) > 0) {
     vm_k++
@@ -556,7 +556,7 @@ function vm_emit(f,   i, j, nm, v, r) {
   if (f in VM_AMB) print VM_P[f] > amb
   else print "{\"path\":" js(VM_P[f]) "," substr(r, 2)
   for (j = 1; j <= vm_nsn; j++) {
-    nm = VM_SN[j]
+    nm = VM_NAMES[j]
     if (!(nm in FV)) continue
     v = FV[nm]
     if (v ~ /^".*"$/) {
@@ -643,7 +643,7 @@ _lg_v_keymap() {
   local toks="$1" fin="$2" globs="$3" out="$4" s names supn d rc=0
   local specs=()
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   : > "$out"
   [ -s "$toks" ] || return 0
   # The field names (every candidate) as an ERE alternation; superseded_by's
@@ -770,7 +770,7 @@ _lg_v_staged_list() {
 _lg_v_registry_into() {
   local s
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_registry_findings "$1" "$2" "$s.rf"
   jq -c '{class: "registry", severity: "block", path: null, key: null, detail: "\(.class) \(.detail)"}' "$s.rf" >> "$3" \
     || _lg_die "jq failed (registry findings)"
@@ -785,7 +785,7 @@ _lg_validate_staged() {
   local out="$1" s reg
   _lg_v_rr
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_parse_prep
   _lg_v_staged_list "$s"
   : > "$out"
@@ -836,7 +836,7 @@ _lg_validate_all() {
   if [ "$_OPT_registry" = 1 ]; then
     local s
     _lg_scratch_name
-    s=$_LG_SN
+    s=$_LG_SCRATCH_NAME
     git ls-files -z --cached > "$s.tracked" 2> "$s.err" \
       || _lg_die "git ls-files failed: $(head -n 3 "$s.err" 2>/dev/null)"
     reg=$(_lg_registry) || exit "$?"
@@ -881,7 +881,7 @@ _lg_v_rr_all() {
   local ix="$1" out="$2" s base A all=0 d
   local specs=()
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   base=$(jq -r '.built.base // ""' "$ix") || _lg_die "jq failed (the index's base)"
   : > "$s.old"
   if [ -z "$base" ]; then
@@ -959,7 +959,7 @@ _lg_v_config_findings() {
 _lg_validate_plan() {
   local plan="$1" out="$2" s sev=advisory
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   case "$plan" in -*) plan="./$plan" ;; esac
   [ -f "$plan" ] || _lg_die "cannot read the plan '$1': not a file"
   cat -- "$plan" > "$s.plan" 2>/dev/null || _lg_die "cannot read the plan '$1'"
@@ -1001,7 +1001,7 @@ _lg_validate_plan() {
 _lg_validate_pushed() {
   local range="$1" out="$2" s
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   case "$range" in
     *...*|*..*..*) _lg_usage "--pushed takes one <a>..<b> range (got '$range')" ;;
     *..*) ;;
@@ -1045,7 +1045,7 @@ _lg_validate_pushed() {
 _lg_v_undeclared() {
   local range="$1" out="$2" s rc msg=""
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   rm -f -- "$s.fail"
   set +e
   (
@@ -1136,7 +1136,7 @@ $core[0] as $C
 _lg_v_undeclared_run() {
   local range="$1" out="$2" s a b x ac bc base="" cerr r mb="" hasf=false
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   : > "$out"
   x=$(_lg_cfg '(.validate // {undeclared_contract_change: true}) | if type == "object" then .undeclared_contract_change else null end
     | if . == true then "on" elif . == false then "off" else "bad" end') || exit "$?"
@@ -1207,7 +1207,7 @@ _lg_v_undeclared_run() {
 _lg_v_finish() {
   local f="$1" s rc
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   # Line 1: the exit code; then the payload (JSON) or the text lines.
   jq -s -r --arg fmt "$_LG_FORMAT" "$_LG_JQ_VALIDATE_DEFS"'
     sort_by([(if .class == "registry" then 0 else 1 end), (if .severity == "block" then 0 else 1 end),
@@ -1250,7 +1250,7 @@ cmd_ledger_validate() {
   if [ "$_OPT_registry" = 1 ] && [ -n "$_OPT_plan$_OPT_pushed" ]; then
     local s
     _lg_scratch_name
-    s=$_LG_SN
+    s=$_LG_SCRATCH_NAME
     git ls-files -z --cached > "$s.tracked" 2> "$s.err" \
       || _lg_die "git ls-files failed: $(head -n 3 "$s.err" 2>/dev/null)"
     reg=$(_lg_registry) || exit "$?"

@@ -314,8 +314,8 @@ _lg_status_class() {
   esac
   t=${1-}
   _lg_scratch_name
-  list="$_LG_SN.sc-list"
-  out="$_LG_SN.sc-out"
+  list="$_LG_SCRATCH_NAME.sc-list"
+  out="$_LG_SCRATCH_NAME.sc-out"
   case "$t" in
     *$'\n'*) t="" ;;
   esac

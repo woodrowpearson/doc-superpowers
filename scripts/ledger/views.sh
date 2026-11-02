@@ -76,7 +76,7 @@ _lg_v_generated() {
   local commit="$1" dirty="$2" source="$3" link="$4" out="$5" prnote="${6:-}" ifl="${7:-0}" s days at cutoff today d e xy p since
   local specs=()
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   days=$(_lg_cfg '.views.recent_days | if type == "number" and . >= 0 then floor else 14 end') || exit "$?"
   at=$(date -u +%Y-%m-%dT%H:%M:%SZ) || _lg_die "date failed"
   today=${at%%T*}
@@ -164,7 +164,7 @@ _lg_v_ledger_ids() {
 _lg_v_render() {
   local ix="$1" gen="$2" target="$3" md="$4" html="$5" dir="$6" s
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   : > "$dir/.names"
   if [ "$md" = 1 ]; then
     jq -j -L "$_LG_LIB" --slurpfile c "$_LG_CFG" --arg ledger "$target" --arg mode files \
@@ -219,7 +219,7 @@ cmd_ledger_view() {
     *) out="$PWD/$out" ;;
   esac
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _LG_IX_NEED_CONTRACTS=1
   _lg_ifl_prepare 0
   ix=$(_lg_index) || exit "$?"
@@ -337,7 +337,7 @@ cmd_ledger_publish() {
   [ "${#_ARGS[@]}" = 0 ] || _lg_usage "unexpected argument '${_ARGS[0]}'"
   if [ -n "$_OPT_dry_run" ]; then dry=1; fi
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
 
   # The remote, the base branch, the views branch (this work tree's config).
   _lg_cfg '(.base | if type == "string" then . else "" end), (.keys.remote | if type == "string" then . else "" end), (.views.branch | if type == "string" then . else "" end)' > "$s.cfgv"
