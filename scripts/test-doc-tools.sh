@@ -140,6 +140,42 @@ test_build_index_hashes_doc() {
   teardown
 }
 
+test_hostile_index_fields_never_reach_arithmetic() {
+  echo "test: separators in an index's fields cannot forge a record: a crafted index runs nothing"
+  local marker out rc payload
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+  # A name relative to the repository: the harness root holds a space.
+  marker=injected-ran
+  payload="f[\$(touch $marker)]"
+  # A legacy entry (no code_oids) passes field 7 to an array slice, which bash
+  # evaluates as an expression. The separators shift the attacker's text there.
+  jq --arg p "$payload" '.docs["docs/architecture.md"] |= (del(.code_oids) | .code_refs = ["."] | .content_hash = "h\u001fcc\u001flegacy\u001f\($p)\u001fzz")' \
+    docs/.doc-index.json > docs/.i.tmp && mv docs/.i.tmp docs/.doc-index.json
+  rc=0
+  out=$("$DOC_TOOLS" check-freshness 2>/dev/null) || rc=$?
+  assert_file_not_exists "$marker" "check-freshness: \\x1f in content_hash runs nothing"
+  assert_eq "0" "$rc" "…and exits 0"
+  assert_eq "docs/architecture.md" "$(jq -r '.docs | keys | join(",")' <<<"$out")" "…reporting the one doc"
+  "$DOC_TOOLS" status docs/architecture.md > /dev/null 2>&1 || true
+  assert_file_not_exists "$marker" "status <doc>: the same"
+  # A NUL ends a record, so what follows it would be a whole forged record.
+  jq --arg p "$payload" '.docs["docs/architecture.md"].content_hash = "h\u0000docs/architecture.md\u001fs\u001ft\u001fv\u001fh\u001fcc\u001flegacy\u001f\($p)\u001f."' \
+    docs/.doc-index.json > docs/.i.tmp && mv docs/.i.tmp docs/.doc-index.json
+  "$DOC_TOOLS" check-freshness > /dev/null 2>&1 || true
+  assert_file_not_exists "$marker" "check-freshness: NUL in content_hash runs nothing"
+  # The same through the two other kinds of field: a ref, and the doc's key.
+  jq --arg p "$payload" '.docs["docs/architecture.md"] |= (.content_hash = "h" | .code_refs = ["a\u001f\($p)\u001fb"])' \
+    docs/.doc-index.json > docs/.i.tmp && mv docs/.i.tmp docs/.doc-index.json
+  "$DOC_TOOLS" check-freshness > /dev/null 2>&1 || true
+  assert_file_not_exists "$marker" "check-freshness: \\x1f in a code ref runs nothing"
+  jq --arg p "$payload" '.docs["k\u001fs\u001ft\u001fv\u001fh\u001fcc\u001flegacy\u001f\($p)\u001fz"] = {code_refs: ["."]}' \
+    docs/.doc-index.json > docs/.i.tmp && mv docs/.i.tmp docs/.doc-index.json
+  "$DOC_TOOLS" check-freshness > /dev/null 2>&1 || true
+  assert_file_not_exists "$marker" "check-freshness: \\x1f in a doc's key runs nothing"
+  teardown
+}
+
 test_build_index_stores_code_commit() {
   echo "test: build-index stores latest code commit"
   setup
@@ -8533,6 +8569,9 @@ run_tests() {
   test_gh21_gh23_batches_scale
   test_gh23_set_doc_type_stdin
   test_gh23_set_code_refs_stdin
+
+  # --- Hostile index content (security posture, arithmetic contexts) ---
+  test_hostile_index_fields_never_reach_arithmetic
 
   print_summary
 }
