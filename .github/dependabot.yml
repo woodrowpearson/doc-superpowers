@@ -1,0 +1,11 @@
+# Security and version updates for doc-search's Python lock (search/uv.lock).
+# Everything else this repository runs is a shell script or a pinned action.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /search
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5

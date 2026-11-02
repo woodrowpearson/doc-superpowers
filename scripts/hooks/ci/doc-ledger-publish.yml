@@ -40,10 +40,15 @@ jobs:
       # The full history: an item's date falls back to its first commit.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          persist-credentials: false
           fetch-depth: 0
+
+      - name: Pin jq (checksum-verified)
+        run: .github/scripts/doc-superpowers-steps/install-jq.sh
 
       - name: Publish the ledger views
         env:
+          DOC_SUPERPOWERS_GIT_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
           # The vendored ledger helper set: doc-tools.sh runs the ledger verbs
           # from beside itself, and the step refuses to run without it.

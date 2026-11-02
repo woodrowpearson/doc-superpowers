@@ -19,13 +19,17 @@ on:
   pull_request:
     branches: [__BASE_BRANCH__]
     types: [opened, synchronize, reopened, ready_for_review]
-  issue_comment:
+  # The trigger zizmor warns of because a comment's job runs with secrets: here
+  # only `respond` runs for it, and only for a member's comment on a
+  # same-repository PR (its `if:` and the pr-guard step).
+  issue_comment: # zizmor: ignore[dangerous-triggers] member comments on same-repository PRs only
     types: [created]
   pull_request_review_comment:
     types: [created]
 
 env:
   DOC_SUPERPOWERS_VERSION: "__VERSION__"
+  DOC_SUPERPOWERS_COMMIT: "__PLUGIN_COMMIT__"
   DOC_SUPERPOWERS_MARKETPLACE_URL: "__MARKETPLACE_URL__"
 
 jobs:
@@ -47,7 +51,11 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          persist-credentials: false
           fetch-depth: 0
+
+      - name: Pin jq (checksum-verified)
+        run: .github/scripts/doc-superpowers-steps/install-jq.sh
 
       - name: Scope — indexed docs this PR touches
         id: scope
@@ -71,9 +79,22 @@ jobs:
       - name: Review PR documentation
         if: steps.scope.outputs.status == 'ok' && steps.scope.outputs.affected != '0'
         uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88
+        # On a PR event the action fetches the base branch itself before the
+        # agent starts, and the checkout keeps no token: this helper answers from
+        # the step's env, for the job's own host, so a private repository works
+        # and .git/config stays free of the token.
         env:
+          DOC_SUPERPOWERS_GIT_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_1: '!f() { [ "$1" = get ] || return 0; echo username=x-access-token; echo "password=$DOC_SUPERPOWERS_GIT_TOKEN"; }; f'
           GH_TOKEN: ${{ github.token }}
         with:
+          # No token in the remote URL: without this the action writes it into
+          # .git/config, where the agent can read it. The agent commits nothing.
+          use_commit_signing: true
           github_token: ${{ github.token }}
           claude_code_oauth_token: ${{ steps.auth.outputs.use_oauth == 'true' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}
           anthropic_api_key: ${{ steps.auth.outputs.use_oauth == 'false' && secrets.ANTHROPIC_API_KEY || '' }}
@@ -113,7 +134,11 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          persist-credentials: false
           fetch-depth: 0
+
+      - name: Pin jq (checksum-verified)
+        run: .github/scripts/doc-superpowers-steps/install-jq.sh
 
       - name: Same-repository pull requests only
         id: guard
@@ -141,7 +166,21 @@ jobs:
       - name: Answer @claude
         if: steps.guard.outputs.same_repo == 'true'
         uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1.0.88
+        # Tag mode fetches the base and PR branches itself before the agent
+        # starts, and the checkout keeps no token: this helper answers from the
+        # step's env, for the job's own host, so a private repository works and
+        # .git/config stays free of the token.
+        env:
+          DOC_SUPERPOWERS_GIT_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: "2"
+          GIT_CONFIG_KEY_0: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_0: ""
+          GIT_CONFIG_KEY_1: credential.${{ github.server_url }}.helper
+          GIT_CONFIG_VALUE_1: '!f() { [ "$1" = get ] || return 0; echo username=x-access-token; echo "password=$DOC_SUPERPOWERS_GIT_TOKEN"; }; f'
         with:
+          # No token in the remote URL: without this the action writes it into
+          # .git/config, where the agent can read it. The agent commits nothing.
+          use_commit_signing: true
           github_token: ${{ github.token }}
           trigger_phrase: "@claude"
           claude_code_oauth_token: ${{ steps.auth.outputs.use_oauth == 'true' && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}

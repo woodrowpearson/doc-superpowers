@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The AI templates' step before the agent: the doc-superpowers plugin
-# marketplace checked out at exactly the version the installer rendered, the
-# HEAD the agent starts from, and a snapshot of the commit checker.
+# marketplace checked out at exactly the version and commit the installer
+# rendered, the HEAD the agent starts from, and a snapshot of the commit checker.
 #
 # claude-code-action's plugin_marketplaces input takes a local path as it is
 # (a Git URL must end in .git, so it cannot name a tag); the workflow hands it
@@ -11,6 +11,10 @@
 # Env:
 #   DOC_SUPERPOWERS_VERSION          vX.Y.Z — the workflow's env, rendered by
 #                                    the installer from its own version
+#   DOC_SUPERPOWERS_COMMIT           the commit that tag named when the
+#                                    installer rendered this workflow. A tag can
+#                                    be moved; this job holds secrets, so what
+#                                    it fetches must be that commit
 #   DOC_SUPERPOWERS_MARKETPLACE_URL  the git URL to clone the plugin from — the
 #                                    workflow's env, rendered by the installer
 #                                    (the plugin's own repository, or install
@@ -32,11 +36,13 @@
 # commit step checks the agent left it there); checker=<the checker snapshot>.
 #
 # Exit codes: 0; 1 (with an ::error::) when the version is not a release, the
-# marketplace URL is not set, its tag cannot be fetched, or the manifests at
-# the tag name another version.
+# commit pin is not a commit id, the marketplace URL is not set, its tag cannot
+# be fetched or holds another commit than the pin, or the manifests at the tag
+# name another version.
 set -euo pipefail
 
 VERSION="${DOC_SUPERPOWERS_VERSION:-}"
+COMMIT="${DOC_SUPERPOWERS_COMMIT:-}"
 URL="${DOC_SUPERPOWERS_MARKETPLACE_URL:-}"
 
 err() {
@@ -51,6 +57,9 @@ fi
 if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   err "DOC_SUPERPOWERS_VERSION is '$VERSION', not a released vX.Y.Z: the installer that rendered this workflow could not read its plugin version. Re-run 'install --ci' from a released doc-superpowers plugin."
 fi
+if ! [[ "$COMMIT" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+  err "DOC_SUPERPOWERS_COMMIT is '$COMMIT', not a commit id: the installer that rendered this workflow could not read the commit of the plugin's tag $VERSION. Re-run 'install --ci' where the marketplace URL answers (or with DOC_SUPERPOWERS_PLUGIN_COMMIT set)."
+fi
 [ -n "$URL" ] || err "DOC_SUPERPOWERS_MARKETPLACE_URL is not set: the workflow's env names the git URL to fetch doc-superpowers $VERSION from, and the installer renders it. Re-run 'install --ci' (with --marketplace-url <git URL> to fetch from a mirror), which writes this workflow and its step scripts together."
 head=$(git rev-parse --verify HEAD 2>/dev/null) || err "no checkout here (git rev-parse HEAD failed)"
 
@@ -62,6 +71,11 @@ case "$mp" in
 esac
 if ! git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$VERSION" -- "$URL" "$mp"; then
   err "cannot fetch doc-superpowers $VERSION from $URL (is the tag $VERSION published there?)"
+fi
+found=$(git -C "$mp" rev-parse --verify HEAD 2>/dev/null) || found=""
+if [ "$found" != "$COMMIT" ]; then
+  rm -rf "$dir"
+  err "$URL has tag $VERSION at commit ${found:-unknown}, but this workflow was installed with $COMMIT. Nothing from it ran. A release tag that moved may mean a compromised release: find out why before you re-run 'install --ci', which pins the tag's commit again."
 fi
 [ -f "$mp/.claude-plugin/marketplace.json" ] || err "$URL at $VERSION has no .claude-plugin/marketplace.json"
 found=$(jq -r '.version // ""' "$mp/.claude-plugin/plugin.json" 2>/dev/null) || found=""

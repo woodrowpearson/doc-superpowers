@@ -4429,12 +4429,12 @@ test_ci_steps_follow_the_workflows() {
   printf '{}\n' > docs/ledger/config.json
   inst install --ci --workflows=doc-ledger-publish
   assert_eq "0" "$IRC" "install --ci --workflows=doc-ledger-publish exits 0"
-  assert_eq "ledger-publish.sh" "$(_steps_vendored)" "doc-ledger-publish alone: its publish step script, and no other"
+  assert_eq "install-jq.sh ledger-publish.sh" "$(_steps_vendored)" "doc-ledger-publish alone: its publish step script, and no other"
   assert_file_not_exists ".github/scripts/doc-superpowers-steps/prepare-agent.sh" "…no prepare-agent.sh"
   _assert_installed_workflows_wired "install --ci --workflows=doc-ledger-publish"
   inst install --ci --workflows=doc-review-pr
   assert_eq "0" "$IRC" "install --ci --workflows=doc-review-pr exits 0"
-  assert_eq "commit-changes.sh freshness-check.sh ledger-publish.sh pr-guard.sh prepare-agent.sh resolve-auth.sh" "$(_steps_vendored)" \
+  assert_eq "commit-changes.sh freshness-check.sh install-jq.sh ledger-publish.sh pr-guard.sh prepare-agent.sh resolve-auth.sh" "$(_steps_vendored)" \
     "+ doc-review-pr: its scope gate, fork guard, auth and plugin steps, and the checker prepare-agent.sh snapshots"
   _assert_installed_workflows_wired "install --ci --workflows=doc-ledger-publish,doc-review-pr"
   inst install --ci --workflows=doc-pr-full-cycle
@@ -4442,11 +4442,11 @@ test_ci_steps_follow_the_workflows() {
   _assert_installed_workflows_wired "+ doc-pr-full-cycle"
   inst uninstall --ci --workflows=doc-review-pr
   assert_eq "0" "$IRC" "uninstall --ci --workflows=doc-review-pr exits 0"
-  assert_eq "commit-changes.sh freshness-check.sh ledger-publish.sh prepare-agent.sh resolve-auth.sh" "$(_steps_vendored)" \
+  assert_eq "commit-changes.sh freshness-check.sh install-jq.sh ledger-publish.sh prepare-agent.sh resolve-auth.sh" "$(_steps_vendored)" \
     "without doc-review-pr: its fork guard goes, what doc-pr-full-cycle runs stays"
   _assert_installed_workflows_wired "doc-ledger-publish + doc-pr-full-cycle"
   inst uninstall --ci --workflows=doc-pr-full-cycle
-  assert_eq "ledger-publish.sh" "$(_steps_vendored)" "without the AI workflows: prepare-agent.sh and the scripts only they ran go"
+  assert_eq "install-jq.sh ledger-publish.sh" "$(_steps_vendored)" "without the AI workflows: prepare-agent.sh and the scripts only they ran go"
   teardown
 }
 
@@ -4473,7 +4473,7 @@ test_ci_upgrade_prunes_unused_step_scripts() {
   echo "# a local edit" >> .github/scripts/doc-superpowers-steps/pr-guard.sh
   inst install --ci
   assert_eq "0" "$IRC" "a plain install --ci exits 0"
-  assert_eq "ledger-publish.sh pr-guard.sh" "$(_steps_vendored)" "it removes every unused, unmodified step script"
+  assert_eq "install-jq.sh ledger-publish.sh pr-guard.sh" "$(_steps_vendored)" "it removes every unused, unmodified step script"
   assert_contains "$IOUT" "Kept .github/scripts/doc-superpowers-steps/pr-guard.sh" "…keeps an edited one and says so"
   inst status --ci
   assert_contains "$(grep -F "pr-guard.sh" <<<"$IOUT" || true)" "removable" "status --ci reports the kept one as removable"
@@ -4482,6 +4482,78 @@ test_ci_upgrade_prunes_unused_step_scripts() {
   assert_eq '[".github/scripts/doc-superpowers-steps/pr-guard.sh"]' "$(_ci_json_at '.tiers.ci.removable_vendored' | jq -c . 2>/dev/null)" \
     ".tiers.ci.removable_vendored: the kept one"
   teardown
+}
+
+test_ci_plugin_commit_pin() {
+  # The AI templates carry the commit the release tag names at the marketplace
+  # URL, read when they are rendered; prepare-agent.sh refuses any other.
+  echo "test: install --ci renders the commit of the plugin's tag; a lookup that fails never aborts the install"
+  local dir src version tagged annotated url
+  version=$("$BASH_BIN" "$SCRIPT_DIR/doc-tools.sh" tools version)
+  dir=$(harness_mktemp_d pin)
+  git init -q --bare "$dir/market.git"
+  # The harness root holds a space, which a marketplace URL may not.
+  url="file://${dir// /%20}"
+  git init -q "$dir/src"
+  src="$dir/src"
+  git -C "$src" -c user.email=t@t.com -c user.name=t -c commit.gpgsign=false commit -q --allow-empty -m one
+  git -C "$src" tag "v$version"
+  git -C "$src" -c user.email=t@t.com -c user.name=t -c commit.gpgsign=false commit -q --allow-empty -m two
+  tagged=$(git -C "$src" rev-parse "v$version")
+  git -C "$src" push -q "$dir/market.git" "v$version"
+  setup
+  DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-release --marketplace-url "$url/market.git"
+  assert_eq "0" "$IRC" "a tag at the marketplace URL: exits 0"
+  assert_contains "$(cat .github/workflows/doc-release.yml)" "DOC_SUPERPOWERS_COMMIT: \"$tagged\"" "the workflow pins the commit the tag names"
+  assert_not_contains "$(cat .github/workflows/doc-release.yml)" "__PLUGIN_COMMIT__" "…no placeholder left"
+  # The tag moved since the install: the routine refresh must not re-pin it.
+  git -C "$src" -c user.email=t@t.com -c user.name=t -c commit.gpgsign=false tag -f -a -m rel "v$version" HEAD >/dev/null
+  annotated=$(git -C "$src" rev-parse "v$version^{commit}")
+  git -C "$src" push -q -f "$dir/market.git" "v$version"
+  local before
+  before=$(cat .github/workflows/doc-release.yml)
+  DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-release --marketplace-url "$url/market.git"
+  assert_eq "1" "$IRC" "the installed version's tag moved: install --ci refuses"
+  assert_contains "$IOUT" "$tagged" "…naming the installed commit"
+  assert_contains "$IOUT" "$annotated" "…and the one the tag holds now"
+  assert_contains "$IOUT" "DOC_SUPERPOWERS_PLUGIN_COMMIT" "…and how to accept it"
+  assert_eq "$before" "$(cat .github/workflows/doc-release.yml)" "…the workflow unchanged"
+  # An unreachable URL keeps the pin it has.
+  DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-release --marketplace-url "$url/absent.git"
+  assert_eq "0" "$IRC" "the URL cannot answer, a pin is installed: exits 0"
+  assert_contains "$(cat .github/workflows/doc-release.yml)" "DOC_SUPERPOWERS_COMMIT: \"$tagged\"" "…the pin stays"
+  # Accepted on purpose.
+  DOC_SUPERPOWERS_PLUGIN_COMMIT="$annotated" inst install --ci --workflows=doc-release --marketplace-url "$url/market.git"
+  assert_eq "0" "$IRC" "DOC_SUPERPOWERS_PLUGIN_COMMIT accepts the moved tag"
+  assert_contains "$(cat .github/workflows/doc-release.yml)" "DOC_SUPERPOWERS_COMMIT: \"$annotated\"" "…and renders it"
+  # A pin of another version says nothing about this one.
+  sed -i.bak "s/DOC_SUPERPOWERS_VERSION: .*/DOC_SUPERPOWERS_VERSION: \"v0.0.1\"/; s/DOC_SUPERPOWERS_COMMIT: .*/DOC_SUPERPOWERS_COMMIT: \"$tagged\"/" .github/workflows/doc-release.yml
+  rm -f .github/workflows/doc-release.yml.bak
+  DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-release --marketplace-url "$url/market.git"
+  assert_eq "0" "$IRC" "an upgrade from another version: exits 0"
+  assert_contains "$(cat .github/workflows/doc-release.yml)" "DOC_SUPERPOWERS_COMMIT: \"$annotated\"" "…pinning the new version's commit"
+  rm -rf .github .claude
+  # An annotated tag: the commit under it, not the tag object.
+  DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-release --marketplace-url "$url/market.git"
+  assert_contains "$(cat .github/workflows/doc-release.yml)" "DOC_SUPERPOWERS_COMMIT: \"$annotated\"" "an annotated tag pins the commit under it"
+  rm -rf .github .claude
+  # No such tag there (or no network): one WARN, an empty pin, and the plugin
+  # step fails until a re-install — like an unknown version or URL.
+  DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-release --marketplace-url "$url/absent.git"
+  assert_eq "0" "$IRC" "a marketplace URL that cannot answer does not abort the install"
+  assert_contains "$(cat .github/workflows/doc-release.yml)" 'DOC_SUPERPOWERS_COMMIT: ""' "…the pin is empty"
+  assert_eq "1" "$(grep -c 'WARN.*DOC_SUPERPOWERS_COMMIT' <<<"$IOUT" || true)" "…one WARN about it"
+  assert_contains "$IOUT" "DOC_SUPERPOWERS_PLUGIN_COMMIT" "…naming the offline way to give it"
+  # The offline override: used as it is when it is a commit id, refused when not.
+  DOC_SUPERPOWERS_PLUGIN_COMMIT=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb inst install --ci --workflows=doc-release --marketplace-url "$url/market.git"
+  assert_contains "$(cat .github/workflows/doc-release.yml)" 'DOC_SUPERPOWERS_COMMIT: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "DOC_SUPERPOWERS_PLUGIN_COMMIT replaces the lookup"
+  DOC_SUPERPOWERS_PLUGIN_COMMIT='x"; evil' inst install --ci --workflows=doc-release --marketplace-url "$url/absent.git"
+  assert_contains "$(cat .github/workflows/doc-release.yml)" 'DOC_SUPERPOWERS_COMMIT: ""' "a DOC_SUPERPOWERS_PLUGIN_COMMIT that is no commit id is not rendered"
+  assert_contains "$IOUT" "WARN" "…with a WARN"
+  # The shell workflows hold no pin, so they ask no one.
+  rm -rf .github .claude
+  DOC_SUPERPOWERS_PLUGIN_COMMIT= inst install --ci --workflows=doc-freshness-pr --marketplace-url "$url/absent.git"
+  assert_not_contains "$IOUT" "DOC_SUPERPOWERS_COMMIT" "a workflow without the plugin step does no lookup"
 }
 
 test_ci_no_personal_url_in_installed_files() {
@@ -4560,6 +4632,7 @@ test_i8_default_set_ships_its_step_scripts
 test_ci_steps_follow_the_workflows
 test_ci_upgrade_prunes_unused_step_scripts
 test_ci_no_personal_url_in_installed_files
+test_ci_plugin_commit_pin
 test_install_ci_marketplace_url_only_when_rendered
 
 
@@ -7966,7 +8039,19 @@ ci_fixture() {
   printf '%s\n' '#!/bin/sh' 'echo "uv $* PWD=$PWD UV=$DOC_SP_REQUIRE_UV" >> "'"$CI_LOG"'"' \
     '[ "${STUB_RC_search:-0}" = 0 ] || echo "FAILED tests/test_stub.py::test_on_purpose"' \
     'echo "3 passed in 0.12s"' 'exit "${STUB_RC_search:-0}"' > uvbin/uv
-  chmod +x uvbin/uv
+  # uvx logs its arguments; for zizmor, each rendered workflow it was given
+  # (and whether a placeholder is left in it).
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/bin/sh' 'echo "uvx $*" >> "'"$CI_LOG"'"' 'case "$1" in' \
+    'zizmor@*)' '  for a in "$@"; do [ -d "$a/.github/workflows" ] || continue' \
+    '    for f in "$a"/.github/workflows/*.yml; do' \
+    '      echo "rendered:${f##*/}" >> "'"$CI_LOG"'"' \
+    '      if grep -q "__[A-Z_]*__" "$f"; then echo placeholder-left >> "'"$CI_LOG"'"; fi' \
+    '    done; done' '  exit "${STUB_RC_zizmor:-0}" ;;' \
+    'pip-audit@*) exit "${STUB_RC_audit:-0}" ;;' 'esac' > uvbin/uvx
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/bin/sh' 'echo "gitleaks $*" >> "'"$CI_LOG"'"' 'exit "${STUB_RC_gitleaks:-0}"' > stubbin/gitleaks
+  chmod +x uvbin/uv uvbin/uvx stubbin/gitleaks
 }
 
 # path_without <tool>: $REAL_PATH with <tool> hidden. Every directory holding it
@@ -8010,7 +8095,7 @@ test_check_ci_runs_what_ci_runs() {
   ln -s "$(type -P "$BASH_BIN" || printf '%s' "$BASH_BIN")" "$b2"
   ci_run -- --list
   assert_eq "0" "$CI_RC" "--list exits 0"
-  assert_eq "toolchain doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger search self-install check-version tag plugin-validate" \
+  assert_eq "toolchain doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger search self-install zizmor dep-audit gitleaks check-version tag plugin-validate" \
     "$(printf '%s' "$CI_OUT" | tr '\n' ' ' | sed 's/ $//')" "…the checks: the seven suites among them, then search (the doc-search pytest suite)"
   ci_run -- nope
   assert_eq "2" "$CI_RC" "an unknown check: exit 2"
@@ -8059,7 +8144,7 @@ test_check_ci_modes() {
 
   : > "$CI_LOG"
   ci_run -- --bash "$BASH_BIN"
-  assert_eq "doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger uv self-install doc-tools.sh doc-tools.sh claude" \
+  assert_eq "doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger uv self-install uvx uv uvx gitleaks doc-tools.sh doc-tools.sh claude" \
     "$(awk '{ print $1 }' "$CI_LOG" | tr '\n' ' ' | sed 's/ $//')" "the default run: the seven suites, search (pytest), self-install, check-version, the tag, plugin-validate"
   assert_contains "$(cat "$CI_LOG")" "doc-tools.sh check-version --tag --warn" "…the tag as a warning (CI checks it on main only)"
   assert_contains "$(cat "$CI_LOG")" "claude plugin validate ." "…and claude plugin validate ."
@@ -8120,6 +8205,59 @@ test_check_ci_search() {
   teardown
 }
 
+test_check_ci_security_checks() {
+  echo "test: check-ci.sh zizmor, dep-audit, gitleaks: pinned tools over the rendered templates, the lock and the history; a missing tool FAILs unless its flag is 0; each failure is named"
+  ci_fixture
+  mkdir -p scripts/hooks/ci
+  printf 'name: t\nenv:\n  A: "__BASE_BRANCH__ __VERSION__ __PLUGIN_COMMIT__ __CRON_SCHEDULE__ __CI_STRICT__ __MARKETPLACE_URL__"\n' > scripts/hooks/ci/t.yml
+  local nogl nouv
+  nogl=$(path_without gitleaks)
+  nouv=$(path_without uv)
+
+  : > "$CI_LOG"
+  ci_run -- --bash "$BASH_BIN" zizmor
+  assert_eq "0" "$CI_RC" "zizmor: exit 0"
+  assert_contains "$(cat "$CI_LOG")" "uvx zizmor@" "…a pinned zizmor through uvx"
+  assert_contains "$(cat "$CI_LOG")" " --offline " "…offline"
+  assert_contains "$(cat "$CI_LOG")" ".github/workflows" "…over this repository's workflows"
+  assert_contains "$(cat "$CI_LOG")" "rendered:t.yml" "…and the templates, rendered"
+  assert_not_contains "$(cat "$CI_LOG")" "placeholder-left" "…with no placeholder left"
+  ci_run STUB_RC_zizmor=14 -- --bash "$BASH_BIN" zizmor
+  assert_eq "1" "$CI_RC" "a zizmor finding: exit 1"
+  assert_contains "$CI_OUT" "FAIL  zizmor" "…named in the summary"
+
+  : > "$CI_LOG"
+  ci_run -- --bash "$BASH_BIN" dep-audit
+  assert_eq "0" "$CI_RC" "dep-audit: exit 0"
+  assert_contains "$(cat "$CI_LOG")" "uv export --project search --frozen --all-extras --no-dev --no-emit-project --format requirements-txt -o " "…the whole lock, every extra"
+  assert_contains "$(cat "$CI_LOG")" "uvx pip-audit@" "…audited by a pinned pip-audit"
+  assert_contains "$(cat "$CI_LOG")" " --disable-pip --no-deps -r " "…over exactly the exported list"
+  ci_run STUB_RC_audit=1 -- --bash "$BASH_BIN" dep-audit
+  assert_eq "1" "$CI_RC" "a known vulnerability: exit 1"
+  assert_contains "$CI_OUT" "FAIL  dep-audit" "…named in the summary"
+  ci_run DOC_SP_REQUIRE_UV=0 PATH="$TEST_DIR/stubbin:$nouv" -- --bash "$BASH_BIN" dep-audit zizmor
+  assert_eq "0" "$CI_RC" "no uv, DOC_SP_REQUIRE_UV=0: exit 0"
+  assert_contains "$CI_OUT" "SKIP  dep-audit" "…a SKIP line for dep-audit"
+  assert_contains "$CI_OUT" "SKIP  zizmor" "…and for zizmor"
+  ci_run PATH="$TEST_DIR/stubbin:$nouv" -- --bash "$BASH_BIN" dep-audit
+  assert_eq "1" "$CI_RC" "no uv: exit 1"
+
+  : > "$CI_LOG"
+  ci_run -- --bash "$BASH_BIN" gitleaks
+  assert_eq "0" "$CI_RC" "gitleaks: exit 0"
+  assert_contains "$(cat "$CI_LOG")" "gitleaks git --no-banner --redact ." "…over the history, values redacted"
+  ci_run STUB_RC_gitleaks=1 -- --bash "$BASH_BIN" gitleaks
+  assert_eq "1" "$CI_RC" "a finding: exit 1"
+  assert_contains "$CI_OUT" "FAIL  gitleaks" "…named in the summary"
+  ci_run PATH="$TEST_DIR/uvbin:$nogl" -- --bash "$BASH_BIN" gitleaks
+  assert_eq "1" "$CI_RC" "no gitleaks: exit 1 (DOC_SP_REQUIRE_GITLEAKS defaults to 1)"
+  assert_contains "$CI_OUT" "gitleaks not found" "…saying so"
+  ci_run DOC_SP_REQUIRE_GITLEAKS=0 PATH="$TEST_DIR/uvbin:$nogl" -- --bash "$BASH_BIN" gitleaks
+  assert_eq "0" "$CI_RC" "no gitleaks, DOC_SP_REQUIRE_GITLEAKS=0: exit 0"
+  assert_contains "$CI_OUT" "SKIP  gitleaks" "…a SKIP line"
+  teardown
+}
+
 echo ""
 echo "=== Maintainer tooling: check-ci.sh and the maintainer pre-push hook ==="
 test_maintainer_hook_install_push_uninstall
@@ -8128,6 +8266,7 @@ test_maintainer_hook_refuses_global_hooks_path
 test_check_ci_runs_what_ci_runs
 test_check_ci_modes
 test_check_ci_search
+test_check_ci_security_checks
 
 
 # --- install --git --merge-driver-only, status --json, print-merge-driver (#20) ---
