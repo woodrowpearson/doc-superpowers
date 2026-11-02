@@ -140,6 +140,103 @@ test_build_index_hashes_doc() {
   teardown
 }
 
+# _advice_tools <dir> <jq --version> <git --version> <awk --version>: wrappers
+# that print those strings for --version and otherwise run the real tool.
+_advice_tools() {
+  local d="$1" real
+  mkdir -p "$d"
+  for t in "jq|--version|$2" "git|--version|$3" "awk|--version|$4"; do
+    local name="${t%%|*}" rest="${t#*|}"
+    real=$(command -v "$name")
+    cat > "$d/$name" <<EOF
+#!/bin/sh
+if [ "\$1" = "${rest%%|*}" ] || { [ "$name" = git ] && [ "\$1" = version ]; }; then
+  printf '%s\n' '${rest#*|}'
+  exit 0
+fi
+exec '$real' "\$@"
+EOF
+    chmod +x "$d/$name"
+  done
+}
+
+# _advice <jq> <git> <awk>: runs check-freshness with those versions and a new day's
+# stamp; ADVICE_ERR its stderr, ADVICE_RC its exit, ADVICE_OUT its stdout.
+_advice() {
+  local d
+  d=$(harness_mktemp_d advice)
+  _advice_tools "$d" "$1" "$2" "$3"
+  rm -rf "$XDG_CACHE_HOME/doc-superpowers"
+  ADVICE_RC=0
+  ADVICE_OUT=$(PATH="$d:$PATH" DOC_SUPERPOWERS_NO_TOOL_ADVICE= "$DOC_TOOLS" check-freshness 2>"$d/err") || ADVICE_RC=$?
+  ADVICE_ERR=$(cat "$d/err")
+}
+
+test_tool_advice_names_versions_with_known_holes() {
+  echo "test: check_deps warns, once a day, about a jq, git or gawk older than the fixes"
+  local ok_jq=jq-1.8.2 ok_git="git version 2.56.0" ok_awk="awk version 20200816" saved="${XDG_CACHE_HOME:-}"
+  export XDG_CACHE_HOME
+  XDG_CACHE_HOME=$(harness_mktemp_d cache)
+  setup
+  echo "docs/architecture.md:src/:architecture" | "$DOC_TOOLS" build-index
+
+  _advice "$ok_jq" "$ok_git" "$ok_awk"
+  assert_eq "0|" "$ADVICE_RC|$ADVICE_ERR" "current tools: no warning"
+
+  _advice "jq-1.7.1-apple" "$ok_git" "$ok_awk"
+  assert_eq "0" "$ADVICE_RC" "an old jq: still exits 0"
+  assert_contains "$ADVICE_ERR" "WARN: jq 1.7.1" "…a WARN names it"
+  assert_contains "$ADVICE_ERR" "1.8.2" "…and the version with the fixes"
+  assert_contains "$ADVICE_ERR" "DOC_SUPERPOWERS_NO_TOOL_ADVICE" "…and how to silence it"
+  assert_not_contains "$ADVICE_OUT" "WARN" "…on stderr only"
+  _advice "jq-1.6" "$ok_git" "$ok_awk"
+  assert_contains "$ADVICE_ERR" "WARN: jq 1.6" "the floor itself still warns"
+  _advice "jq-master-abc123" "$ok_git" "$ok_awk"
+  assert_eq "" "$ADVICE_ERR" "a jq with no parsable version: nothing to say"
+
+  local v
+  for v in "git version 2.39.5 (Apple Git-154)" "git version 2.43.6" "git version 2.47.2" "git version 2.50.0"; do
+    _advice "$ok_jq" "$v" "$ok_awk"
+    local num="${v#git version }"
+    assert_contains "$ADVICE_ERR" "WARN: git ${num%% *}" "$v: warned (each maintained branch has its own fix)"
+  done
+  for v in "git version 2.43.7" "git version 2.47.3" "git version 2.50.1" "git version 2.51.0"; do
+    _advice "$ok_jq" "$v" "$ok_awk"
+    assert_eq "" "$ADVICE_ERR" "$v: has the fixes"
+  done
+
+  _advice "$ok_jq" "$ok_git" "GNU Awk 5.4.0, API 4.0"
+  assert_contains "$ADVICE_ERR" "WARN: gawk 5.4.0" "gawk 5.4.0: warned"
+  _advice "$ok_jq" "$ok_git" "GNU Awk 5.4.1, API 4.0"
+  assert_eq "" "$ADVICE_ERR" "gawk 5.4.1: has the fixes"
+  _advice "$ok_jq" "$ok_git" "mawk 1.3.4 20200120"
+  assert_eq "" "$ADVICE_ERR" "mawk: nothing to say"
+
+  # On a ledger host, in-flight fetches read a shared remote.
+  _advice "$ok_jq" "git version 2.54.0" "$ok_awk"
+  assert_eq "" "$ADVICE_ERR" "git 2.54 without a ledger: nothing to say"
+  mkdir -p docs/ledger
+  printf '{}\n' > docs/ledger/config.json
+  _advice "$ok_jq" "git version 2.54.0" "$ok_awk"
+  assert_contains "$ADVICE_ERR" "WARN: git 2.54.0" "git 2.54 on a ledger host: warned"
+  assert_contains "$ADVICE_ERR" "2.55.0" "…naming the version that masks a remote's control characters"
+  rm -rf docs/ledger
+
+  # Once a day, and off when asked.
+  local d second
+  d=$(harness_mktemp_d advice)
+  _advice_tools "$d" "jq-1.7.1" "$ok_git" "$ok_awk"
+  rm -rf "$XDG_CACHE_HOME/doc-superpowers"
+  PATH="$d:$PATH" DOC_SUPERPOWERS_NO_TOOL_ADVICE= "$DOC_TOOLS" check-freshness > /dev/null 2>&1 || true
+  second=$(PATH="$d:$PATH" DOC_SUPERPOWERS_NO_TOOL_ADVICE= "$DOC_TOOLS" check-freshness 2>&1 >/dev/null) || true
+  assert_eq "" "$second" "the second run of the day says nothing"
+  rm -rf "$XDG_CACHE_HOME/doc-superpowers"
+  second=$(PATH="$d:$PATH" DOC_SUPERPOWERS_NO_TOOL_ADVICE=1 "$DOC_TOOLS" check-freshness 2>&1 >/dev/null) || true
+  assert_eq "" "$second" "DOC_SUPERPOWERS_NO_TOOL_ADVICE=1: nothing, on any day"
+  teardown
+  XDG_CACHE_HOME="$saved"
+}
+
 test_hostile_index_fields_never_reach_arithmetic() {
   echo "test: separators in an index's fields cannot forge a record: a crafted index runs nothing"
   local marker out rc payload
@@ -8572,6 +8669,7 @@ run_tests() {
 
   # --- Hostile index content (security posture, arithmetic contexts) ---
   test_hostile_index_fields_never_reach_arithmetic
+  test_tool_advice_names_versions_with_known_holes
 
   print_summary
 }

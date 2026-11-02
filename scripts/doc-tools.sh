@@ -27,6 +27,75 @@ _jq_version_ok() {
   [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "${minor:-0}" -ge 6 ]; }
 }
 
+# 0 when dotted version $1 is below $2, field by field.
+_version_lt() {
+  local a="$1." b="$2." x y
+  while [ -n "$a" ] || [ -n "$b" ]; do
+    x="${a%%.*}" y="${b%%.*}"
+    a="${a#*.}" b="${b#*.}"
+    [ "${x:-0}" -ge "${y:-0}" ] || return 0
+    [ "${x:-0}" -le "${y:-0}" ] || return 1
+  done
+  return 1
+}
+
+# The first dotted number in $1 into _VER; 1 when there is none.
+_version_of() {
+  local re='([0-9]+(\.[0-9]+)+)'
+  [[ "$1" =~ $re ]] || return 1
+  _VER="${BASH_REMATCH[1]}"
+}
+
+# Advice, on stderr, at most once a day: a floor is what the code needs, and a
+# version below these still runs, but crafted input can reach known bugs in it.
+# A hard failure would not help: distributions backport fixes under the old
+# version string, and stock macOS ships tools below all of these. SECURITY.md
+# says what each one exposes. No stamp can be written: no advice, rather than
+# the same lines on every call.
+_tool_advice() {
+  [ -z "${DOC_SUPERPOWERS_NO_TOOL_ADVICE:-}" ] || return 0
+  local cache="${XDG_CACHE_HOME:-${HOME:-}/.cache}" stamp today seen="" floor v
+  [ "$cache" != /.cache ] || return 0
+  stamp="$cache/doc-superpowers/tool-advice"
+  today=$(date +%Y-%m-%d)
+  { [ ! -r "$stamp" ] || IFS= read -r seen < "$stamp"; } 2>/dev/null || true
+  [ "$seen" != "$today" ] || return 0
+  { mkdir -p "${stamp%/*}" && printf '%s\n' "$today" > "$stamp"; } 2>/dev/null || return 0
+  local tail="A distribution package may carry the fixes under an older version. Shown once a day; DOC_SUPERPOWERS_NO_TOOL_ADVICE=1 silences it."
+
+  if _version_of "$1" && _version_lt "$_VER" 1.8.2; then
+    echo "WARN: jq $_VER is older than 1.8.2, which fixes crashes and memory bugs that crafted JSON in a repository can reach. $tail" >&2
+  fi
+
+  if _version_of "$(git --version 2>/dev/null || true)"; then
+    v="$_VER"
+    case "$v" in
+      2.44.*) floor=2.44.4 ;;
+      2.45.*) floor=2.45.4 ;;
+      2.46.*) floor=2.46.4 ;;
+      2.47.*) floor=2.47.3 ;;
+      2.48.*) floor=2.48.2 ;;
+      2.49.*) floor=2.49.1 ;;
+      2.50.*) floor=2.50.1 ;;
+      *) floor=2.43.7 ;;
+    esac
+    if _version_lt "$v" "$floor"; then
+      echo "WARN: git $v is older than $floor, which fixes bugs a hostile repository can reach when you clone it or read its .gitattributes. $tail" >&2
+    elif [ -f docs/ledger/config.json ] && _version_lt "$v" 2.55.0; then
+      echo "WARN: git $v is older than 2.55.0, which masks a remote's terminal control characters: in-flight fetches read a remote your collaborators' machines push to. $tail" >&2
+    fi
+  fi
+
+  v=$(awk --version 2>/dev/null </dev/null || true)
+  case "$v" in
+    "GNU Awk "*)
+      if _version_of "$v" && _version_lt "$_VER" 5.4.1; then
+        echo "WARN: gawk $_VER is older than 5.4.1, which fixes memory bugs, one of them in the getline path these scripts use. $tail" >&2
+      fi
+      ;;
+  esac
+}
+
 check_deps() {
   local missing=0
   for cmd in git jq; do
@@ -35,8 +104,8 @@ check_deps() {
       missing=1
     fi
   done
+  local jq_version=""
   if command -v jq >/dev/null 2>&1; then
-    local jq_version
     jq_version=$(jq --version 2>/dev/null || true)
     if ! _jq_version_ok "$jq_version"; then
       echo "ERROR: jq >= 1.6 required (found: ${jq_version:-unknown}). Upgrade jq: brew upgrade jq / apt install jq." >&2
@@ -47,7 +116,8 @@ check_deps() {
     echo "ERROR: required command not found: sha256sum or shasum" >&2
     missing=1
   fi
-  [ "$missing" -eq 0 ]
+  [ "$missing" -eq 0 ] || return 1
+  _tool_advice "$jq_version"
 }
 
 # --- Utility functions ---
