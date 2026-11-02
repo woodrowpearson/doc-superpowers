@@ -126,7 +126,7 @@ _lg_adapter() {
   _lg_adapter_path "$name" || { printf '%s\n' "$_LG_ADP_ERR" >&2; return 2; }
   [ -n "$_LG_ADP" ] || return 0
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   ( cd "$_LG_ROOT" && "$_LG_ADP" "$@" ) < /dev/null > "$s.aout" 2> "$s.aerr" || rc=$?
   # pr view is optional: its exit 3 is "no view" (not a failure).
   if [ "$rc" = 3 ] && [ "$name ${1:-}" = "pr view" ]; then return 3; fi
@@ -267,7 +267,7 @@ _lg_remote_cache() {
   _LG_RFETCHED=""
   _LG_RERR=""
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   # shellcheck disable=SC2153  # _LG_CACHE: lib.sh's _lg_init
   dir="$_LG_CACHE/remote"
   # The file's name: the key material's hash, remembered in

@@ -79,7 +79,7 @@ _lg_awkv() {
 # A fresh scratch path prefix for one call.
 _lg_scratch_name() {
   _LG_PARSE_N=$((_LG_PARSE_N + 1))
-  _LG_SN="$_SCRATCH/lg-parse.$_LG_PARSE_N"
+  _LG_SCRATCH_NAME="$_SCRATCH/lg-parse.$_LG_PARSE_N"
 }
 
 # --- Item paths ----------------------------------------------------------------
@@ -107,7 +107,7 @@ _lg_globs_matching() {
   local src="$1" out="$2" filter="$3" s d
   local specs=()
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_cfg "[$filter | if type == \"array\" then .[] else empty end | select(type == \"string\" and . != \"\")] | .[]" \
     > "$s.globs"
   : > "$out"
@@ -171,7 +171,7 @@ _lg_globs_fail() {
 _lg_item_paths() {
   local src="$1" out="$2" raw
   _lg_scratch_name
-  raw="$_LG_SN.raw"
+  raw="$_LG_SCRATCH_NAME.raw"
   _lg_globs_matching "$src" "$raw" '[(.items.globs // [])[]?, (.items.archive_globs // [])[]?]'
   # Each path once (git lists a path once per stage).
   tr '\n\000' '\001\n' < "$raw" | LC_ALL=C awk '!seen[$0]++' | tr '\n\001' '\000\n' > "$out" \
@@ -315,7 +315,7 @@ _lg_wt_ids() {
   local in="$1" out="$2" s d
   local specs=()
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   LC_ALL=C awk -v specs="$s.specs" '
     BEGIN { printf "" > specs }
     index($0, "\001") == 0 {
@@ -374,7 +374,7 @@ _lg_par_args() {
 _lg_hash_fast() {
   local in="$1" out="$2" s n m
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   LC_ALL=C awk '{ print (substr($0, 1, 1) == "/") ? $0 : "./" $0 }' "$in" | tr '\n' '\000' > "$s.argz" \
     || _lg_die "cannot write $s.argz"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -405,7 +405,7 @@ _lg_hash_fast() {
 _lg_wt_hashes() {
   local in="$1" out="$2" s map="$_LG_CACHE/blob-sha256.tsv" tmp
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_wt_ids "$in" "$s.ids"
   if [ -f "$map" ]; then _lg_awkv "$map"; else _lg_awkv /dev/null; fi
   # s.plan: per path "<hash>" (known) or "?" (to hash); s.needl: the paths
@@ -460,7 +460,7 @@ _lg_parse_worktree() {
   local paths="$1" out="$2" s
   _lg_parse_prep
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_parse_lst "$paths" "$s.lst"
   _lg_globs_matching worktree-all "$s.archz" '.items.archive_globs // []'
   _lg_parse_lst "$s.archz" "$s.arch"
@@ -501,7 +501,7 @@ _lg_parse_blobs() {
   local specs=()
   _lg_parse_prep
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   if [ "$rev" = : ]; then
     where="the index"
     imode=1

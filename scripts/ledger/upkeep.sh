@@ -232,7 +232,7 @@ _lg_up_pr_fetch_hint() {
 _lg_up_pr() {
   local n="$1" bodyf="$2" s cfg st mc ho url h base x rc=0 scanned=true
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_adapter_path pr || _lg_die "--pr: $_LG_ADP_ERR"
   [ -n "$_LG_ADP" ] || _lg_die "--pr needs a PR adapter (config adapters.pr), none is set — give --range <a>..<b> instead"
   _lg_ix_pr_fetch || rc=$?
@@ -800,7 +800,7 @@ _LG_AWK_UP_TEXT='
 _lg_up_texts() {
   local in="$1" b="$2" out="$3" s p n=0 blobs=""
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   jq -r '.items[] | select(._f == true) | .path | select(test("\n") | not)' "$in" > "$s.paths" \
     || _lg_die "jq failed (the items whose text consumes (b) reads)"
   : > "$out" || _lg_die "cannot write $out"
@@ -914,7 +914,7 @@ function up_body(line,   c) {
 _lg_up_plans() {
   local pl="$1" b="$2" out="$3" s p n=0 blobs=""
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   : > "$out" || _lg_die "cannot write $out"
   [ -s "$pl" ] || return 0
   LC_ALL=C awk -F '\t' '{ p = ($1 == "C") ? $3 : $2 } !(p in S) { S[p] = 1; print p }' "$pl" > "$s.paths" \
@@ -941,7 +941,7 @@ _lg_up_plans() {
 _lg_up_doc_trailers() {
   local a="$1" b="$2" dd="$3" out="$4" s x n=0
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   : > "$out" || _lg_die "cannot write $out"
   [ -s "$dd" ] || return 0
   LC_ALL=C awk -F '\t' '!($1 in S) { S[$1] = 1; print $1 }' "$dd" > "$s.docs.l" || _lg_die "cannot list the documents"
@@ -996,7 +996,7 @@ _lg_up_core() {
   local cf=() gd=()
   [ "$#" = 5 ] || _lg_die "internal: _lg_up_core <a> <b> <body-file|\"\"> <named-paths-file|\"\"> <out>"
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   # The config: upkeep.skip_globs (one per line) and skip_contracts, checked.
   # shellcheck disable=SC2016  # jq source
   _lg_cfg '.upkeep as $u
@@ -1202,7 +1202,7 @@ _lg_up_top() {
 _lg_up_named() {
   local s m
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   _lg_up_index "$_LG_UP_B"
   { [ "${#_OPTV_items[@]}" = 0 ] || printf '%s\0' "${_OPTV_items[@]}"; } | tr '\000' '\001' > "$s.refs" \
     || _lg_die "cannot write $s.refs"
@@ -1261,7 +1261,7 @@ cmd_ledger_upkeep() {
   # Before anything that could run an adapter (the PR list, the index).
   if [ "$_OPT_no_repo_adapters" = 1 ]; then _lg_up_no_repo; fi
   _lg_scratch_name
-  s=$_LG_SN
+  s=$_LG_SCRATCH_NAME
   if [ -n "$pr" ]; then
     _lg_up_pr "$pr" "$s.body"
   else
