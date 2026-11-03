@@ -1,0 +1,47 @@
+{
+  "enabled": true,
+  "registers": {
+    "doc_types": {
+      "plan": "terse",
+      "issue": "terse",
+      "audit": "terse",
+      "design-spec": "full",
+      "spec": "full",
+      "adr": "full",
+      "architecture": "full",
+      "api-contracts": "full",
+      "data-layer": "full",
+      "infra": "full",
+      "ci-cd": "full",
+      "workflows": "full",
+      "agentic": "full",
+      "guide": "full",
+      "codebase-guide": "full",
+      "conventions": "full"
+    },
+    "paths": [
+      { "prefix": "docs/archive/", "register": null },
+      { "suffix": "/AGENTS.md", "register": "terse" },
+      { "suffix": "/CLAUDE.md", "register": "terse" },
+      { "prefix": "docs/plans/", "suffix": "-design.md", "register": "full" },
+      { "prefix": "docs/plans/", "register": "terse" },
+      { "prefix": "docs/issues/", "register": "terse" },
+      { "prefix": "docs/", "register": "full" }
+    ]
+  },
+  "limits": {
+    "terse": { "sentence": 35, "item": 50, "item_sentences": 2 },
+    "full": { "sentence": 40 }
+  },
+  "codes": {
+    "patterns": [
+      "(?<![A-Za-z0-9_])[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-[0-9]+[a-z]?(?![A-Za-z0-9_])",
+      "(?<![A-Za-z0-9_])[A-Z]{1,3}[0-9]{1,3}[a-z]?(?![A-Za-z0-9_])",
+      "(?<![A-Za-z0-9_])[a-z0-9][a-z0-9-]{0,15}-~[0-9a-f]{4,8}(?![A-Za-z0-9_])",
+      "(?<![A-Za-z0-9_&])#[0-9]+(?![A-Za-z0-9_])"
+    ],
+    "allowed": ["P0", "P1", "P2", "P3", "Q1", "Q2", "Q3", "Q4", "UTF-8", "SHA-1", "SHA-256", "ISO-8601", "C4"],
+    "gloss_chars": ["'", "\"", "’", "`", "*"]
+  },
+  "skip_prefixes": ["Ledger-Claims:", "Co-Authored-By:", "Realized-by:", "Implementation:"]
+}

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import importlib
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -31,22 +30,20 @@ def load(name: str) -> ModuleType:
 
 
 markdown = load("markdown")
+config = load("config")
 Codes = markdown.Codes
 
-# Four code shapes (a hyphenated record such as ORB-12, a short one such as KX7, a short name and
-# hash such as beacon-~a1c9, an issue number such as #318), the words that are never codes, and
-# the characters that make a bracket after them a gloss.
-DEFAULT_CODES: Codes = Codes(
-    patterns=tuple(re.compile(pattern) for pattern in (
-        r"(?<![A-Za-z0-9_])[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-[0-9]+[a-z]?(?![A-Za-z0-9_])",
-        r"(?<![A-Za-z0-9_])[A-Z]{1,3}[0-9]{1,3}[a-z]?(?![A-Za-z0-9_])",
-        r"(?<![A-Za-z0-9_])[a-z]+-~[0-9a-f]{4,}(?![A-Za-z0-9_])",
-        r"(?<![A-Za-z0-9_&])#[0-9]+(?![A-Za-z0-9_])",
-    )),
-    allowed=frozenset({"P0", "P1", "P2", "P3", "Q1", "Q2", "Q3", "Q4", "UTF-8", "SHA-1",
-                       "SHA-256", "ISO-8601"}),
-    gloss_chars=frozenset({"'", '"', "’", "`", "*"}),
-)
+
+def _default_codes() -> Codes:
+    with tempfile.TemporaryDirectory(prefix="writing defaults ") as empty:
+        return config.load(Path(empty)).codes
+
+
+# What a code looks like and which words are never codes, as ``defaults.json`` has them: four
+# shapes (a hyphenated record such as ORB-12, a short one such as KX7, a short name and hash such
+# as beacon-~a1c9, an issue number such as #318), the words that are never codes, and the
+# characters that make a bracket after them a gloss. No project file and no work ledger.
+DEFAULT_CODES: Codes = _default_codes()
 
 
 def run_git(repo: Path, *args: str) -> str:
