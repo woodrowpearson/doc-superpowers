@@ -35,3 +35,6 @@ node_modules/
 search/.venv/
 search/**/__pycache__/
 search/.pytest_cache/
+
+# The writing engine (scripts/writing/): bytecode, from a run without -B
+scripts/writing/**/__pycache__/
