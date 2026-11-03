@@ -114,10 +114,11 @@ exists for. **Chosen: a count per folder and register**, with `writing migrate` 
 
 ### The engine
 
-`scripts/writing/` holds three Python files and a defaults file:
+`scripts/writing/` holds four Python files and a defaults file:
 
 | File | What it does |
 |---|---|
+| `config.py` | The configuration reader: the defaults merged with the project's file, and each file's register |
 | `lint.py` | The writing lint: whole-file check, range mode, ceilings, JSON output |
 | `anchors.py` | The anchor check: every identifier, code, number and link target survives a rewrite |
 | `markdown.py` | The shared parser: prose lines, paragraphs, code spans, the file-path rule |
@@ -365,8 +366,8 @@ Each step is its own branch and release. Each default-on surface lands only afte
 own output passes and the fix it names exists.
 
 1. **Engine.** `scripts/writing/`, the `writing` verbs, `defaults.json` and the configuration
-   reader, and the fixes above. The three test suites move to pytest in a small locked dev project,
-   with a CI leg on Python 3.9. The rule block, the reference page and the help topic ship too.
+   reader, and the fixes above. The three test suites move to the standard library's `unittest`,
+   with a CI leg on Python 3.9. The locked pytest needs Python 3.10, so it cannot run at the floor. The rule block, the reference page and the help topic ship too.
    `check-ci.sh` gains a `writing` check, and `SECURITY.md` a `python3` row with floor 3.9.
 2. **House style.** The template and prompt rewrites, the static gate over them, and the removal
    of the injected-task skip.
@@ -386,7 +387,7 @@ Step 1 is also all that a project running its own copy of the lint needs to swit
 
 ## Left to the builder
 
-- The pytest project's layout and how `check-ci.sh` picks the 3.9 interpreter on each leg.
+- How `check-ci.sh` picks the 3.9 interpreter on each leg.
   GitHub's macOS image likely puts a newer Python first on the path.
 - The exact JSON of `writing counts`, and how `audit` folds it into the report.
 - How the configuration's path rules match: prefix lists, as in the source, or globs.
