@@ -65,8 +65,8 @@ class Defaults(unittest.TestCase):
         self.assertTrue(all(isinstance(pattern, re.Pattern) for pattern in codes.patterns))
         self.assertTrue({"P0", "Q4", "UTF-8", "SHA-256", "C4"} <= codes.allowed)
         self.assertEqual(codes.gloss_chars, frozenset({"'", '"', "’", "`", "*"}))
-        self.assertEqual(loaded.skip_prefixes, ("Ledger-Claims:", "Co-Authored-By:",
-                                                "Realized-by:", "Implementation:"))
+        self.assertEqual(loaded.skip_prefixes, ("Ledger-Claims:", "Co-Authored-By:"))
+        self.assertEqual(loaded.skip_blocks, ("Implementation:", "Realized-by:"))
 
     def test_the_default_patterns_find_each_code_shape(self) -> None:
         with support.git_repo() as repo:
@@ -124,7 +124,7 @@ class ProjectFile(unittest.TestCase):
             put(repo, project({
                 "codes": {"patterns": [r"(?<![A-Za-z0-9_])TKT/[0-9]+"], "allowed": ["TKT/0"],
                           "gloss_chars": ["~"]},
-                "skip_prefixes": ["Reviewed-by:"]}))
+                "skip_prefixes": ["Reviewed-by:"], "skip_blocks": ["Steps:"]}))
 
             loaded = config.load(repo)
 
@@ -133,8 +133,24 @@ class ProjectFile(unittest.TestCase):
                          ["TKT/21", "ORB-12"])
         self.assertTrue({"TKT/0", "UTF-8"} <= loaded.codes.allowed)
         self.assertEqual(loaded.codes.gloss_chars, frozenset({"'", '"', "’", "`", "*", "~"}))
-        self.assertEqual(loaded.skip_prefixes[-2:], ("Implementation:", "Reviewed-by:"))
-        self.assertEqual(loaded.skip_prefixes[0], "Ledger-Claims:")
+        self.assertEqual(loaded.skip_prefixes, ("Ledger-Claims:", "Co-Authored-By:",
+                                                "Reviewed-by:"))
+        self.assertEqual(loaded.skip_blocks, ("Implementation:", "Realized-by:", "Steps:"))
+
+    def test_skip_blocks_add_to_the_defaults_without_repeating_them(self) -> None:
+        cases = (
+            ("a header already in the defaults", ["Realized-by:", "Steps:"],
+             ("Implementation:", "Realized-by:", "Steps:")),
+            ("an empty list", [], ("Implementation:", "Realized-by:")),
+        )
+        for name, listed, expected in cases:
+            with self.subTest(name), support.git_repo() as repo:
+                put(repo, project({"skip_blocks": listed}))
+
+                loaded = config.load(repo)
+
+                self.assertEqual(loaded.skip_blocks, expected)
+                self.assertEqual(loaded.skip_prefixes, ("Ledger-Claims:", "Co-Authored-By:"))
 
     def test_project_registers_win_over_the_defaults(self) -> None:
         with support.git_repo() as repo:
@@ -519,6 +535,12 @@ class MalformedConfig(unittest.TestCase):
             ("a two-character gloss", '{"codes": {"gloss_chars": ["ab"]}}',
              "codes.gloss_chars[0]"),
             ("an empty skipped prefix", '{"skip_prefixes": [""]}', "skip_prefixes[0]"),
+            ("an empty skipped block header", '{"skip_blocks": ["Steps:", ""]}',
+             "skip_blocks[1]"),
+            ("a number among the skipped block headers", '{"skip_blocks": [3]}',
+             "skip_blocks[0]"),
+            ("a string for the skipped block headers", '{"skip_blocks": "Steps:"}',
+             "skip_blocks"),
             ("a top level that is a list", "[]", "object"),
             ("a top level that is null", "null", "object"),
         ]
@@ -569,7 +591,7 @@ class MalformedConfig(unittest.TestCase):
 class Shapes(unittest.TestCase):
     def test_the_named_tuples_have_the_documented_fields(self) -> None:
         self.assertEqual(config.Config._fields, ("enabled", "codes", "limits", "skip_prefixes",
-                                                 "doc_types", "paths"))
+                                                 "skip_blocks", "doc_types", "paths"))
         self.assertEqual(config.Limits._fields, ("sentence", "item", "item_sentences"))
         self.assertEqual(config.PathRule._fields, ("prefix", "suffix", "register"))
         self.assertFalse(hasattr(config, "COUNTING_VERSION"))

@@ -5,7 +5,7 @@ each Markdown file is written in.
 ``docs/writing/config.json``, from the working tree or from a git revision, and returns one
 ``Config``. JSON has no comments, so what the defaults file means is written down here.
 
-The project's file has five top-level keys, all optional, and any other key is an error::
+The project's file has six top-level keys, all optional, and any other key is an error::
 
     enabled          true or false: the switch a caller reads
     registers        doc_types (a doc-index type to a register) and paths (a list of rules)
@@ -13,6 +13,8 @@ The project's file has five top-level keys, all optional, and any other key is a
     codes            patterns (regular expressions), allowed (words that are not codes) and
                      gloss_chars (characters that let a bracket explain what stands before it)
     skip_prefixes    line prefixes the lint leaves alone, such as a commit trailer
+    skip_blocks      headers that open a block of list items the lint leaves alone, such as the
+                     ``Implementation:`` block a tool writes
 
 A register is ``terse`` or ``full``. Each has its own limits; ``full`` sets no limit on a list
 item. A file with no register is not linted.
@@ -66,7 +68,7 @@ ARCHIVE = "docs/archive/"
 
 REGISTERS = ("terse", "full")
 RECORD_TYPES = frozenset({"plan", "issue", "audit", "design-spec"})
-TOP_KEYS = ("enabled", "registers", "limits", "codes", "skip_prefixes")
+TOP_KEYS = ("enabled", "registers", "limits", "codes", "skip_prefixes", "skip_blocks")
 LIMIT_KEYS = ("sentence", "item", "item_sentences")
 GLOB_CHARS = re.compile(r"[*?{}\\]")
 
@@ -99,6 +101,7 @@ class Config(NamedTuple):
     codes: Codes
     limits: dict[str, Limits]
     skip_prefixes: tuple[str, ...]
+    skip_blocks: tuple[str, ...]
     doc_types: dict[str, str]
     paths: tuple[PathRule, ...]
 
@@ -241,8 +244,8 @@ def _rules(value: Any, label: str, key: str) -> list[PathRule]:
 
 def _layer(raw: Any, label: str) -> dict:
     """Check one file's content and return what it sets, in a plain form: any of ``enabled``,
-    ``doc_types``, ``paths``, ``limits``, ``patterns``, ``allowed``, ``gloss_chars`` and
-    ``skip_prefixes``."""
+    ``doc_types``, ``paths``, ``limits``, ``patterns``, ``allowed``, ``gloss_chars``,
+    ``skip_prefixes`` and ``skip_blocks``."""
     if not isinstance(raw, dict):
         raise Malformed(f"{label}: the top level must be an object")
     _only(raw, TOP_KEYS, label, "")
@@ -283,6 +286,8 @@ def _layer(raw: Any, label: str) -> dict:
             layer["gloss_chars"] = _strings(codes["gloss_chars"], label, "codes.gloss_chars", 1)
     if "skip_prefixes" in raw:
         layer["skip_prefixes"] = _strings(raw["skip_prefixes"], label, "skip_prefixes")
+    if "skip_blocks" in raw:
+        layer["skip_blocks"] = _strings(raw["skip_blocks"], label, "skip_blocks")
     return layer
 
 
@@ -399,6 +404,7 @@ def load(root: Path, rev: str | None = None) -> Config:
                          | frozenset(mine.get("gloss_chars", [])))),
         limits=limits,
         skip_prefixes=tuple(_extend(base.get("skip_prefixes", []), mine.get("skip_prefixes", []))),
+        skip_blocks=tuple(_extend(base.get("skip_blocks", []), mine.get("skip_blocks", []))),
         doc_types={**base.get("doc_types", {}), **mine.get("doc_types", {})},
         paths=tuple(_extend(_extend(mine.get("paths", []), ledger_rules), base.get("paths", []))))
 
