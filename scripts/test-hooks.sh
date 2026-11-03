@@ -8043,7 +8043,9 @@ test_maintainer_hook_refuses_global_hooks_path() {
 # ci_fixture: scripts/check-ci.sh with stub suites, check-self-install.sh,
 # doc-tools.sh and claude: each logs "<name> <args> BASH_BIN=… NODE=… YAML=…
 # SHELLCHECK=…" to $CI_LOG and exits $STUB_RC_<name> (default 0); a suite
-# prints a harness result line.
+# prints a harness result line. The writing check runs the host's own Pythons
+# over a stub unittest package that logs "writing PY=<major.minor> ISOLATED=<0|1>
+# UTF8=<0|1>", once per interpreter, and fails unless $STUB_RC_writing is 0.
 ci_fixture() {
   setup
   mkdir -p scripts stubbin
@@ -8060,6 +8062,12 @@ ci_fixture() {
       '[ "$rc" = 0 ] || echo "  FAIL: stub $n failed on purpose"' \
       'echo "Results: 3 passed, $rc failed, 3 total"' 'exit "$rc"' > "scripts/test-$s.sh"
   done
+  mkdir -p scripts/writing/tests
+  : > scripts/writing/tests/__init__.py
+  printf '%s\n' 'import os, sys, unittest' '' 'class Stub(unittest.TestCase):' \
+    '    def test_stub(self):' "        with open(r\"$CI_LOG\", \"a\") as log:" \
+    '            log.write("writing PY=%d.%d ISOLATED=%d UTF8=%d\n" % (sys.version_info[0], sys.version_info[1], sys.flags.isolated, sys.flags.utf8_mode))' \
+    '        self.assertEqual(os.environ.get("STUB_RC_writing", "0"), "0", "stub writing failed on purpose")' > scripts/writing/tests/test_stub.py
   # shellcheck disable=SC2016
   printf '%s\n' '#!/bin/sh' 'echo "self-install BASH_BIN=$BASH_BIN" >> "'"$CI_LOG"'"' 'exit "${STUB_RC_self_install:-0}"' > scripts/check-self-install.sh
   # shellcheck disable=SC2016
@@ -8131,8 +8139,8 @@ test_check_ci_runs_what_ci_runs() {
   ln -s "$(type -P "$BASH_BIN" || printf '%s' "$BASH_BIN")" "$b2"
   ci_run -- --list
   assert_eq "0" "$CI_RC" "--list exits 0"
-  assert_eq "toolchain doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger search self-install zizmor dep-audit gitleaks check-version tag plugin-validate" \
-    "$(printf '%s' "$CI_OUT" | tr '\n' ' ' | sed 's/ $//')" "…the checks: the seven suites among them, then search (the doc-search pytest suite)"
+  assert_eq "toolchain doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger writing search self-install zizmor dep-audit gitleaks check-version tag plugin-validate" \
+    "$(printf '%s' "$CI_OUT" | tr '\n' ' ' | sed 's/ $//')" "…the checks: the seven suites among them, then writing (the writing unittest suite) and search (the doc-search pytest suite)"
   ci_run -- nope
   assert_eq "2" "$CI_RC" "an unknown check: exit 2"
   ci_run -- --nope
@@ -8168,20 +8176,20 @@ hooks BASH_BIN=$b2 NODE=1 YAML=1 SHELLCHECK=1" "$(cat "$CI_LOG")" \
 }
 
 test_check_ci_modes() {
-  echo "test: check-ci.sh: --fast runs one interpreter, the quick suites, self-install and check-version; the default run is everything, the tag with --warn; a named tag is strict; plugin-validate runs claude plugin validate ."
+  echo "test: check-ci.sh: --fast runs one interpreter, the quick suites, writing, self-install and check-version; the default run is everything, the tag with --warn; a named tag is strict; plugin-validate runs claude plugin validate ."
   ci_fixture
   ci_run -- --fast
   assert_eq "0" "$CI_RC" "--fast exits 0"
-  assert_eq "spec-status-model doc-pr-release merge-driver self-install doc-tools.sh" \
-    "$(awk '{ print $1 }' "$CI_LOG" | tr '\n' ' ' | sed 's/ $//')" "…the quick suites, then self-install and check-version, each once (one interpreter); no search (pytest)"
+  assert_eq "spec-status-model doc-pr-release merge-driver writing self-install doc-tools.sh" \
+    "$(awk '$1 != "writing" || !w++ { print $1 }' "$CI_LOG" | tr '\n' ' ' | sed 's/ $//')" "…the quick suites, then writing (once per Python the host has), self-install and check-version, each once (one bash); no search (pytest)"
   if [ "$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null)" = 3 ]; then
     assert_contains "$(head -n 1 "$CI_LOG")" "BASH_BIN=/bin/bash" "…that interpreter: bash 3.2, the floor, when the host has it"
   fi
 
   : > "$CI_LOG"
   ci_run -- --bash "$BASH_BIN"
-  assert_eq "doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger uv self-install uvx uv uvx gitleaks doc-tools.sh doc-tools.sh claude" \
-    "$(awk '{ print $1 }' "$CI_LOG" | tr '\n' ' ' | sed 's/ $//')" "the default run: the seven suites, search (pytest), self-install, check-version, the tag, plugin-validate"
+  assert_eq "doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger writing uv self-install uvx uv uvx gitleaks doc-tools.sh doc-tools.sh claude" \
+    "$(awk '$1 != "writing" || !w++ { print $1 }' "$CI_LOG" | tr '\n' ' ' | sed 's/ $//')" "the default run: the seven suites, writing, search (pytest), self-install, check-version, the tag, plugin-validate"
   assert_contains "$(cat "$CI_LOG")" "doc-tools.sh check-version --tag --warn" "…the tag as a warning (CI checks it on main only)"
   assert_contains "$(cat "$CI_LOG")" "claude plugin validate ." "…and claude plugin validate ."
   # (PASS or FAIL: whether this host has every tool is not this test's business)
@@ -8238,6 +8246,55 @@ test_check_ci_search() {
   ci_run DOC_SP_REQUIRE_UV=0 -- --bash "$BASH_BIN" search
   assert_contains "$CI_OUT" "PASS  search (pytest)" "DOC_SP_REQUIRE_UV=0 with uv present: the suite runs"
   assert_contains "$(cat "$CI_LOG")" "UV=0" "…the exported 0 is kept"
+  teardown
+}
+
+test_check_ci_writing() {
+  echo "test: check-ci.sh writing: the writing unittest suite runs from the repository root, isolated and in UTF-8, under each distinct Python 3.9 or later it finds, its version printed; DOC_SP_REQUIRE_FLOOR_PYTHON=1 fails unless a run was on 3.9; a Python below 3.9 is skipped; a failing run exits 1"
+  ci_fixture
+  local py has39=0 runs
+  for py in python3 /usr/bin/python3; do
+    if [ "$("$py" -I -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)" = 3.9 ]; then
+      has39=1
+    fi
+  done
+
+  ci_run -- --bash "$BASH_BIN" writing
+  assert_eq "0" "$CI_RC" "writing: exit 0"
+  runs=$(grep -c '^writing ' "$CI_LOG")
+  assert_true "…at least one run, from the repository root (the stub package is there)" test "$runs" -ge 1
+  assert_eq "$runs" "$(grep -c ' ISOLATED=1 UTF8=1$' "$CI_LOG")" "…each isolated (-I) and in UTF-8 mode (-X utf8)"
+  assert_eq "$runs" "$(printf '%s\n' "$CI_OUT" | grep -c '^PASS  writing  \[Python 3\.')" "…a PASS summary line per run, with its version"
+  assert_eq "$runs" "$(printf '%s\n' "$CI_OUT" | grep -c '^--- writing (unittest) under .* (Python 3\.')" "…and the version printed before each"
+  assert_contains "$CI_OUT" "Ran 1 test in" "…carrying unittest's own closing line"
+  assert_eq "" "$(find scripts/writing -name __pycache__)" "…leaving no bytecode beside the scripts (-B)"
+
+  : > "$CI_LOG"
+  ci_run DOC_SP_REQUIRE_FLOOR_PYTHON=1 -- --bash "$BASH_BIN" writing
+  if [ "$has39" = 1 ]; then
+    assert_eq "0" "$CI_RC" "DOC_SP_REQUIRE_FLOOR_PYTHON=1 on a host with a Python 3.9: exit 0"
+    assert_contains "$CI_OUT" "PASS  writing  [Python 3.9." "…a run on 3.9"
+  else
+    assert_eq "1" "$CI_RC" "DOC_SP_REQUIRE_FLOOR_PYTHON=1 with no Python 3.9: exit 1"
+    assert_contains "$CI_OUT" "FAIL  writing (no run on Python 3.9)" "…named in the summary"
+    ci_run -- --bash "$BASH_BIN" writing
+    assert_contains "$CI_OUT" "NOTE: no Python 3.9 on this host" "…and without the flag, a NOTE and a pass"
+  fi
+
+  # A python3 below the floor is skipped, never run.
+  : > "$CI_LOG"
+  printf '%s\n' '#!/bin/sh' 'echo "3.8.10 /stub/python3.8"' > stubbin/python3
+  chmod +x stubbin/python3
+  ci_run -- --bash "$BASH_BIN" writing
+  assert_contains "$CI_OUT" "below the 3.9 floor: not run" "a Python 3.8 on PATH: skipped, saying so"
+  assert_not_contains "$CI_OUT" "(Python 3.8" "…and never run (no run line for it)"
+  rm -f stubbin/python3
+
+  : > "$CI_LOG"
+  ci_run STUB_RC_writing=1 -- --bash "$BASH_BIN" writing
+  assert_eq "1" "$CI_RC" "a failing run: exit 1"
+  assert_contains "$CI_OUT" "FAIL  writing  [Python 3." "…named in the summary"
+  assert_contains "$CI_OUT" "FAIL: test_stub" "…with the failing test shown (not just the log's path)"
   teardown
 }
 
@@ -8302,6 +8359,7 @@ test_maintainer_hook_refuses_global_hooks_path
 test_check_ci_runs_what_ci_runs
 test_check_ci_modes
 test_check_ci_search
+test_check_ci_writing
 test_check_ci_security_checks
 
 
