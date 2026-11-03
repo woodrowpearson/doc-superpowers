@@ -260,6 +260,14 @@ class Registers(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.register(path), expected)
 
+    def test_an_archived_doc_with_a_type_is_not_linted(self) -> None:
+        docs = index(docs__archive__specs__old_md="spec", docs__archive__plans__old_md="plan")
+
+        self.assertIsNone(self.register("docs/archive/specs/old.md", docs))
+        self.assertIsNone(self.register("docs/archive/plans/old.md", docs))
+        self.assertTrue(config.is_record("docs/archive/specs/old.md", docs))
+        self.assertTrue(config.is_record("docs/archive/plans/old.md", docs))
+
     def test_a_non_markdown_file_is_not_linted_even_when_the_index_types_it(self) -> None:
         docs = {"docs/api/openapi.yaml": {"doc_type": "api-contracts"}}
 

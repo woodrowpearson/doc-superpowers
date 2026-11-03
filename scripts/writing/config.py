@@ -28,7 +28,8 @@ How the project's file combines with the defaults:
 
 How a file gets its register (``register_for``):
 
-1. A file that is not Markdown (its name does not end in ``.md``) gets none.
+1. A file that is not Markdown (its name does not end in ``.md``) gets none, and neither does
+   one under ``docs/archive/``, whatever its doc-index type says. Archived docs are never linted.
 2. Its doc-index entry's ``doc_type``, when the entry has one: the register ``registers.doc_types``
    names, and ``full`` for a type it does not name.
 3. The first path rule that matches: the path starts with the rule's ``prefix`` and ends with its
@@ -436,9 +437,10 @@ def _doc_type(path: str, index: dict | None) -> str | None:
 def register_for(path: str, config: Config, index: dict | None) -> str | None:
     """The register of the Markdown file at ``path`` (relative to the top level, with ``/``):
     ``"terse"`` or ``"full"``, or ``None`` when it is not linted. ``index`` is ``read_index``'s
-    answer, or ``None``. The doc-index type decides first, then the path rules."""
+    answer, or ``None``. A file that is not Markdown, or is under ``docs/archive/``, is never
+    linted. For any other the doc-index type decides first, then the path rules."""
     path = _clean(path)
-    if not path.lower().endswith(".md"):
+    if not path.lower().endswith(".md") or path.startswith(ARCHIVE):
         return None
     doc_type = _doc_type(path, index)
     if doc_type is not None:
