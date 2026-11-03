@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The writing lint, whole-file check.
+"""The writing lint: whole files, and what a branch wrote.
 
 Three faults make Markdown hard to read in one pass, and this lint reports them. A code, such as
 a record number, appears with nothing to explain it. A sentence runs past the word limit of its
@@ -9,6 +9,7 @@ whether the words beside a code describe it, whether a brief sentence says anyth
 plain words hide jargon, or whether the main point comes first.
 
     lint.py check [--profile terse|full] [--github] [--format text|json] [--name LABEL] FILE...|-
+    lint.py range [--format text|json] BASE...HEAD
 
 ``check`` reads whole files, or standard input for ``-``. A register sets the limits. Without
 ``--profile`` each file's register comes from the project's configuration, by its doc-index type
@@ -16,16 +17,30 @@ and then its path (``config.register_for``), the path being taken from the top o
 A file with no register is named on standard error and is not a finding. Standard input has no
 path, so it needs ``--profile``; ``--name`` is only the label its findings carry.
 
+``range`` judges a branch by the text it wrote. It takes the merge base of BASE and HEAD and
+compares it with the committed HEAD, never with the working tree. A sentence is the branch's own
+when a line the diff adds holds it and neither the old copy of the file (under its old name, for a
+rename) nor the Markdown files the branch removes have a sentence like it, so text that merely
+moved counts as old. Digits, link targets and line breaks do not set two sentences apart. When a
+new sentence rewrites an older one (the difflib ratio of their words is 0.6 or more), only the harm
+the rewrite did is reported: a code that was not bare before, more words in the sentence, more
+words or sentences in the item. BASE alone means BASE...HEAD; the head is always HEAD. Each file's
+register is looked up in the configuration and the doc-index as committed at HEAD. Records are
+linted, ``docs/archive/`` never is, and a file with no register is passed over without a word. The
+output is that of ``check``, with one more line for each file that has new sentences: its density,
+counted over the whole file.
+
 The exit status is 0 for a clean run and 1 when there are findings, each printed as
-``path:line: rule: message``. It is 2 when the command line is wrong, an input cannot be opened
-or decoded, the configuration is unusable, or the lint itself crashes. With ``--format json`` the
-findings are printed instead as one list of objects, one per ``Finding``, with all its fields.
+``path:line: rule: message``. It is 2 when the command line is wrong (for ``range``, also a head
+other than HEAD), an input cannot be opened or decoded, git cannot resolve the base, the
+configuration is unusable, or the lint itself crashes. With ``--format json`` the findings are
+printed instead as one list of objects, one per ``Finding``, with all its fields.
 
 ``Config`` (``config.py``, ``defaults.json``) supplies the limits, the shape of a code, the words
 that are not codes, the line prefixes to leave alone and the headers of the blocks to leave alone
 (the ``Implementation:`` list a tool writes into a decision record); ``markdown.py`` does the
 reading. Its ``enabled`` switch is for callers that run the lint unasked (the audit, the review,
-the hooks): an explicit ``check`` always runs.
+the hooks): an explicit ``check`` or ``range`` always runs.
 """
 
 from __future__ import annotations
@@ -36,7 +51,8 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import NamedTuple
 
@@ -63,6 +79,23 @@ class Finding(NamedTuple):
     paragraph_last_line: int
 
 
+class Base(NamedTuple):
+    """The old sentence behind a new one that rewrites it, as range mode remembers it: the number
+    of its words, the codes bare in it (digits kept, so KX7 and KX8 differ) and the size of its
+    paragraph in words and in sentences. A finding counts as the rewrite's own only when it goes
+    beyond these."""
+
+    words: int
+    bare: frozenset[str]
+    paragraph_words: int
+    paragraph_sentences: int
+
+
+class Unreadable(ValueError):
+    """A base, a file or an answer from git that range mode cannot use. The command prints it
+    and exits with status 2."""
+
+
 # Words whose closing full stop never ends a sentence.
 ABBREVIATIONS = frozenset({"e.g.", "i.e.", "cf.", "vs."})
 OPENERS = "\"'‘“([`*_"  # may stand before a word without being part of it
@@ -76,6 +109,11 @@ BACKTICK_SPAN = re.compile(r"`[^`\n]+`")
 # A sentence mark, perhaps followed by closing quotes, brackets or emphasis, before whitespace.
 SENTENCE_END = re.compile(r"[.!?]+[\"'’”)\]*_`]*(?=\s)")
 LETTER = re.compile(r"[^\W\d_]")
+HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
+NUMBER = re.compile(r"[0-9]+")
+# The lowest word-level difflib ratio at which a new sentence is taken for a rewrite of an old one.
+# A change of one word in ten scores 0.9; replacing two words in three scores far below this.
+SIMILAR = 0.6
 
 # Plan tasks written by `spec-inject` hold template wording rather than the author's own, hence
 # the skip. It goes once the templates follow the rule themselves.
@@ -371,12 +409,15 @@ def _line_at(starts: list[tuple[int, int]], offset: int) -> int:
 # A whole text
 
 
-def lint_text(text: str, path: str, register: str, config: Config, *,
-              github: bool = False) -> list[Finding]:
+def lint_text(text: str, path: str, register: str, config: Config, *, github: bool = False,
+              new: Mapping[str, Base | None] | None = None) -> list[Finding]:
     """Lint one Markdown text and return its findings sorted by line. ``register`` is
     ``"terse"`` or ``"full"``; ``config`` gives the limits, the code patterns and the prefixes to
     skip; ``path`` only labels the findings. Pass ``github=True`` for text GitHub renders, where
-    ``#N`` is linked already."""
+    ``#N`` is linked already. Range mode passes ``new``, a map from each new sentence (normalized)
+    to the old sentence it rewrites, or to ``None`` when it rewrites none. A finding then survives
+    only if it lies in a new sentence and the branch itself caused it (``_edit_adds``): an old
+    sentence beside new ones, or a fault the rewritten sentence had before, stays quiet."""
     if register not in config.limits:
         raise ValueError(f"unknown register {register!r}; expected one of "
                          + ", ".join(config.limits))
@@ -387,9 +428,12 @@ def lint_text(text: str, path: str, register: str, config: Config, *,
     findings: list[Finding] = []
     for paragraph in _lint_paragraphs(text, config.skip_prefixes, config.skip_blocks):
         joined, starts = _join(paragraph)
-        for rule, message, start, _ in _text_findings(
-                joined, register, limits, config.codes, item=bool(LIST_ITEM.match(joined)),
-                defined=defined, github=github, glossed=glossed):
+        found = _text_findings(
+            joined, register, limits, config.codes, item=bool(LIST_ITEM.match(joined)),
+            defined=defined, github=github, glossed=glossed)
+        if new is not None:
+            found = _added_by_edit(found, joined, new)
+        for rule, message, start, _ in found:
             findings.append(Finding(path, _line_at(starts, start), rule, message,
                                     paragraph[0][0], paragraph[-1][0]))
     return sorted(findings, key=lambda finding: finding.line)
@@ -404,6 +448,269 @@ def identifier_density(text: str, skip_prefixes: tuple[str, ...] = (),
         words += _words(joined)
         spans += len(BACKTICK_SPAN.findall(joined))
     return spans * 100 / words if words else 0.0
+
+
+# ---------------------------------------------------------------------------------------------
+# Range mode
+
+
+class Added(NamedTuple):
+    """A changed file that has new sentences: its path, its register, its text at HEAD and its
+    new sentences, normalized, each with the old sentence it edits (``None`` for none)."""
+
+    path: str
+    register: str
+    text: str
+    new: dict[str, Base | None]
+
+
+def _normal(sentence: str) -> str:
+    """``sentence`` reduced to what range mode compares: every run of digits becomes a single 0
+    and the whitespace is collapsed (link targets arrive blank). Two sentences that differ in a
+    number, a link target or a line break compare equal."""
+    return " ".join(NUMBER.sub("0", sentence).split())
+
+
+def _edit_adds(rule: str, now: str | int | tuple[int, int], base: Base | None) -> bool:
+    """Decide whether a finding belongs to the branch. A sentence with no old sentence behind it
+    always does. A rewritten one does when the rewrite brought in a code that was not bare in the
+    old sentence, has more words than the old sentence, or belongs to an item longer in words, or
+    in sentences, than the old paragraph was. ``now`` holds the flagged code, the flagged
+    sentence's word count, or a (words, sentences) pair for the item."""
+    if base is None:
+        return True
+    if rule == "bare-code":
+        return now not in base.bare
+    if rule == "long-sentence":
+        return isinstance(now, int) and now > base.words
+    return (isinstance(now, tuple)
+            and (now[0] > base.paragraph_words or now[1] > base.paragraph_sentences))
+
+
+def _added_by_edit(found: list[Found], joined: str, new: Mapping[str, Base | None]
+                   ) -> list[Found]:
+    """The findings of ``found``, a paragraph's, that sit in a new sentence and that the edit
+    added (``_edit_adds``). For a ``long-item`` any new sentence of the item will do."""
+    body = _body_start(joined)
+    spans = [(body + begin, body + finish, _normal(joined[body + begin:body + finish]))
+             for begin, finish in _sentence_spans(joined[body:])]
+    kept: list[Found] = []
+    for rule, message, start, end in found:
+        about = [normal for begin, finish, normal in spans
+                 if rule == "long-item" or begin <= start < finish]
+        now: str | int | tuple[int, int]
+        if rule == "bare-code":
+            now = joined[start:end]
+        elif rule == "long-sentence":
+            now = _words(joined[start:end])
+        else:
+            now = (_words(joined[body:]), len(spans))
+        if any(_edit_adds(rule, now, new[normal]) for normal in about if normal in new):
+            kept.append((rule, message, start, end))
+    return kept
+
+
+def _bare_codes(sentence: str, config: Config) -> frozenset[str]:
+    """The codes bare in a sentence taken alone, as written: neither the document's definitions
+    nor earlier glosses help. Digits stay, unlike in ``_normal``, so a further code of a series
+    the sentence already carries bare still counts as the branch's."""
+    return frozenset(sentence[start:end] for rule, _, start, end in
+                     _text_findings(sentence, "terse", config.limits["terse"], config.codes,
+                                    item=False, defined=frozenset(), github=False, glossed=set())
+                     if rule == "bare-code")
+
+
+def _base_sentences(text: str, config: Config) -> list[tuple[str, Base]]:
+    """The sentences of an old text, in normal form, each paired with its ``Base``."""
+    found = []
+    for paragraph in _lint_paragraphs(text, config.skip_prefixes, config.skip_blocks):
+        joined, _ = _join(paragraph)
+        body = _body_start(joined)
+        spans = _sentence_spans(joined[body:])
+        words = _words(joined[body:])
+        for start, end in spans:
+            piece = joined[body + start:body + end]
+            found.append((_normal(piece), Base(_words(piece), _bare_codes(piece, config), words,
+                                               len(spans))))
+    return found
+
+
+def _closest(normal: str, candidates: list[tuple[list[str], Base]]) -> Base | None:
+    """The candidate whose words come closest to ``normal`` (difflib's ratio), provided one
+    reaches ``SIMILAR``."""
+    matcher = SequenceMatcher(None, autojunk=False)
+    matcher.set_seq2(normal.split())
+    best, found = SIMILAR, None
+    for words, base in candidates:
+        matcher.set_seq1(words)
+        if matcher.real_quick_ratio() < best or matcher.quick_ratio() < best:
+            continue
+        if (ratio := matcher.ratio()) >= best:
+            best, found = ratio, base
+    return found
+
+
+def _sentence_lines(paragraph: list[tuple[int, str]]) -> Iterator[tuple[str, range]]:
+    """Each sentence of ``paragraph`` as ``lint_text`` cuts it, plus the lines it covers."""
+    joined, starts = _join(paragraph)
+    body = _body_start(joined)
+    for start, end in _sentence_spans(joined[body:]):
+        yield (joined[body + start:body + end],
+               range(_line_at(starts, body + start), _line_at(starts, body + end - 1) + 1))
+
+
+def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True)
+    except OSError as error:
+        raise Unreadable(f"cannot run git ({error.strerror or error})") from None
+
+
+def _git(root: Path, *args: str) -> bytes:
+    """What ``git`` prints on standard output for ``args``, undecoded."""
+    done = _run_git(root, *args)
+    if done.returncode:
+        detail = os.fsdecode(done.stderr).strip() or f"exit status {done.returncode}"
+        raise Unreadable(f"git {' '.join(args)}: {detail}")
+    return done.stdout
+
+
+def _text_at(root: Path, rev: str, path: str, *, head: bool) -> str:
+    """The text of ``path`` in revision ``rev``, minus any byte-order mark. The copy at HEAD must
+    be UTF-8. An old copy is only what the branch is compared with, so a byte it cannot decode is
+    replaced rather than refused. Line endings are left alone: ``lint_text`` and the paragraph
+    reader treat CRLF and CR as LF themselves."""
+    raw = _git(root, "cat-file", "blob", f"{rev}:{path}")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        if head:
+            raise Unreadable(f"cannot read {path}: not UTF-8") from None
+        return raw.decode("utf-8-sig", errors="replace")
+
+
+def _merge_base(root: Path, base: str) -> str:
+    if base.startswith("-"):
+        raise Unreadable(f"base {base!r}: a base cannot start with -")
+    done = _run_git(root, "merge-base", base, "HEAD")
+    if done.returncode == 0:
+        return os.fsdecode(done.stdout).strip()
+    # Git stays silent when both tips exist and no commit it holds is common to them.
+    detail = (os.fsdecode(done.stderr).strip()
+              or "no merge base with HEAD (a shallow clone may have cut the history short)")
+    raise Unreadable(f"base {base!r}: {detail}")
+
+
+def _changes(root: Path, merge_base: str) -> tuple[list[tuple[str, str | None]], list[str]]:
+    """Which files the branch adds, edits or renames, each paired with the path it had in the
+    merge-base commit (``None`` for a new file), and, in a list of its own, which it deletes.
+    Renames come from ``git diff -M``. The names are read with ``-z`` so one holding a space, a
+    quote or a non-ASCII letter stays whole."""
+    fields = [os.fsdecode(field) for field in
+              _git(root, "diff", "--name-status", "-z", "-M", "--diff-filter=AMRD", merge_base,
+                   "HEAD", "--").split(b"\0")]
+    changed: list[tuple[str, str | None]] = []
+    deleted: list[str] = []
+    index = 0
+    while index < len(fields) and fields[index]:
+        status = fields[index]
+        if status.startswith("R"):
+            changed.append((fields[index + 2], fields[index + 1]))
+            index += 3
+            continue
+        path = fields[index + 1]
+        if status == "D":
+            deleted.append(path)
+        else:
+            changed.append((path, path if status == "M" else None))
+        index += 2
+    return changed, deleted
+
+
+def _moved_from(root: Path, merge_base: str, deleted: list[str], config: Config
+                ) -> list[tuple[str, Base]]:
+    """The sentences that the Markdown files the branch deletes held at the merge base: text
+    carried from a deleted file into another one is not new."""
+    return [sentence for path in deleted if path.lower().endswith(".md")
+            for sentence in _base_sentences(_text_at(root, merge_base, path, head=False), config)]
+
+
+def _new_in_head(root: Path, merge_base: str, path: str, source: str | None,
+                 moved: list[tuple[str, Base]], config: Config
+                 ) -> tuple[str, list[tuple[str, Base | None]]]:
+    """Read ``path`` at HEAD and find what the branch wrote in it: the text, and each new
+    sentence, normalized, beside the old sentence it rewrites (``None`` if it rewrites none). A
+    line the diff adds must hold the sentence, and neither ``source`` (the name the file had in
+    the merge-base commit) nor ``moved`` may hold one that normalizes the same. The old
+    sentence is the closest one (``_closest``) among those HEAD no longer contains, because a
+    rewrite replaces the old words. Only commits count: the working tree is never read."""
+    text = _text_at(root, "HEAD", path, head=True)
+    added: set[int] | None = None  # None: the file is new, so every line counts
+    old = ""
+    if source is not None:
+        diff = _git(root, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text",
+                    "--unified=0", f"{merge_base}:{source}", f"HEAD:{path}")
+        added = set()
+        for match in HUNK.finditer(diff.decode("utf-8", errors="replace")):
+            first, count = int(match.group(1)), int(match.group(2) or 1)
+            added.update(range(first, first + count))
+        if not added:
+            return text, []
+        old = _text_at(root, merge_base, source, head=False)
+    base = [*_base_sentences(old, config), *moved]
+    known = {normal for normal, _ in base}
+    now = [(_normal(sentence), span)
+           for paragraph in _lint_paragraphs(text, config.skip_prefixes, config.skip_blocks)
+           for sentence, span in _sentence_lines(paragraph)]
+    present = {normal for normal, _ in now}
+    candidates = [(normal.split(), info) for normal, info in base if normal not in present]
+    return text, [(normal, _closest(normal, candidates)) for normal, span in now
+                  if (added is None or added.intersection(span)) and normal not in known]
+
+
+def new_sentences(root: Path, base: str, path: str, config: Config) -> dict[str, Base | None]:
+    """The new sentences of ``path`` at HEAD, normalized, each beside the old sentence it
+    rewrites: the map ``lint_text(new=...)`` takes. A file the branch leaves alone gives an empty
+    dict."""
+    merge_base = _merge_base(root, base)
+    changed, deleted = _changes(root, merge_base)
+    sources = dict(changed)
+    if path not in sources:
+        return {}
+    moved = _moved_from(root, merge_base, deleted, config)
+    return dict(_new_in_head(root, merge_base, path, sources[path], moved, config)[1])
+
+
+def _range_files(root: Path, base: str, config: Config) -> list[Added]:
+    """Every Markdown file that a commit of the branch adds, edits or renames, when it has a
+    register and at least one new sentence. Registers come from the configuration and the
+    doc-index at HEAD: the caller loads the first as ``config``, and this reads the second."""
+    merge_base = _merge_base(root, base)
+    index = read_index(root, "HEAD")
+    changed, deleted = _changes(root, merge_base)
+    moved = _moved_from(root, merge_base, deleted, config)
+    files = []
+    for path, source in changed:
+        register = register_for(path, config, index)
+        if register is None:
+            continue
+        text, new = _new_in_head(root, merge_base, path, source, moved, config)
+        if new:
+            files.append(Added(path, register, text, dict(new)))
+    return files
+
+
+def _lint_files(files: list[Added], config: Config) -> list[Finding]:
+    return [finding for file in files
+            for finding in lint_text(file.text, file.path, file.register, config, new=file.new)]
+
+
+def lint_range(root: Path, base: str, config: Config) -> list[Finding]:
+    """Lint what HEAD has gained over the merge base of ``base`` and HEAD, in the repository at
+    ``root``. ``config`` should be ``load(root, "HEAD")``. Raises ``Unreadable`` when git cannot
+    resolve ``base`` or a file at HEAD cannot be decoded, and ``config.Malformed`` for a doc-index
+    at HEAD that cannot be used."""
+    return _lint_files(_range_files(root, base, config), config)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -484,6 +791,26 @@ def _check(args: argparse.Namespace) -> int:
     return status
 
 
+def _range(args: argparse.Namespace) -> int:
+    base, dots, head = args.range.partition("...")
+    if not base or ".." in base or (dots and head != "HEAD"):
+        args.usage("range takes BASE...HEAD, with three dots and HEAD, the committed tip, as "
+                   "the head")
+    # Unlike ``_top_level``, a directory outside any repository is an error here.
+    root = Path(os.fsdecode(_git(Path.cwd(), "rev-parse", "--show-toplevel")).rstrip("\n"))
+    settings = load(root, "HEAD")
+    files = _range_files(root, base, settings)
+    findings = _lint_files(files, settings)
+    if args.format == "json":
+        print(json.dumps([finding._asdict() for finding in findings], indent=2))
+    else:
+        _print_findings(findings)
+        for file in files:
+            density = identifier_density(file.text, settings.skip_prefixes, settings.skip_blocks)
+            print(f"{file.path}: {density:.1f} backtick spans per 100 words (whole file)")
+    return 1 if findings else 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="writing", description=(__doc__ or "").split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
@@ -503,16 +830,27 @@ def _parser() -> argparse.ArgumentParser:
     check.add_argument("files", nargs="+", metavar="FILE",
                        help="a Markdown file, or - for standard input")
     check.set_defaults(handler=_check, usage=check.error)
+    changes = commands.add_parser(
+        "range", help="lint what a branch wrote",
+        description="Lint the sentences the committed HEAD gained over the merge base of BASE and "
+        "HEAD. Exit status: 0 clean, 1 findings, 2 a wrong command line, a base that git cannot "
+        "resolve, or an unusable file.")
+    changes.add_argument("--format", choices=("text", "json"), default="text",
+                         help="json: a single list holding one object per finding (default text)")
+    changes.add_argument("range", metavar="BASE...HEAD",
+                         help="BASE is any commit-ish; the head is always HEAD, and BASE alone "
+                         "means BASE...HEAD")
+    changes.set_defaults(handler=_range, usage=changes.error)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     """Run the command in ``argv`` (default: the process's arguments) and return its exit
-    code. A configuration that cannot be used is reported, not raised."""
+    code. A configuration or a base that cannot be used is reported, not raised."""
     args = _parser().parse_args(argv)
     try:
         return args.handler(args)
-    except Malformed as error:
+    except (Malformed, Unreadable) as error:
         print(f"writing: {error}", file=sys.stderr)
         return 2
 
