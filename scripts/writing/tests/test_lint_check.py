@@ -13,28 +13,21 @@ import io
 import json
 import os
 import re
-import subprocess
 import sys
 import tempfile
 import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
-from typing import NamedTuple
 from unittest import mock
 
 from tests import support
+from tests.support import code_of, default_config, put, run, where
 
 lint = support.load("lint")
 config = support.load("config")
 
-LINT = support.WRITING / "lint.py"
 REPO_ROOT = support.WRITING.parents[1]
-
-
-def default_config() -> config.Config:
-    with tempfile.TemporaryDirectory(prefix="writing defaults ") as empty:
-        return config.load(Path(empty))
 
 
 # The shipped defaults, with no project file and no work ledger.
@@ -52,36 +45,6 @@ def check(text: str, register: str = "terse", **options: object) -> list:
 
 def rules(findings: list) -> list[str]:
     return [finding.rule for finding in findings]
-
-
-def where(findings: list) -> list[tuple[int, str]]:
-    return [(finding.line, finding.rule) for finding in findings]
-
-
-def code_of(finding: object) -> str:
-    return finding.message.split('"')[1]
-
-
-class Result(NamedTuple):
-    code: int
-    out: str
-    err: str
-
-
-def run(*args: str, cwd: Path, stdin: str | bytes | None = None) -> Result:
-    """Run the lint script as the wrapper will: an isolated interpreter, UTF-8 output."""
-    data = stdin.encode("utf-8") if isinstance(stdin, str) else stdin
-    done = subprocess.run([sys.executable, "-I", "-B", "-X", "utf8", str(LINT), *args],
-                          capture_output=True, cwd=str(cwd), input=data)
-    return Result(done.returncode, done.stdout.decode("utf-8"), done.stderr.decode("utf-8"))
-
-
-def put(root: Path, files: dict[str, str | bytes]) -> None:
-    """Write ``files`` under ``root`` without committing them."""
-    for name, content in files.items():
-        target = root / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content.encode("utf-8") if isinstance(content, str) else content)
 
 
 @contextmanager

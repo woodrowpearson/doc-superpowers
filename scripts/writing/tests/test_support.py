@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from tests import support
@@ -74,6 +74,44 @@ class GitRepo(unittest.TestCase):
         with support.git_repo() as repo:
             with self.assertRaises(subprocess.CalledProcessError):
                 support.run_git(repo, "show", "no-such-rev")
+
+
+class LintHelpers(unittest.TestCase):
+    """What the lint's tests share: the shipped configuration, reading findings, and running the
+    command line."""
+
+    def test_the_default_configuration_has_no_project_file(self) -> None:
+        settings = support.default_config()
+
+        self.assertEqual(settings.limits["terse"].sentence, 35)
+        self.assertEqual(settings.codes, support.DEFAULT_CODES)
+
+    def test_where_and_code_of_read_a_finding(self) -> None:
+        finding = SimpleNamespace(line=7, rule="bare-code", message='"KX7" has no words')
+
+        self.assertEqual(support.where([finding, finding]), [(7, "bare-code"), (7, "bare-code")])
+        self.assertEqual(support.code_of(finding), "KX7")
+
+    def test_put_writes_text_and_bytes_without_committing(self) -> None:
+        with support.git_repo() as repo:
+            support.put(repo, {"docs/a b.md": "café\n", "raw.bin": b"\xe9\r\n"})
+
+            self.assertEqual((repo / "docs/a b.md").read_bytes(), "café\n".encode("utf-8"))
+            self.assertEqual((repo / "raw.bin").read_bytes(), b"\xe9\r\n")
+            self.assertEqual(support.run_git(repo, "status", "--porcelain", "-uall").count("??"), 2)
+
+    def test_run_starts_the_lint_in_a_directory_and_feeds_standard_input(self) -> None:
+        with support.git_repo() as repo:
+            piped = support.run("check", "--profile", "terse", "-", cwd=repo,
+                                stdin="Rack KX7 holds rye.\n")
+            raw = support.run("check", "--profile", "terse", "-", cwd=repo, stdin=b"Fine.\n")
+            usage = support.run(cwd=repo)
+
+        self.assertEqual(piped.code, 1, piped.out + piped.err)
+        self.assertIn("<stdin>:1: bare-code: ", piped.out)
+        self.assertEqual((raw.code, raw.err), (0, ""))
+        self.assertEqual(usage.code, 2)
+        self.assertIsInstance(usage, support.Result)
 
 
 if __name__ == "__main__":
