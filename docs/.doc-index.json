@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-11-02T17:56:54Z",
+  "generated_at": "2026-11-03T21:59:52Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -913,6 +913,17 @@
       "replaces": null,
       "superseded_by": null,
       "last_verified": null
+    },
+    "docs/superpowers/specs/2026-11-03-writing-rule-design.md": {
+      "content_hash": "sha256:5e368c250daff45e5fe90daa2440a71d8308ee978999041c23775805011b2866",
+      "code_refs": [],
+      "code_oids": {},
+      "code_commit": null,
+      "doc_type": "design-spec",
+      "replaces": null,
+      "superseded_by": null,
+      "last_verified": "2026-11-03T21:59:52Z",
+      "implementation": []
     }
   }
 }
