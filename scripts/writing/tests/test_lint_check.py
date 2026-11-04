@@ -786,5 +786,30 @@ wind gauges stay off until {C} arrives.
                     lint.lint_text(self.coded_body(form), "body.md", "terse", CONFIG), [])
 
 
+class ShippedText(unittest.TestCase):
+    """The two texts this plugin ships about writing obey the rule they state. The rule block is
+    terse, because a project copies it into the file an agent reads between other work. The
+    reference page is full, because a reader opens it to learn the lint."""
+
+    RULE = REPO_ROOT / "references" / "writing-rule.md"
+    PAGE = REPO_ROOT / "references" / "writing.md"
+
+    def test_the_rule_block_passes_terse(self) -> None:
+        text = self.RULE.read_text(encoding="utf-8")
+        opening = re.search(r"^<!-- doc-superpowers:writing-rule v\d+\.\d+\.\d+ -->$", text,
+                            re.MULTILINE)
+        closing = "<!-- /doc-superpowers:writing-rule -->\n"
+        self.assertIsNotNone(opening, "the block has no opening marker line")
+        self.assertTrue(text.endswith(closing), "nothing may follow the closing marker")
+        block = text[opening.start():]
+        self.assertEqual(block.count("<!-- doc-superpowers:writing-rule"), 1)
+        self.assertEqual(lint.lint_text(block, "writing-rule.md", "terse", CONFIG), [])
+
+    def test_the_reference_page_passes_full(self) -> None:
+        # references/ has no register of its own, so the page is judged in the one it is written in.
+        text = self.PAGE.read_text(encoding="utf-8")
+        self.assertEqual(lint.lint_text(text, "writing.md", "full", CONFIG), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2332,9 +2332,11 @@ bump-version|cmd_bump_version|deps|
   .claude-plugin/plugin.json, .claude-plugin/marketplace.json,
   .cursor-plugin/plugin.json, gemini-extension.json; into the launcher
   stamp, the first "# doc-search launcher vX.Y.Z" line in the first 5 lines
-  of scripts/search/launch.sh; and into the search-rule stamp, the first
+  of scripts/search/launch.sh; into the search-rule stamp, the first
   "<!-- doc-superpowers:search-rule vX.Y.Z -->" line of
-  references/search-rule.md; each stamp when its file exists in the
+  references/search-rule.md; and into the writing-rule stamp, the first
+  "<!-- doc-superpowers:writing-rule vX.Y.Z -->" line of
+  references/writing-rule.md; each stamp when its file exists in the
   doc-superpowers tree (search/pyproject.toml and scripts/doc-tools.sh
   present: a project's own files of those names are skipped).
   RELEASE-NOTES.md is the canonical version: check-version reads it, and it
@@ -2344,10 +2346,10 @@ bump-version|cmd_bump_version|deps|
   repo root). Each file keeps its mode.
 check-version|cmd_check_version|deps|tag warn remote=
   [--tag [--remote <name>] [--warn]]
-  Verify that every manifest, and the stamps of scripts/search/launch.sh
-  and references/search-rule.md when those files exist in the
-  doc-superpowers tree (search/pyproject.toml and scripts/doc-tools.sh
-  present), carry
+  Verify that every manifest, and the stamps of scripts/search/launch.sh,
+  references/search-rule.md and references/writing-rule.md when those files
+  exist in the doc-superpowers tree (search/pyproject.toml and
+  scripts/doc-tools.sh present), carry
   RELEASE-NOTES.md's version: its first release heading, a line
   "## vMAJOR.MINOR.PATCH …" outside code fences (a pre-release suffix is
   refused, not skipped). Exits 1 on a mismatch, a manifest that is not
@@ -5959,12 +5961,16 @@ VERSION_FILES=(
 #   - The search rule's: the opening marker of the block a project copies from
 #     references/search-rule.md into AGENTS.md or CLAUDE.md (install.sh status
 #     --search-gate shows a copy's version but compares only its body).
+#   - The writing rule's: the opening marker of the block a project copies from
+#     references/writing-rule.md into AGENTS.md or CLAUDE.md, kept the same way.
 # A <form> holds no character special to grep -E or to sed's s|…|…|.
 LAUNCHER_STAMP_FILE="scripts/search/launch.sh"
 SEARCH_RULE_STAMP_FILE="references/search-rule.md"
+WRITING_RULE_STAMP_FILE="references/writing-rule.md"
 STAMP_FILES=(
   "$LAUNCHER_STAMP_FILE|launcher stamp|# doc-search launcher vX.Y.Z|5"
   "$SEARCH_RULE_STAMP_FILE|search-rule stamp|<!-- doc-superpowers:search-rule vX.Y.Z -->|0"
+  "$WRITING_RULE_STAMP_FILE|writing-rule stamp|<!-- doc-superpowers:writing-rule vX.Y.Z -->|0"
 )
 
 # _in_ds_tree: the cwd is the doc-superpowers tree.
