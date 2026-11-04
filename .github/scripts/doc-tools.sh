@@ -3372,10 +3372,20 @@ Exit status:
   3  usage error
   When several apply, the precedence is 1 > 2 > 0.
 
+  The writing subcommands have their own codes too:
+  0  clean
+  1  findings
+  2  usage error, an input that cannot be read, a malformed configuration
+     or ceilings file, or an internal error
+  3  could not run: no python3 3.9 or later, or no scripts/writing/ beside
+     this doc-tools.sh
+
 Environment:
   DOC_TOOLS_LOCK_TIMEOUT  Seconds a writer waits for the index lock before
                           failing (default 30). A lock whose recorded owner
                           is no longer running is removed automatically.
+  DOC_SUPERPOWERS_PYTHON  The interpreter the writing subcommands run
+                          (default python3). It must be 3.9 or later.
 NOTES
 
 # Look up a verb row: sets _VERB_HANDLER, _VERB_NEEDS and _VERB_OPTS.

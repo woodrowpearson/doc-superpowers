@@ -28,6 +28,7 @@ The main skill definition is `skills/doc-superpowers/SKILL.md`. Activate it when
 | `spec-inject` | Inject spec tasks or track drift |
 | `spec-verify` | Verify spec compliance |
 | `ledger` | Work ledger (opt-in, `docs/ledger/config.json`): `doc-tools.sh ledger <verb>` |
+| `writing` | The writing rule's lint (opt-in, on demand; python3 3.9 or later): `doc-tools.sh writing check\|range\|ceilings\|counts\|anchors`. The rule is the marked block in `references/writing-rule.md`, copied into `AGENTS.md` or `CLAUDE.md`; the reference is `references/writing.md`. No skill action yet |
 
 ## Platform Setup
 
