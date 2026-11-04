@@ -8385,6 +8385,248 @@ test_gh23_set_code_refs_stdin() {
   teardown
 }
 
+# --- Writing verbs (writing check | range | ceilings | counts | anchors) ---
+#
+# The writing engine is Python (scripts/writing/). doc-tools.sh only finds an
+# interpreter of 3.9 or later and execs it, so Python parses its own command
+# line and its exit status (0 clean, 1 findings, 2 unusable) is the verb's; 3
+# means the verb could not run here.
+
+# 0 when the interpreter the verbs use, ${DOC_SUPERPOWERS_PYTHON:-python3}, is
+# 3.9 or later. The harness unsets the variable, so that is python3 on PATH
+# unless a test sets it. Without one, the tests that run the engine skip,
+# loudly (check-ci.sh's writing check fails on such a host).
+_writing_python_ok() {
+  "${DOC_SUPERPOWERS_PYTHON:-python3}" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1
+}
+
+# One sentence of 49 words: over the terse limit (35) and the full one (40).
+_WRITING_LONG='On the first working day of each month the archive worker opens every closed ticket in the old tracker, copies its comments and attachments into the new tracker, links the copy back to its source, and then leaves a short note for whoever owned it so nobody searches twice.'
+
+test_writing_verbs_run_the_engine() {
+  echo "test: writing check, range, ceilings, counts and anchors run the engine; its exit status (0 clean, 1 findings) is the verb's"
+  if ! _writing_python_ok; then
+    record_skip "writing verbs: no python3 3.9 or later on PATH"
+    return 0
+  fi
+  setup
+  local out rc ver
+  mkdir -p docs/plans docs/guides docs/writing
+  printf '# Plan\n\nThe loader reads the file once.\n' > docs/plans/clean.md
+  printf '# Guide\n\nStart with the plan.\n' > docs/guides/g.md
+  printf '# Rewrite\n\nSee [the guide](../guides/g.md) first.\n' > docs/plans/rewrite.md
+  git add -A && git commit -qm "plans"
+
+  # check: files, standard input, the engine's own options
+  rc=0
+  out=$("$DOC_TOOLS" writing check docs/plans/clean.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "check: a clean file exits 0"
+  printf '# Plan\n\n%s\n' "$_WRITING_LONG" > docs/plans/long.md
+  rc=0
+  out=$("$DOC_TOOLS" writing check docs/plans/long.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "check: a long sentence exits 1"
+  assert_contains "$out" "docs/plans/long.md:3: long-sentence" "…naming the file, the line and the rule"
+  rc=0
+  out=$("$DOC_TOOLS" writing check --format json docs/plans/long.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "check --format json: exits 1 too"
+  assert_json_field "$out" '.[0].rule' "long-sentence" "…and the option reached the engine (a JSON list of findings)"
+  rc=0
+  out=$(printf '%s\n' "$_WRITING_LONG" | "$DOC_TOOLS" writing check --profile terse - 2>&1) || rc=$?
+  assert_eq "1" "$rc" "check -: standard input reaches the engine"
+  assert_contains "$out" "long-sentence" "…and is judged"
+
+  # range
+  git add -A && git commit -qm "a long plan"
+  rc=0
+  out=$("$DOC_TOOLS" writing range HEAD~1...HEAD 2>&1) || rc=$?
+  assert_eq "1" "$rc" "range: the sentence the last commit added exits 1"
+  assert_contains "$out" "long-sentence" "…naming the rule"
+  rc=0
+  out=$("$DOC_TOOLS" writing range HEAD 2>&1) || rc=$?
+  assert_eq "0" "$rc" "range: a head that gained nothing over its base exits 0"
+
+  # counts: reports, and gates nothing
+  rc=0
+  out=$("$DOC_TOOLS" writing counts --format json 2>&1) || rc=$?
+  assert_eq "0" "$rc" "counts: exits 0 with a finding in the tree"
+  assert_json_field "$out" '[.folders[] | select(.folder == "docs/plans") | .findings] | first' "1" "…and counts it under docs/plans"
+  ver=$(jq -r '.counting_version' <<<"$out")
+
+  # ceilings: a count at its ceiling, then over it
+  printf '{"counting_version": %s, "paths": {"docs/plans": 1}}\n' "$ver" > docs/writing/ceilings.json
+  git add -A && git commit -qm "ceiling 1"
+  rc=0
+  out=$("$DOC_TOOLS" writing ceilings --base HEAD 2>&1) || rc=$?
+  assert_eq "0" "$rc" "ceilings: a count at its ceiling exits 0"
+  printf '{"counting_version": %s, "paths": {"docs/plans": 0}}\n' "$ver" > docs/writing/ceilings.json
+  git add -A && git commit -qm "ceiling 0"
+  rc=0
+  out=$("$DOC_TOOLS" writing ceilings --base HEAD 2>&1) || rc=$?
+  assert_eq "1" "$rc" "ceilings: a count over its ceiling exits 1"
+  assert_contains "$out" "above its ceiling" "…and says so"
+
+  # anchors: its arguments are the engine's own (--base, no subcommand word)
+  rc=0
+  out=$("$DOC_TOOLS" writing anchors --base HEAD docs/plans/rewrite.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "anchors: an unchanged file exits 0"
+  printf '# Rewrite\n\nSee the guide first.\n' > docs/plans/rewrite.md
+  rc=0
+  out=$("$DOC_TOOLS" writing anchors --base HEAD docs/plans/rewrite.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "anchors: a rewrite that dropped a link exits 1"
+  assert_contains "$out" "link-target" "…naming the lost anchor"
+
+  # needs: none — no repository, no jq
+  local nogit
+  nogit=$(harness_mktemp_d writing-nogit)
+  rc=0
+  out=$(cd "$nogit" && printf 'The loader reads the file once.\n' | GIT_CEILING_DIRECTORIES="$SUITE_TMP" "$DOC_TOOLS" writing check --profile terse - 2>&1) || rc=$?
+  assert_eq "0" "$rc" "check - runs outside a git work tree"
+  teardown
+}
+
+test_writing_help_comes_from_the_verb_table() {
+  echo "test: writing --help lists the five verbs; writing <verb> --help prints that row's help, needing no interpreter; a bare or unknown writing verb exits 2"
+  setup
+  local out rc v
+  rc=0
+  out=$("$DOC_TOOLS" writing --help 2>&1) || rc=$?
+  assert_eq "0" "$rc" "writing --help exits 0"
+  for v in check range ceilings counts anchors; do
+    assert_contains "$out" "Usage: doc-tools.sh writing $v" "writing --help lists '$v'"
+  done
+  for v in check range ceilings counts anchors; do
+    rc=0
+    out=$(DOC_SUPERPOWERS_PYTHON="$TEST_DIR/no-such-python" "$DOC_TOOLS" writing "$v" --help 2>&1) || rc=$?
+    assert_eq "0" "$rc" "writing $v --help exits 0 with no interpreter"
+    assert_contains "$out" "Usage: doc-tools.sh writing $v" "…and prints the verb's row"
+    assert_not_contains "$out" "usage: writing $v" "…not the engine's own usage"
+  done
+  rc=0
+  out=$("$DOC_TOOLS" writing check --profile terse docs/architecture.md --help 2>&1) || rc=$?
+  assert_eq "0" "$rc" "--help after other arguments still wins"
+  assert_contains "$out" "Usage: doc-tools.sh writing check" "…printing the row"
+  out=$("$DOC_TOOLS" --help 2>&1) || true
+  assert_contains "$out" "writing check" "the full usage lists the verbs too"
+  rc=0
+  out=$("$DOC_TOOLS" writing 2>&1) || rc=$?
+  assert_eq "2" "$rc" "a bare 'writing' exits 2"
+  assert_contains "$out" "needs a subcommand" "…saying why"
+  rc=0
+  out=$("$DOC_TOOLS" writing nope 2>&1) || rc=$?
+  assert_eq "2" "$rc" "an unknown writing verb exits 2"
+  assert_contains "$out" "unknown subcommand 'writing nope'" "…naming it"
+  teardown
+}
+
+test_writing_needs_python_39() {
+  echo "test: an older or missing interpreter (DOC_SUPERPOWERS_PYTHON) skips every writing verb: exit 3, one line on stderr, nothing on stdout"
+  setup
+  local old missing out rc v want="writing: skipped (needs python3 3.9 or later)" err
+  old="$TEST_DIR/python-3.8"
+  printf '#!/bin/sh\necho 3.8\nexit 1\n' > "$old"
+  chmod +x "$old"
+  missing="$TEST_DIR/no-such-python"
+  err=$(harness_mktemp writing-stderr)
+  for v in check range ceilings counts anchors; do
+    rc=0
+    out=$(DOC_SUPERPOWERS_PYTHON="$old" "$DOC_TOOLS" writing "$v" docs/architecture.md 2>"$err") || rc=$?
+    assert_eq "3||$want" "$rc|$out|$(cat "$err")" "writing $v with a python that is too old: exit 3, the skip line"
+    rc=0
+    out=$(DOC_SUPERPOWERS_PYTHON="$missing" "$DOC_TOOLS" writing "$v" docs/architecture.md 2>"$err") || rc=$?
+    assert_eq "3||$want" "$rc|$out|$(cat "$err")" "writing $v with no such interpreter: the same"
+  done
+  teardown
+}
+
+test_writing_execs_the_engine_isolated() {
+  echo "test: writing execs <python> -I -B -X utf8 <scripts>/writing/<lint.py <verb> | anchors.py> with the arguments as given; the engine's exit status is the verb's"
+  setup
+  local py argv rc
+  py="$TEST_DIR/python-recorder"
+  argv=$(harness_mktemp writing-argv)
+  cat > "$py" <<'PY'
+#!/bin/sh
+# The version probe (-I -c …) passes; any other call records its arguments
+# and exits 7.
+if [ "$1" = -I ] && [ "$2" = -c ]; then exit 0; fi
+printf '%s\n' "$@" > "$WRITING_ARGV"
+exit 7
+PY
+  chmod +x "$py"
+  rc=0
+  WRITING_ARGV="$argv" DOC_SUPERPOWERS_PYTHON="$py" "$DOC_TOOLS" writing check --format json "docs/a b.md" || rc=$?
+  assert_eq "7" "$rc" "the engine's exit status reaches the caller (exec, not a wrapper)"
+  assert_eq "$(printf '%s\n' -I -B -X utf8 "$SCRIPT_DIR/writing/lint.py" check --format json "docs/a b.md")" "$(cat "$argv")" \
+    "check: isolated, no bytecode, UTF-8, lint.py <verb> then the arguments untouched"
+  rc=0
+  WRITING_ARGV="$argv" DOC_SUPERPOWERS_PYTHON="$py" "$DOC_TOOLS" writing counts || rc=$?
+  assert_eq "$(printf '%s\n' -I -B -X utf8 "$SCRIPT_DIR/writing/lint.py" counts)" "$(cat "$argv")" \
+    "counts: with no arguments, the verb word is the last"
+  rc=0
+  WRITING_ARGV="$argv" DOC_SUPERPOWERS_PYTHON="$py" "$DOC_TOOLS" writing anchors --base HEAD~2 docs/a.md || rc=$?
+  assert_eq "$(printf '%s\n' -I -B -X utf8 "$SCRIPT_DIR/writing/anchors.py" --base HEAD~2 docs/a.md)" "$(cat "$argv")" \
+    "anchors: anchors.py takes no verb word"
+  teardown
+}
+
+test_writing_skipped_where_the_engine_is_not_beside_doc_tools() {
+  echo "test: a vendored doc-tools.sh has no scripts/writing/ beside it: every writing verb exits 3 with one line, the help still prints"
+  setup
+  local vend rc out v want="writing: skipped (no scripts/writing/ beside doc-tools.sh)" err
+  vend=$(harness_mktemp_d writing-vendored)
+  err=$(harness_mktemp writing-stderr)
+  rc=0
+  "$DOC_TOOLS" tools install --dest "$vend" >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "precondition: tools install --dest <dir> exits 0"
+  assert_true "…and vendors doc-tools.sh alone" test -f "$vend/doc-tools.sh" -a ! -e "$vend/writing"
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH_BIN" "$vend/doc-tools.sh" > "$vend/run"
+  chmod +x "$vend/run"
+  for v in check range ceilings counts anchors; do
+    rc=0
+    out=$("$vend/run" writing "$v" docs/architecture.md 2>"$err") || rc=$?
+    assert_eq "3||$want" "$rc|$out|$(cat "$err")" "vendored: writing $v exits 3 with the skip line"
+  done
+  rc=0
+  out=$("$vend/run" writing check --help 2>&1) || rc=$?
+  assert_eq "0" "$rc" "vendored: writing check --help exits 0"
+  assert_contains "$out" "Usage: doc-tools.sh writing check" "…and prints the row"
+  teardown
+}
+
+test_writing_verbs_write_no_bytecode() {
+  echo "test: the writing verbs leave no __pycache__ in the plugin tree (python runs with -B)"
+  if ! _writing_python_ok; then
+    record_skip "writing bytecode check: no python3 3.9 or later on PATH"
+    return 0
+  fi
+  setup
+  # A copy of the plugin tree the verbs need, so the answer does not depend on
+  # what the checkout's own writing/ already holds.
+  local tree runner v
+  tree=$(harness_mktemp_d writing-tree)
+  mkdir "$tree/writing"
+  cp "$SCRIPT_DIR/doc-tools.sh" "$tree/"
+  cp "$SCRIPT_DIR"/writing/*.py "$SCRIPT_DIR"/writing/*.json "$tree/writing/"
+  runner="$tree/run"
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH_BIN" "$tree/doc-tools.sh" > "$runner"
+  chmod +x "$runner"
+  mkdir -p docs/plans
+  printf '# Plan\n\nThe loader reads the file once.\n' > docs/plans/clean.md
+  git add -A && git commit -qm "plan"
+  # The control: without -B the same engine does write bytecode here.
+  "${DOC_SUPERPOWERS_PYTHON:-python3}" -I -X utf8 "$tree/writing/lint.py" check docs/plans/clean.md >/dev/null 2>&1 || true
+  assert_true "control: python writes bytecode into the tree when -B is absent" test -d "$tree/writing/__pycache__"
+  rm -rf "$tree/writing/__pycache__"
+  "$runner" writing check docs/plans/clean.md >/dev/null 2>&1 || true
+  "$runner" writing range HEAD >/dev/null 2>&1 || true
+  "$runner" writing counts >/dev/null 2>&1 || true
+  "$runner" writing ceilings --base HEAD >/dev/null 2>&1 || true
+  "$runner" writing anchors --base HEAD docs/plans/clean.md >/dev/null 2>&1 || true
+  v=$(find "$tree/writing" -name __pycache__)
+  assert_eq "" "$v" "after check, range, counts, ceilings and anchors: no __pycache__ under writing/"
+  teardown
+}
+
 run_tests() {
   echo "=== doc-tools.sh test suite ==="
   echo ""
@@ -8685,6 +8927,14 @@ run_tests() {
   # --- Hostile index content (security posture, arithmetic contexts) ---
   test_hostile_index_fields_never_reach_arithmetic
   test_tool_advice_names_versions_with_known_holes
+
+  # --- Writing verbs ---
+  test_writing_verbs_run_the_engine
+  test_writing_help_comes_from_the_verb_table
+  test_writing_needs_python_39
+  test_writing_execs_the_engine_isolated
+  test_writing_skipped_where_the_engine_is_not_beside_doc_tools
+  test_writing_verbs_write_no_bytecode
 
   print_summary
 }
