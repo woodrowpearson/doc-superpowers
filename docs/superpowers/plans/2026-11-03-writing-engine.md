@@ -85,7 +85,7 @@
 **Interfaces:**
 - Consumes: `Codes` from Task 1.
 - Produces, in `config.py`:
-  - `class Config(NamedTuple)`: `enabled: bool`, `codes: Codes`, `limits: dict[str, Limits]`, `skip_prefixes: tuple[str, ...]`, `doc_types: dict[str, str]`, `paths: tuple[PathRule, ...]`, `counting_version: int`.
+  - `class Config(NamedTuple)`: `enabled: bool`, `codes: Codes`, `limits: dict[str, Limits]`, `skip_prefixes: tuple[str, ...]`, `skip_blocks: tuple[str, ...]`, `doc_types: dict[str, str]`, `paths: tuple[PathRule, ...]`, `counting_version: int`.
   - `class Limits(NamedTuple)`: `sentence: int`, `item: int | None`, `item_sentences: int | None`.
   - `class PathRule(NamedTuple)`: `prefix: str`, `suffix: str`, `register: str | None`.
   - `class Malformed(ValueError)`.
@@ -101,7 +101,8 @@
 - `codes.patterns`: the source's first, second and fourth patterns unchanged, and its provisional-key pattern widened to `(?<![A-Za-z0-9_])[a-z0-9][a-z0-9-]{0,15}-~[0-9a-f]{4,8}(?![A-Za-z0-9_])`.
 - `codes.allowed`: the source's list plus the diagram model's name (C4).
 - `codes.gloss_chars`: the source's list.
-- `skip_prefixes`: `Ledger-Claims:`, `Co-Authored-By:`, `Realized-by:`, `Implementation:`.
+- `skip_prefixes`: `Ledger-Claims:`, `Co-Authored-By:`.
+- `skip_blocks`: `Implementation:`, `Realized-by:`. The header, its `- ` items and their indented wraps are skipped, and the two headers are not in `skip_prefixes`.
 - `doc_types`: plan, issue and audit → terse; design-spec, spec, adr and the living types → full.
 - `paths`, in order: `docs/archive/` → none; `AGENTS.md` and `CLAUDE.md` by name → terse; `docs/plans/` with suffix `-design.md` → full; `docs/plans/` and `docs/issues/` → terse; `docs/` → full.
 
@@ -143,9 +144,9 @@ An unknown `doc_type` in the index is full. The ledger patterns come from `docs/
   - They cover behaviors 1 and 8 to 12 of the design; range and ceilings tests wait for Tasks 4 and 5.
   - The two pull-request-body tests keep their names, with invented bodies that fail the same way.
   - Add these:
-  - `test_stdin_is_read_with_its_label`: `check --name body.md -` on piped text reports `body.md:<line>`.
+  - `test_stdin_is_read_with_its_label`: `check --profile terse --name body.md -` on piped text reports `body.md:<line>`. Stdin needs `--profile`, since a body has no path to find a register by.
   - `test_a_crash_exits_2_not_1`: patch `lint_text` to raise; exit 2 and `internal error` on stderr.
-  - `test_tool_written_lines_are_skipped`: a `Realized-by:` line holding a bare code is no finding.
+  - `test_tool_written_lines_are_skipped`: a `Realized-by:` block holding a bare code is no finding.
   - Review Focus 1: `test_crlf_and_a_byte_order_mark_lint_as_lf` (same findings and lines as the LF text).
   - Review Focus 2: `test_a_file_that_is_not_utf8_exits_2` (`cannot read <path>: not UTF-8`).
 - [ ] **Step 2: Run them to see them fail.**
