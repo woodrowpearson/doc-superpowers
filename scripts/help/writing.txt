@@ -1,0 +1,18 @@
+doc-superpowers help writing: the writing rule and its lint
+
+The rule: put first what the reader needs, give every code words or a
+link, and keep sentences short. A lint counts what it can of that.
+
+Default:    the lint runs only when you call it, in this release. Later
+            releases run it in audit, review-pr and the pre-push hook,
+            report-only.
+Terminal:   doc-superpowers tools writing check FILE...
+            doc-superpowers tools writing range origin/main...HEAD
+            doc-superpowers tools writing ceilings|counts|anchors
+            doc-superpowers tools writing <verb> --help
+Skill:      none yet.
+Committed:  docs/writing/config.json and docs/writing/ceilings.json, both
+            optional; the rule block, once you copy it into AGENTS.md.
+Local:      nothing. It needs python3 3.9 or later and downloads nothing.
+Undo:       delete docs/writing/, and the marked block from AGENTS.md.
+Reference:  references/writing.md

@@ -19,7 +19,7 @@
 set -euo pipefail
 unset CDPATH
 
-TOPICS="setup search hooks ci ledger claims release"
+TOPICS="setup search hooks ci ledger claims release writing"
 
 _self="${BASH_SOURCE[0]}"
 _hops=0
