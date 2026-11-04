@@ -113,6 +113,13 @@ class LintHelpers(unittest.TestCase):
         self.assertEqual(usage.code, 2)
         self.assertIsInstance(usage, support.Result)
 
+    def test_run_can_start_another_script_of_the_engine(self) -> None:
+        with support.git_repo() as repo:
+            done = support.run(cwd=repo, script=support.ANCHORS)
+
+        self.assertEqual(done.code, 2)
+        self.assertIn("--base", done.err)
+
 
 if __name__ == "__main__":
     unittest.main()

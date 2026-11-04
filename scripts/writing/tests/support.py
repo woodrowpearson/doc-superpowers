@@ -18,6 +18,7 @@ from unittest import mock
 
 WRITING = Path(__file__).resolve().parents[1]
 LINT = WRITING / "lint.py"
+ANCHORS = WRITING / "anchors.py"
 
 
 def load(name: str) -> ModuleType:
@@ -67,10 +68,11 @@ class Result(NamedTuple):
     err: str
 
 
-def run(*args: str, cwd: Path, stdin: str | bytes | None = None) -> Result:
-    """Run the lint script as the wrapper will: an isolated interpreter, UTF-8 output."""
+def run(*args: str, cwd: Path, stdin: str | bytes | None = None, script: Path = LINT) -> Result:
+    """Run ``script`` (the lint unless told otherwise) as the wrapper will: an isolated
+    interpreter, UTF-8 output."""
     data = stdin.encode("utf-8") if isinstance(stdin, str) else stdin
-    done = subprocess.run([sys.executable, "-I", "-B", "-X", "utf8", str(LINT), *args],
+    done = subprocess.run([sys.executable, "-I", "-B", "-X", "utf8", str(script), *args],
                           capture_output=True, cwd=str(cwd), input=data)
     return Result(done.returncode, done.stdout.decode("utf-8"), done.stderr.decode("utf-8"))
 
