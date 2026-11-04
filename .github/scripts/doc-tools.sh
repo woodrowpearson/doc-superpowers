@@ -2131,13 +2131,19 @@ _report_keys() {
 # needs    repo  reads/writes the index or queries git: runs only inside a git
 #                work tree (checked once, before the handler)
 #          deps  needs jq (check_deps) but no repository
-#          none  pure bash (help)
+#          none  needs neither jq nor a repository: pure bash (help), or a
+#                launcher that execs another interpreter and checks it itself
+#                (the writing verbs: python3 3.9 or later)
 # options  the long options the verb takes, space-separated (see _parse_args):
 #          name    a flag                            → _OPT_name=1
 #          name=   one value                         → _OPT_name=<value>
 #          name=*  one value, repeatable             → _OPTV_name+=(<value>)
 #          name+   one or more values, up to the next --option → _OPTV_name+=(…)
 #          ("-" in a name becomes "_" in the variable.)
+#
+# The "writing <sub>" rows are the one exception to the options field: it stays
+# empty. The engine is Python, which parses its own arguments, so _main hands
+# those verbs the whole command line before _parse_args (see "Writing lint").
 _VERBS=""
 IFS= read -r -d '' _VERBS <<'VERBS' || true
 build-index|cmd_build_index|repo|force
@@ -3071,6 +3077,34 @@ tools version|cmd_tools_version|none|
   Print the doc-superpowers version this doc-tools.sh belongs to: the
   first release heading of the plugin's RELEASE-NOTES.md (as check-version
   reads it). Exits 1 from a vendored copy, whose version is unknown.
+writing check|cmd_writing|none|
+  [--profile terse|full] [--github] [--format text|json] [--name <label>] <file>...
+  Lint whole Markdown files, or standard input for "-" (which needs
+  --profile). Exit 0 clean, 1 findings, 2 a wrong command line or an
+  unusable input, 3 could not run (needs python3 3.9 or later, and
+  scripts/writing/ beside doc-tools.sh: a vendored copy has none).
+writing range|cmd_writing|none|
+  [--format text|json] <base>[...HEAD]
+  Lint the sentences the committed HEAD gained over the merge base of <base>
+  and HEAD. Exit 0 clean, 1 findings, 2 a wrong command line, a base git
+  cannot resolve or an unusable file, 3 could not run (see writing check).
+writing ceilings|cmd_writing|none|
+  [--file <path>] [--base <ref>] [--update]
+  Check the counts in the ceilings file (default docs/writing/ceilings.json)
+  against the committed HEAD, or with --update record them again. Exit 0 all
+  hold, 1 a count over or under its ceiling or a ceiling that rose, 2 a wrong
+  command line or an unusable file, 3 could not run (see writing check).
+writing counts|cmd_writing|none|
+  [--format text|json] [<path>...]
+  Count the findings of the working tree for each folder and register. It
+  reports and gates nothing: exit 0, 2 for a file or path that cannot be
+  used, 3 could not run (see writing check).
+writing anchors|cmd_writing|none|
+  --base <ref> [--format text|json] <file>...
+  The anchor check for a rewrite: did it keep the landmarks a reader
+  navigates by, as <ref> had them? Exit 0 nothing lost, 1 an anchor lost or
+  an added link leading nowhere, 2 a wrong command line or an unusable
+  file, base or configuration, 3 could not run (see writing check).
 help|cmd_help|none|
   [<subcommand>]
   Print this usage, or one subcommand's.
@@ -3606,6 +3640,58 @@ _deps_fail() {
   exit 1
 }
 
+# --- Writing lint ----------------------------------------------------------------
+#
+# The writing engine is stdlib Python in scripts/writing/ beside this file:
+# lint.py (check, range, ceilings, counts) and anchors.py. It parses its own
+# command line and answers with its own exit status (0 clean, 1 findings, 2 a
+# wrong command line or an unusable input), so the shell does three things
+# only: find an interpreter, find the engine, and exec it. A run that cannot
+# do either is a skip, exit 3: not a finding and not a usage error, so a
+# caller can tell "the check did not happen" from "the check failed".
+
+# The handler of every "writing <sub>" row; _main calls it with the sub-verb
+# first, before the traps and _parse_args.
+cmd_writing() {
+  _writing_run "$@"
+}
+
+# _writing_run <sub> [args…]: run the engine's <sub> with the arguments as
+# given. Never returns: it execs the engine (so its exit status is the
+# verb's, and a signal reaches it directly), or exits 3 with one line on
+# stderr.
+#   · The engine is not beside doc-tools.sh: a vendored copy (.github/scripts/)
+#     has doc-tools.sh and the CI helpers only, never scripts/writing/.
+#   · ${DOC_SUPERPOWERS_PYTHON:-python3} is not 3.9 or later. The probe asks
+#     the interpreter itself (-I -c on sys.version_info); one that is missing,
+#     will not start or answers no counts as too old.
+# The engine runs isolated (-I: no PYTHON* variables, no user site, no current
+# directory on its path), writing no bytecode (-B: the plugin tree stays
+# clean) and reading and writing UTF-8 whatever the locale (-X utf8).
+# anchors.py is a command of its own, so it gets no sub-verb word; lint.py
+# does.
+_writing_run() {
+  local sub="$1" script py
+  shift
+  case "$sub" in
+    anchors) script=anchors.py ;;
+    *) script=lint.py ;;
+  esac
+  if [ ! -f "$SCRIPT_DIR/writing/$script" ]; then
+    echo "writing: skipped (no scripts/writing/ beside doc-tools.sh)" >&2
+    exit 3
+  fi
+  py="${DOC_SUPERPOWERS_PYTHON:-python3}"
+  if ! "$py" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+    echo "writing: skipped (needs python3 3.9 or later)" >&2
+    exit 3
+  fi
+  if [ "$script" = anchors.py ]; then
+    exec "$py" -I -B -X utf8 "$SCRIPT_DIR/writing/$script" "$@"
+  fi
+  exec "$py" -I -B -X utf8 "$SCRIPT_DIR/writing/$script" "$sub" "$@"
+}
+
 # Dispatch. --help / help needs nothing: it runs before check_deps.
 _main() {
   case "${1:-}" in
@@ -3686,6 +3772,13 @@ _main() {
       -h|--help) _verb_usage "$verb"; _exit_ok ;;
     esac
   done
+
+  # A writing verb: the engine parses its own command line (its --help was
+  # answered above, from the row), so nothing here applies — no traps (it is
+  # exec'd, or exits 3), no _parse_args, no jq, no repository (needs none).
+  if [ "$_VERB_HANDLER" = cmd_writing ]; then
+    "$_VERB_HANDLER" "${verb#writing }" "$@"
+  fi
 
   # Terminating traps before anything that can block (the repository check
   # runs git), so a signal at any point from here ends the run through cleanup.

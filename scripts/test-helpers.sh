@@ -115,8 +115,8 @@ export HOME="$_HARNESS_TMP/home" XDG_CONFIG_HOME="$_HARNESS_TMP/xdg"
 # The overrides a user may export for the shipped scripts (a Claude Code
 # settings env block sets DOC_TOOLS, say): a test that wants one sets it, so
 # none may leak in from the caller.
-unset DOC_TOOLS DOC_SUPERPOWERS_ROOT DOC_SEARCH_ENV_FILE DOC_SEARCH_GATE \
-  CLAUDE_PLUGIN_CACHE CODEX_HOME
+unset DOC_TOOLS DOC_SUPERPOWERS_ROOT DOC_SUPERPOWERS_PYTHON DOC_SEARCH_ENV_FILE \
+  DOC_SEARCH_GATE CLAUDE_PLUGIN_CACHE CODEX_HOME
 # The suites never touch the network: install --ci takes this for the AI
 # templates' commit pin instead of asking the marketplace URL. A test of the
 # lookup unsets it.
