@@ -133,18 +133,19 @@ move; that lint's own checks stay in the source.
 |---|---|
 | `writing check [--profile terse\|full] [--github] FILE...` | The lint on whole files. With no `--profile`, each file's register is looked up |
 | `writing range BASE...HEAD` | The lint on the sentences a branch adds |
-| `writing ceilings [--base REF] [--update]` | The ceilings check; `--update` re-records each count and the engine version |
+| `writing ceilings [--base REF] [--update]` | The ceilings check; `--update` re-records each count and the counting version |
 | `writing anchors --base REF FILE...` | The anchor check |
 | `writing counts [PATH...]` | Findings per folder and register, as JSON, for `audit` |
 
-`writing check -` reads text on stdin, with `--name LABEL` for its findings, for text that is not a
-file: a pull-request body or a page's paragraphs.
+`writing check --profile terse|full -` reads text on stdin, for text that is not a file: a
+pull-request body or a page's paragraphs. Stdin has no path, so no register to look up, and
+`--profile` is required. `--name LABEL` only labels the findings.
 
 **The command line is the contract.** The Python modules are internal and may change in any
-release. A project that builds its own checks on the lint calls the verbs. Each verb takes
-`--format text|json`. The flags keep the source lint's spelling, so a project moving from its own
-copy only renames the command. The exit codes are the source's: 0 clean, 1 findings,
-2 a usage error or a file or base that cannot be read.
+release. A project that builds its own checks on the lint calls the verbs. `check`, `range`,
+`counts` and `anchors` take `--format text|json`; `ceilings` does not. The flags keep the source
+lint's spelling, so a project moving from its own copy only renames the command. The exit codes
+are the source's: 0 clean, 1 findings, 2 a usage error or a file or base that cannot be read.
 
 The wrapper finds Python before it runs anything. It checks that `python3` is at least 3.9 and
 otherwise prints one line, `writing: skipped (needs python3 3.9 or later)`, and exits 3. Callers
@@ -201,8 +202,12 @@ The reviewer found these in the source; each gets a test:
   version differs from the recorded one, the check exits 1 with one line: run
   `writing ceilings --update`. The copy under `.github/scripts/` and the plugin's copy are told
   apart the same way; `install --ci` refreshes the copy.
-- **Tool-written lines.** `set-implementation` writes `Realized-by:` and `Implementation:` lines in a
-  fixed form that the rule would flag. Those prefixes join the skipped trailers in the defaults.
+- **Tool-written lines.** `set-implementation` writes a `Realized-by:` or `Implementation:` header
+  with a list of items under it, in a fixed form that the rule would flag. The config key
+  `skip_blocks`, which defaults to those two headers, skips the whole block: the header line, its
+  `- ` items and their indented wraps. A header opens a block only when it is alone on its line or
+  followed by `[]`, and only the first header in a file opens one. The two headers are not in
+  `skip_prefixes`.
 - **Injected plan tasks.** The source skips them by title because the templates failed the rule.
   Once the templates pass, the skip goes.
 
@@ -232,7 +237,8 @@ ceiling. This matches the freshness check, which never reports a record stale.
   "registers": { "doc_types": { "runbook": "terse" }, "paths": [ { "prefix": "ops/", "register": "terse" } ] },
   "limits": { "terse": { "sentence": 35, "item": 50, "item_sentences": 2 }, "full": { "sentence": 40 } },
   "codes": { "patterns": [], "allowed": [ "P0", "UTF-8" ], "gloss_chars": [ "'", "`" ] },
-  "skip_prefixes": [ "Ledger-Claims:", "Co-Authored-By:", "Realized-by:", "Implementation:" ]
+  "skip_prefixes": [ "Ledger-Claims:", "Co-Authored-By:" ],
+  "skip_blocks": [ "Implementation:", "Realized-by:" ]
 }
 ```
 
@@ -254,8 +260,8 @@ backtracks badly could slow the lint. Every caller already runs it under a budge
 `SECURITY.md` names this.
 
 `docs/writing/ceilings.json` is optional too:
-`{"engine": "<version>", "paths": {"<file or folder>": <count>}}`. Without it there is no ceilings
-check.
+`{"counting_version": <int>, "paths": {"<file or folder>": <count>}}`. Without it there is no
+ceilings check. A file without `counting_version` reads as version 0, which is stale.
 
 ### The rule and its reference
 

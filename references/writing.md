@@ -1,8 +1,8 @@
 # The writing rule and its lint
 
-**Read by** anyone who writes for a project that follows the rule, and anyone who runs or configures the lint. The rule itself is the marked block in `references/writing-rule.md`, which a project copies into `AGENTS.md` or `CLAUDE.md`. This page holds what the block points to: the key format, the registers, the lint's verbs and their limits.
+**Read by** anyone who writes for a project that follows the rule, and anyone who runs or configures the lint. The rule itself is the marked block in `references/writing-rule.md`, which a project copies into `AGENTS.md` or `CLAUDE.md`. This page holds what the block points to: the key format, the registers (the sets of limits that texts are judged by), the lint's verbs and their limits.
 
-The rule asks writers to put first what the reader needs, to give every code words or a link, and to keep sentences short. The lint counts what it can of that. It finds a code with nothing explaining it, a sentence over the word limit of its register, and a list item over the word or sentence limit of its register. It reports, for information only, how many backtick spans a file has for every 100 words.
+The rule asks writers to put first what the reader needs, to give every code (a short label for a record, such as `KX7`) words or a link, and to keep sentences short. The lint counts what it can of that. It finds a code with nothing explaining it, a sentence over the word limit of its register, and a list item over the word or sentence limit of its register. It reports, for information only, how many backtick spans a file has for every 100 words.
 
 The lint is standard-library Python, version 3.9 or later. It downloads nothing, writes no file except through `ceilings --update`, and runs only when you call it. In this release nothing calls it for you.
 
@@ -22,9 +22,9 @@ A register sets the limits a text is judged by. `terse` is for text read between
 | `terse` | 35 | 50 | 2 |
 | `full` | 40 | no limit | no limit |
 
-A file's register comes from its doc-index `doc_type` first and from its path second. The steps run in this order, and the first that applies decides.
+A file's register comes from its `doc_type` in the doc-index (`docs/.doc-index.json`, the index that tracks each doc's freshness) first and from its path second. The steps run in this order, and the first that applies decides.
 
-1. A file whose name does not end in `.md`, or that sits under `docs/archive/`, has no register. It is never linted, whatever its doc-index type says.
+1. A file whose name does not end in `.md`, or that sits under `docs/archive/`, has no register. It is never linted without `--profile`, whatever its doc-index type says.
 2. When the file has an entry in `docs/.doc-index.json` with a `doc_type`, that type decides. A type the table below does not name is `full`.
 3. Otherwise the first path rule that matches decides.
 4. Otherwise the file has no register. `check` says so on standard error and goes on; it is not a finding.
@@ -47,16 +47,16 @@ A file's register comes from its doc-index `doc_type` first and from its path se
 
 Anything else has no register. That includes `README.md` and the files under `references/`, unless the doc-index types them or a project rule names them. `check --profile terse|full` overrides the lookup for every input.
 
-A project's own rules come before these, and the folders of a work ledger's items come between the two (*Configuration*).
+A project's own rules come before these, and the folders of a work ledger's items come between the two (*Configuration*). A work ledger is the opt-in set of issue files that `doc-superpowers help ledger` describes.
 
-**Records.** A plan, an issue, an audit or a design spec records a moment, and so does anything under `docs/archive/`. Only its doc-index type, or the archive folder, marks a file as a record. `ceilings` and `counts` leave records out, and a ceiling that names one is a finding. `range` lints the new sentences of a record that has a register, because that is what a branch wrote there. `check` lints a record you name. Archived files are never linted.
+**Records.** A plan, an issue, an audit or a design spec records a moment, and so does anything under `docs/archive/`. Only its doc-index type, or the archive folder, marks a file as a record. `ceilings` and `counts` leave records out, and a ceiling that names one is a finding. `range` lints the new sentences of a record that has a register, because that is what a branch wrote there. `check` lints a record you name. Archived files are never linted without `--profile`.
 
 ## What comes first
 
 The rule's first item is to know the reader and the job they do with the text. The job decides the order. Each reader below gets the answer to their question before any background.
 
 - **Someone decides.** The question, then the options, then the recommendation and why, then the date it is needed by, with the evidence behind links.
-- **Someone reviews a PR.** What changed, in one sentence. Then what must hold before it merges, and what was not run.
+- **Someone reviews a pull request (PR).** What changed, in one sentence. Then what must hold before it merges, and what was not run.
 - **Someone picks up an issue.** What is wrong, how to see it, and what done looks like.
 - **Someone follows a plan.** The steps, each with the files it touches and the check that shows it worked.
 - **An agent follows instructions.** The rules first and the commands after them.
@@ -84,8 +84,8 @@ A code is a short label for a record, such as a decision, an issue, a spec, a ru
 
 | Shape | Examples |
 |---|---|
-| capital letters and digits joined by hyphens, ending in a hyphen and a number | `ORB-12`, `NAV-210`, `TRL-0317` |
-| one to three capital letters and one to three digits | `KX7`, `W5`, `RM4` |
+| capital letters and digits joined by hyphens, ending in a hyphen and a number, then optionally one lower-case letter | `ORB-12`, `ORB-12a`, `NAV-210`, `TRL-0317` |
+| one to three capital letters and one to three digits, then optionally one lower-case letter | `KX7`, `KX7b`, `W5`, `RM4` |
 | a lower-case name of up to 16 letters, digits and hyphens, then `-~` and four to eight hex digits | `beacon-~a1c9` |
 | a `#` and a number | `#318` |
 
@@ -108,7 +108,7 @@ Here is exactly what it parses.
 - Words must follow the label on the same line, and at least one letter must remain once the codes are cut out. A code alone in a label defines nothing, and neither does a bold sentence with nothing after it.
 - A heading that holds words as well as a code defines it too: `### KX7. The ferry rota`. A heading of codes alone defines nothing.
 - An entry defines its codes for the whole file, above it as well as below. It defines nothing in any other file.
-- Front matter and fenced code hold no entries.
+- Front matter and fenced code blocks hold no entries.
 - The lint does not look for the heading `## Key`. An entry of this shape counts wherever it stands. Keep the entries together under that heading anyway, because a reader looks there.
 
 ## What the lint counts and cannot count
@@ -137,8 +137,8 @@ It cannot tell whether the words beside a code describe it, or whether a short s
 
 The lint reads prose and leaves the rest alone.
 
-- **Left out.** Front matter (a YAML block from `---` on line 1 to the next `---`), fenced code, headings, table rows and quoted lines that start with `>`.
-- **Tool-written lines.** A paragraph that opens with a skip prefix is passed over. The defaults are `Ledger-Claims:` and `Co-Authored-By:`. So is the block a tool writes after a `skip_blocks` header. So are the plan tasks `spec-inject` writes, whose headings start with Update governing specs, Land the spec amendment, Claims gate, Final claims gate, Ledger notices or Finalize all governing specs. Their wording is the template's, not the author's.
+- **Left out.** Front matter (a YAML block from `---` on line 1 to the next `---`), fenced code blocks, headings, table rows and quoted lines that start with `>`.
+- **Tool-written lines.** A paragraph that opens with a skip prefix is passed over. The defaults are `Ledger-Claims:` and `Co-Authored-By:`. So is the block a tool writes after a `skip_blocks` header. So are the plan tasks `spec-inject` writes. Their headings read `## Task N: <phrase>`, with two to four `#`, and the phrase starts with Update governing specs, Land the spec amendment, Claims gate, Final claims gate, Ledger notices or Finalize all governing specs. A task runs to the next heading of its level or above. Its wording is the template's, not the author's. A heading that starts with one of those phrases but lacks `Task N:` is not skipped.
 - **Paragraphs.** Lines that wrap are joined with single spaces, so a bracket can open on one line and close on the next. Each list item is a paragraph of its own, and only its indented lines extend it.
 - **Words.** Whitespace-separated tokens, with link targets removed. A link counts as its text. A list marker (a bullet or a number) and a task box (`[ ]`) are not words.
 - **Sentences.** A sentence ends at `.`, `!` or `?` followed by whitespace and anything but a lower-case letter. `e.g.`, `i.e.`, `cf.` and `vs.` do not end one, and neither does a file name such as `rota_sync.py`.
@@ -150,7 +150,7 @@ All five verbs share one exit-code scheme.
 
 | Exit | Meaning |
 |---|---|
-| 0 | Clean. For `counts`, always. |
+| 0 | Clean. `counts` exits 0 or 2, never 1. |
 | 1 | Findings: a bare code or a limit exceeded, a ceiling that failed, or an anchor lost. |
 | 2 | A wrong command line, an input that cannot be read or decoded, a malformed configuration or ceilings file, a base git cannot resolve, or a crash in the lint, printed as `writing: internal error: <type>: <message>`. |
 | 3 | The check could not run. |
@@ -256,7 +256,7 @@ Density is not in the JSON. `counts --format json` prints an object: `counting_v
 
 **A skipped block.** A header from `skip_blocks` opens a block only when it starts a line and is alone on it, or is followed by `[]`, which makes a block of one line. The block is the header, each `- ` item at any indent, and the indented lines that follow the header or an item. It ends at a blank line, at a fence, or at an unindented line that is not an item. Once a block has opened, no later header in the file opens another. A header with words after it, or inside a list item or a quote, is prose.
 
-**The work ledger.** When `docs/ledger/config.json` exists, two things follow. The ids in `docs/ledger/ledgers.json` become one more code shape, so `orbit-14` is a code once a ledger is named `orbit`. The folder each `items.globs` entry names, up to its first wildcard, becomes a `terse` path rule. A glob with a wildcard in a folder name names no one folder and adds none.
+**The work ledger.** When `docs/ledger/config.json` exists, two things follow. The ids in `docs/ledger/ledgers.json` become one more code shape, so `orbit-14` is a code once a ledger is named `orbit`. The folder each `items.globs` entry names, up to its first wildcard, becomes a `terse` path rule. A glob with a wildcard in a folder name names no one folder and adds none. A glob with no wildcard at all names one file and adds a rule for that file.
 
 ## Ceilings
 
@@ -284,11 +284,11 @@ A rewrite may reword and reorder freely, but it should keep the landmarks a read
 | Kind | What it is |
 |---|---|
 | `identifier` | text between single backticks. A span that wraps over lines is joined, and its whitespace collapses. |
-| `code` | whatever the code shapes match, anywhere on a line, link text and link targets included |
+| `code` | whatever the code shapes of *The key* match, anywhere on a line, link text and link targets included |
 | `number` | a number on any line, fences, table rows and headings included, with its decimal point or thousands separator. The digits of a code, an identifier, an inline link target or an ordered-list marker do not count. |
 | `link-target` | the destination of an inline link or image, or of a reference definition. A footnote definition has none. |
 
-A second rule covers links. Each relative destination the new copy adds, outside code, must point at a file or folder that exists, counted from the folder of the file. A `#fragment` and a `?query` are cut off and percent escapes are decoded first. URLs, a bare fragment, a destination that starts with `/` and one the base copy already held are not looked up.
+A second rule covers links. Each relative destination the new copy adds, outside code spans and fenced code blocks, must point at a file or folder that exists, counted from the folder of the file. A `#fragment` and a `?query` are cut off and percent escapes are decoded first. URLs, a bare fragment, a destination that starts with `/` and one the base copy already held are not looked up.
 
 The base is a commit and the other side is the working tree, never HEAD, so a rewrite can be checked before it is committed. A file missing from the base has nothing to lose, though its links are still looked up. Only the working-tree copy has to be UTF-8: undecodable bytes in the base copy are replaced, so the file is still compared.
 
@@ -302,7 +302,7 @@ An anchor lost in one place and gained in another nets out to nothing. Whether a
 
 - **No per-file opt-out for a typed, indexed doc yet.** A doc-index `doc_type` decides the register before any path rule, and a type cannot map to "never linted". Only `docs/archive/` is exempt.
 - **Some characters shift line numbers.** Characters such as U+2028, U+0085 and the form feed split a line in the lint's reading but not in most editors. Reported line numbers can then differ from the editor's, and `range` can drop a new sentence that follows one.
-- **A symlinked Markdown file is judged by its link text.** `range` reads what git stores for it, which is the path it points to, not the file behind it. `ceilings` and `counts` leave symlinks out.
+- **Under `range`, a symlinked Markdown file is judged by the path it points to.** `range` reads what git stores for it, which is that path, not the file behind it. `check` follows the link, reads the file behind it and takes the register from the link's own path. `ceilings` and `counts` leave symlinks out.
 - **The anchor check's file test follows the host file system.** On a case-insensitive system such as the macOS default, a link whose case is wrong still finds its file and passes.
-- **A lost reference definition reports twice.** Once as a lost link target, and once more for the digits in its destination, because the destination of a reference definition is not set aside when numbers are counted.
+- **A lost reference definition can report twice.** It does so only when its destination holds a standalone number, such as `notes-7.md`. It then reports once as a lost link target and once more for that number, because the destination of a reference definition is not set aside when numbers are counted.
 - **The lint counts what it can.** The order for the reader, the scope of claims and the naming of things by purpose belong to the rule, not the lint. A review has to judge them.
