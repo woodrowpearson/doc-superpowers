@@ -10,6 +10,8 @@ plain words hide jargon, or whether the main point comes first.
 
     lint.py check [--profile terse|full] [--github] [--format text|json] [--name LABEL] FILE...|-
     lint.py range [--format text|json] BASE...HEAD
+    lint.py ceilings [--file PATH] [--base REF] [--update]
+    lint.py counts [--format text|json] [PATH...]
 
 ``check`` reads whole files, or standard input for ``-``. A register sets the limits. Without
 ``--profile`` each file's register comes from the project's configuration, by its doc-index type
@@ -30,17 +32,33 @@ linted, ``docs/archive/`` never is, and a file with no register is passed over w
 output is that of ``check``, with one more line for each file that has new sentences: its density,
 counted over the whole file.
 
+``ceilings`` reads ``docs/writing/ceilings.json`` (or ``--file``), which lists paths, each naming
+a Markdown file or a folder of them, with the number of findings that path holds in the committed
+HEAD. Each file is read whole and judged in its own register. A folder passes over records and
+files with no register, and a ceiling that names a record is itself a finding. The file reads
+``{"counting_version": N, "paths": {PATH: COUNT}}``; a file with no version is one from before
+versions, and reads as version 0. A count over its ceiling fails, and so does one under it. A
+ceiling may fall but never rise, and no path may leave the file, unless the range from the merge
+base of BASE (default ``origin/HEAD``, else ``origin/main``) to HEAD changes
+``docs/writing/config.json`` or sets ``counting_version`` to ``COUNTING_VERSION``. A file recorded
+with another version is not compared at all: run ``ceilings --update``, which counts the working
+tree for each listed path and rewrites the file with the engine's version. ``counts`` prints the
+findings of the working tree for each folder and register, passing over records and files with no
+register, for the audit to show.
+
 The exit status is 0 for a clean run and 1 when there are findings, each printed as
-``path:line: rule: message``. It is 2 when the command line is wrong (for ``range``, also a head
-other than HEAD), an input cannot be opened or decoded, git cannot resolve the base, the
-configuration is unusable, or the lint itself crashes. With ``--format json`` the findings are
-printed instead as one list of objects, one per ``Finding``, with all its fields.
+``path:line: rule: message``; for ``ceilings``, a count over or under its ceiling, a ceiling that
+rose, a path that left the file, a stale version or a ceiling on a record. It is 2 when the
+command line is wrong (for ``range``, also a head other than HEAD), an input cannot be opened or
+decoded, git cannot resolve the base, the configuration or the ceilings file is unusable, or the
+lint itself crashes. With ``--format json`` the findings are printed instead as one list of
+objects, one per ``Finding``, with all its fields.
 
 ``Config`` (``config.py``, ``defaults.json``) supplies the limits, the shape of a code, the words
 that are not codes, the line prefixes to leave alone and the headers of the blocks to leave alone
 (the ``Implementation:`` list a tool writes into a decision record); ``markdown.py`` does the
 reading. Its ``enabled`` switch is for callers that run the lint unasked (the audit, the review,
-the hooks): an explicit ``check`` or ``range`` always runs.
+the hooks): an explicit ``check``, ``range``, ``ceilings`` or ``counts`` always runs.
 """
 
 from __future__ import annotations
@@ -48,12 +66,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import posixpath
 import re
+import shlex
+import stat
 import subprocess
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from difflib import SequenceMatcher
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 # An isolated interpreter (-I) leaves this script's folder off the path, and the modules import
@@ -62,8 +83,8 @@ _HERE = str(Path(__file__).resolve().parent)
 if sys.path[:1] != [_HERE]:
     sys.path.insert(0, _HERE)
 
-from config import (REGISTERS, Config, Limits, Malformed, load,  # noqa: E402
-                    read_index, register_for)
+from config import (CONFIG, REGISTERS, Config, Limits, Malformed, is_record,  # noqa: E402
+                    load, read_index, register_for)
 from markdown import (HEADING, LINK_TARGET, LIST_ITEM, TABLE_ROW, Codes,  # noqa: E402
                       bare_spans, blank_link_targets, paragraphs, path_spans, prose_lines,
                       unquote)
@@ -714,6 +735,294 @@ def lint_range(root: Path, base: str, config: Config) -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------------------------
+# Ceilings and counts
+
+# The number of this engine's way of counting findings. It is not the release number: most
+# releases leave it alone. Any change that moves the findings of a text that has not changed (a
+# limit, a default code pattern, a rule of the parser or of the lint) raises it by one, and adds
+# an entry for the new version to ``EXPECTED`` in ``tests/test_ceilings.py``, which fails until
+# then. A ceilings file records the version its counts were made with and is never compared with
+# counts made by another.
+COUNTING_VERSION = 1
+CEILINGS = "docs/writing/ceilings.json"
+
+
+class Ceilings(NamedTuple):
+    """A ceilings file: the counting version its counts were made with, and the ceiling of each
+    path it lists."""
+
+    version: int
+    paths: dict[str, int]
+
+
+class Ceiling(NamedTuple):
+    """One printed line of a ceilings run, whether it fails, and, for a path over its ceiling
+    only, the findings listed beneath it, which show where to look."""
+
+    line: str
+    failed: bool
+    findings: tuple[Finding, ...] = ()
+
+
+class Folder(NamedTuple):
+    """The Markdown files of one register in one folder, and the findings they hold."""
+
+    folder: str
+    register: str
+    files: int
+    findings: int
+
+
+def _whole(value: object) -> bool:
+    """True for a JSON whole number, 0 or more. A boolean is not one."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    seen: set[str] = set()
+    for key, _ in pairs:
+        if key in seen:
+            raise Malformed(f"{key!r} is listed twice")
+        seen.add(key)
+    return dict(pairs)
+
+
+def parse_ceilings(text: str) -> Ceilings:
+    """Read the text of a ceilings file. Raises ``Malformed`` unless the top level holds
+    ``paths`` and, if it has one, ``counting_version`` and nothing else, the version is a whole
+    number, and every path is listed once, from the top of the repository, in normal form (it does
+    not start with ``/`` or ``./``, hold ``..`` or end with ``/``), beside a whole-number ceiling.
+    A file with no ``counting_version`` is one from before versions: its version is 0."""
+    try:
+        data = json.loads(text, object_pairs_hook=_unique_keys)
+    except Malformed:
+        raise
+    except (ValueError, RecursionError) as error:
+        raise Malformed(f"not JSON: {error}") from None
+    if (not isinstance(data, dict) or not {"paths"} <= set(data) <= {"counting_version", "paths"}
+            or not isinstance(data["paths"], dict)):
+        raise Malformed('expected {"counting_version": <whole number>, "paths": '
+                        '{"<file or folder>": <whole number>}}')
+    version = data.get("counting_version", 0)
+    if not _whole(version):
+        raise Malformed("counting_version must be a whole number, 0 or more; "
+                        f"{json.dumps(version)} is not")
+    paths: dict[str, int] = {}
+    for path, ceiling in data["paths"].items():
+        posix = PurePosixPath(path)
+        if not posix.parts or posix.is_absolute() or ".." in posix.parts or str(posix) != path:
+            raise Malformed(f"{path!r} is not a path in normal form: it may not start with / "
+                            "or ./, hold .. or end with /")
+        if not _whole(ceiling):
+            raise Malformed(f"{path}: a ceiling is a whole number, 0 or more, and "
+                            f"{json.dumps(ceiling)} is not")
+        paths[path] = ceiling
+    return Ceilings(version, paths)
+
+
+def _parse_labelled(text: str, file: str, where: str) -> Ceilings:
+    try:
+        return parse_ceilings(text)
+    except Malformed as error:
+        raise Malformed(f"{file} at {where}: {error}") from None
+
+
+def _ceilings_at(root: Path, rev: str, file: str, where: str) -> Ceilings | None:
+    """The ceilings file as committed at ``rev``; ``None`` when ``rev`` has none."""
+    if _run_git(root, "cat-file", "-e", f"{rev}:{file}").returncode:
+        return None
+    return _parse_labelled(_text_at(root, rev, file, head=True), file, where)
+
+
+class Tree:
+    """The Markdown files of one tree, the register of each, and what the lint finds in them,
+    read once. ``files`` are the regular files of the tree as paths from its top, and ``read``
+    gives a file's text. Records and files with no register are left out of every count."""
+
+    def __init__(self, files: Iterable[str], read: Callable[[str], str], settings: Config,
+                 index: dict | None) -> None:
+        self._read = read
+        self._settings = settings
+        self._found: dict[str, list[Finding]] = {}
+        self.registers: dict[str, str] = {}
+        records = set()
+        for file in sorted(files):
+            if not file.lower().endswith(".md"):
+                continue
+            if is_record(file, index):
+                records.add(file)
+                continue
+            register = register_for(file, settings, index)
+            if register is not None:
+                self.registers[file] = register
+        self.records: frozenset[str] = frozenset(records)
+
+    def is_record(self, path: str) -> bool:
+        """True when ``path`` is itself a Markdown file that is a record."""
+        return path in self.records
+
+    def findings_of(self, file: str) -> list[Finding]:
+        if file not in self._found:
+            self._found[file] = lint_text(self._read(file), file, self.registers[file],
+                                          self._settings)
+        return self._found[file]
+
+    def findings(self, path: str) -> list[Finding] | None:
+        """The findings in the files the lint reads under ``path``, which names one Markdown file
+        or the folder holding several. ``None`` when it names no such file."""
+        named = [file for file in self.registers if file == path or file.startswith(path + "/")]
+        if not named:
+            return None
+        return [finding for file in named for finding in self.findings_of(file)]
+
+
+def _head_files(root: Path) -> list[str]:
+    """The regular files of the committed HEAD. Links and submodules are not read."""
+    files = []
+    for entry in os.fsdecode(_git(root, "ls-tree", "-r", "-z", "HEAD")).split("\0"):
+        meta, _, name = entry.partition("\t")
+        fields = meta.split()
+        if name and len(fields) == 3 and fields[1] == "blob" and fields[0] != "120000":
+            files.append(name)
+    return files
+
+
+def _working_files(root: Path, paths: list[str]) -> list[str]:
+    """The regular files of the working tree that git knows or does not ignore, as paths from the
+    top of the repository. ``paths`` are git pathspecs from the working directory; none means the
+    whole repository."""
+    names = os.fsdecode(_git(Path.cwd(), "ls-files", "-co", "--exclude-standard", "-z",
+                             "--full-name", "--", *(paths or [":/"])))
+    found = []
+    for name in dict.fromkeys(names.split("\0")):
+        try:
+            if name and stat.S_ISREG(os.lstat(root / name).st_mode):
+                found.append(name)
+        except OSError:
+            pass  # tracked, and deleted from the working tree
+    return found
+
+
+def _disk_reader(root: Path) -> Callable[[str], str]:
+    def read(file: str) -> str:
+        try:
+            return (root / file).read_bytes().decode("utf-8-sig")
+        except UnicodeDecodeError:
+            raise Unreadable(f"cannot read {file}: not UTF-8") from None
+        except OSError as error:
+            raise Unreadable(f"cannot read {file}: {error.strerror or error}") from None
+    return read
+
+
+def _update_command(file: str) -> str:
+    named = "" if file == CEILINGS else f" --file {shlex.quote(file)}"
+    return "writing ceilings --update" + named
+
+
+def check_ceilings(root: Path, file: str, base: str) -> list[Ceiling]:
+    """Check the ceilings file committed at HEAD against the files committed there, and against
+    the file as it stood where the branch left ``base``. A path is counted over whole files, and
+    each gets a line. A ceiling that rose since then, or a path the earlier file listed and this
+    one does not, fails unless the range edits the project's writing configuration or moves
+    ``counting_version`` to this engine's; the line names which. A file recorded with another
+    version gets one failing line and no counts. ``Malformed`` is raised for a file that is
+    not valid, ``Unreadable`` when git cannot resolve ``base`` or read a file."""
+    merge_base = _merge_base(root, base)
+    head = _ceilings_at(root, "HEAD", file, "HEAD")
+    before = _ceilings_at(root, merge_base, file, "the base")
+    if head is not None and head.version != COUNTING_VERSION:
+        return [Ceiling(f"writing ceilings: counted with version {head.version}; this "
+                        f"engine counts with {COUNTING_VERSION}: run {_update_command(file)}",
+                        True)]
+    listed = head.paths if head else {}
+    earlier = before.paths if before else {}
+    summary = Ceiling(f"{file}: {_count(len(listed), 'path')} checked at HEAD", False)
+    if head is None and before is None:
+        return [summary]
+
+    names = os.fsdecode(_git(root, "diff", "--name-only", "--no-renames", "-z", merge_base,
+                             "HEAD", "--")).split("\0")
+    changes = [CONFIG] if CONFIG in names else []
+    if head is not None and before is not None and before.version < head.version:
+        changes.append(f"counting_version from {before.version} to {head.version}")
+    allowed = f"; allowed: the range changes {' and '.join(changes)}" if changes else ""
+
+    tree = Tree(_head_files(root), lambda name: _text_at(root, "HEAD", name, head=True),
+                load(root, "HEAD"), read_index(root, "HEAD"))
+    results: list[Ceiling] = []
+    for path, ceiling in sorted(listed.items()):
+        if tree.is_record(path):
+            results.append(Ceiling(f"{path} is a record; records take no ceiling", True))
+            continue
+        found = tree.findings(path)
+        if found is None and path not in earlier:
+            results.append(Ceiling(f"{path}: names no Markdown file the lint reads at HEAD", True))
+            continue
+        if path in earlier and ceiling > earlier[path]:
+            results.append(Ceiling(f"{path}: the ceiling rose from {earlier[path]} to {ceiling} "
+                                   f"against the base{allowed}", not changes))
+        count = len(found or [])
+        if count > ceiling:
+            results.append(Ceiling(f"{path}: {_count(count, 'finding')}, above its ceiling of "
+                                   f"{ceiling}", True, tuple(found or [])))
+        elif count < ceiling:
+            results.append(Ceiling(f"{path}: {_count(count, 'finding')}, below its ceiling of "
+                                   f"{ceiling}; set the ceiling to {count}", True))
+        else:
+            results.append(Ceiling(f"{path}: {_count(count, 'finding')}, at its ceiling of "
+                                   f"{ceiling}", False))
+    results.extend(Ceiling(f"{path}: dropped from {file}; the base holds it at {ceiling}"
+                           f"{allowed}", not changes)
+                   for path, ceiling in sorted(earlier.items()) if path not in listed)
+    return [*results, summary]
+
+
+def update_ceilings(root: Path, file: str) -> list[Ceiling]:
+    """Count the working tree for each path the working copy of the ceilings file lists, and
+    rewrite the file with those counts and ``COUNTING_VERSION``. It adds no path and removes none.
+    A path that names a record is a failing line, and the file is left as it was."""
+    try:
+        text = (root / file).read_bytes().decode("utf-8-sig")
+    except FileNotFoundError:
+        example = f'{{"counting_version": {COUNTING_VERSION}, "paths": {{"<file or folder>": 0}}}}'
+        raise Unreadable(f"cannot update {file}: it does not exist; create it as {example} and "
+                         "run this again") from None
+    except UnicodeDecodeError:
+        raise Unreadable(f"cannot read {file}: not UTF-8") from None
+    except OSError as error:
+        raise Unreadable(f"cannot read {file}: {error.strerror or error}") from None
+    listed = _parse_labelled(text, file, "the working tree").paths
+    tree = Tree(_working_files(root, []), _disk_reader(root), load(root), read_index(root, None))
+    records = [Ceiling(f"{path} is a record; records take no ceiling", True)
+               for path in sorted(listed) if tree.is_record(path)]
+    if records:
+        return records
+    counts = {path: len(tree.findings(path) or []) for path in sorted(listed)}
+    written = json.dumps({"counting_version": COUNTING_VERSION, "paths": counts}, indent=2,
+                         ensure_ascii=False) + "\n"
+    try:
+        (root / file).write_bytes(written.encode("utf-8"))
+    except OSError as error:
+        raise Unreadable(f"cannot write {file}: {error.strerror or error}") from None
+    return [*(Ceiling(f"{path}: {_count(count, 'finding')}", False)
+              for path, count in counts.items()),
+            Ceiling(f"{file}: recorded {_count(len(counts), 'path')} at counting version "
+                    f"{COUNTING_VERSION}", False)]
+
+
+def count_folders(tree: Tree) -> list[Folder]:
+    """The files and findings of the tree for each folder and register, sorted by folder and then
+    register. A file at the top of the repository is in the folder ``.``."""
+    groups: dict[tuple[str, str], list[int]] = {}
+    for file, register in tree.registers.items():
+        group = groups.setdefault((posixpath.dirname(file) or ".", register), [0, 0])
+        group[0] += 1
+        group[1] += len(tree.findings_of(file))
+    return [Folder(folder, register, files, found)
+            for (folder, register), (files, found) in sorted(groups.items())]
+
+
+# ---------------------------------------------------------------------------------------------
 # The command line
 
 
@@ -731,6 +1040,12 @@ def _top_level() -> Path:
         return Path.cwd()
     top = os.fsdecode(done.stdout).strip()
     return Path(top) if done.returncode == 0 and top else Path.cwd()
+
+
+def _repo_root() -> Path:
+    """The top of the repository around the working directory. Unlike ``_top_level``, a directory
+    outside any repository is an error here."""
+    return Path(os.fsdecode(_git(Path.cwd(), "rev-parse", "--show-toplevel")).rstrip("\n"))
 
 
 def _relative(file: Path, root: Path) -> str | None:
@@ -796,8 +1111,7 @@ def _range(args: argparse.Namespace) -> int:
     if not base or ".." in base or (dots and head != "HEAD"):
         args.usage("range takes BASE...HEAD, with three dots and HEAD, the committed tip, as "
                    "the head")
-    # Unlike ``_top_level``, a directory outside any repository is an error here.
-    root = Path(os.fsdecode(_git(Path.cwd(), "rev-parse", "--show-toplevel")).rstrip("\n"))
+    root = _repo_root()
     settings = load(root, "HEAD")
     files = _range_files(root, base, settings)
     findings = _lint_files(files, settings)
@@ -809,6 +1123,48 @@ def _range(args: argparse.Namespace) -> int:
             density = identifier_density(file.text, settings.skip_prefixes, settings.skip_blocks)
             print(f"{file.path}: {density:.1f} backtick spans per 100 words (whole file)")
     return 1 if findings else 0
+
+
+def _default_base(root: Path) -> str:
+    """The base review-pr takes when none is named: what ``origin/HEAD`` points at, else
+    ``origin/main``."""
+    done = _run_git(root, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD")
+    name = os.fsdecode(done.stdout).strip()
+    return name if done.returncode == 0 and name else "origin/main"
+
+
+def _ceilings(args: argparse.Namespace) -> int:
+    if args.update and args.base is not None:
+        args.usage("--update counts the working tree: it takes no --base")
+    root = _repo_root()
+    file = CEILINGS if args.file is None else _relative(Path(args.file), root)
+    if file is None:
+        raise Unreadable(f"{args.file} is not inside the repository")
+    if args.update:
+        results = update_ceilings(root, file)
+    else:
+        results = check_ceilings(root, file, args.base or _default_base(root))
+    for result in results:
+        print(result.line)
+        _print_findings(list(result.findings))
+    return 1 if any(result.failed for result in results) else 0
+
+
+def _counts(args: argparse.Namespace) -> int:
+    root = _repo_root()
+    tree = Tree(_working_files(root, args.paths), _disk_reader(root), load(root),
+                read_index(root, None))
+    folders = count_folders(tree)
+    if args.format == "json":
+        print(json.dumps({"counting_version": COUNTING_VERSION,
+                          "folders": [item._asdict() for item in folders],
+                          "records_skipped": len(tree.records)}, indent=2))
+        return 0
+    for item in folders:
+        print(f"{item.folder}: {item.register}, {_count(item.files, 'file')}, "
+              f"{_count(item.findings, 'finding')}")
+    print(f"counting version {COUNTING_VERSION}; {_count(len(tree.records), 'record')} skipped")
+    return 0
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -841,6 +1197,34 @@ def _parser() -> argparse.ArgumentParser:
                          help="BASE is any commit-ish; the head is always HEAD, and BASE alone "
                          "means BASE...HEAD")
     changes.set_defaults(handler=_range, usage=changes.error)
+    held = commands.add_parser(
+        "ceilings", help="hold paths to the finding counts recorded for them",
+        description="Check the counts recorded in the ceilings file against the committed HEAD, "
+        "every Markdown file counted whole, or record them again with --update. Exit status: "
+        "0 when all hold; 1 for a count over or under its ceiling, a ceiling that rose, a path "
+        "that left the file, a stale counting version, or a record with a ceiling; 2 for a wrong "
+        "command line, a base that git cannot resolve, or an unusable file.")
+    held.add_argument("--file", metavar="PATH",
+                      help=f"the ceilings file (default {CEILINGS} from the top of the "
+                      "repository; a path you give is read from the working directory)")
+    held.add_argument("--base", metavar="REF",
+                      help="the commit whose copy of the file no ceiling may rise above "
+                      "(default: the target of origin/HEAD, else origin/main)")
+    held.add_argument("--update", action="store_true",
+                      help="count the working tree for every listed path and rewrite the file "
+                      "with this engine's counting version; no path is added or removed")
+    held.set_defaults(handler=_ceilings, usage=held.error)
+    totals = commands.add_parser(
+        "counts", help="count findings per folder and register",
+        description="Count the findings of the working tree for each folder and register, leaving "
+        "out records and files with no register. Exit status: 0, or 2 for a file or path that "
+        "cannot be used.")
+    totals.add_argument("--format", choices=("text", "json"), default="text",
+                        help="json: counting_version, folders and records_skipped (default text)")
+    totals.add_argument("paths", nargs="*", metavar="PATH",
+                        help="git pathspecs from the working directory (default: the whole "
+                        "repository)")
+    totals.set_defaults(handler=_counts, usage=totals.error)
     return parser
 
 
