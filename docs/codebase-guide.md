@@ -628,12 +628,16 @@ doc-tools.sh writing <verb> [args]  (or doc-superpowers tools writing …)
     ${DOC_SUPERPOWERS_PYTHON:-python3} must report 3.9 or later (asked with -I)
       → else "writing: skipped (needs python3 3.9 or later)", exit 3
     exec <python> -I -B -X utf8 <script> [<verb>] args: the engine's exit status is the verb's
-      (0 clean, 1 findings, 2 usage / unreadable / malformed / internal error)
-check FILE... | -     → config.load (defaults.json under docs/writing/config.json; the work ledger's id and
+      (0 clean, 1 findings, 2 usage / unreadable / malformed / internal error); a module of the
+      engine that cannot be imported exits 2 with one line, and a reader that closes the pipe early
+      (| head -1) changes neither the status nor stderr
+check FILE... | -     → a name that does not exist or is a folder exits 2 first; config.load (defaults.json
+                         under docs/writing/config.json; the work ledger's id and
                          key patterns when docs/ledger/config.json exists) → per file its register
                          (--profile, else register_for: docs/archive/ none, the doc-index doc_type, the path rules)
                          → lint_text: paragraphs outside front matter, fences, headings, table rows, quotes,
-                         skip_prefixes, skip_blocks and injected plan tasks → bare-code, long-sentence, long-item;
+                         skip_prefixes, skip_blocks and injected plan tasks, with link targets, autolinks, bare
+                         URLs and reference definitions blank → bare-code, long-sentence, long-item;
                          then a density line
 range BASE...HEAD     → config and doc-index as committed at HEAD; git diff -M against the merge base → the
                          sentences added that neither the old file nor a deleted file holds; a rewrite of an
@@ -641,7 +645,8 @@ range BASE...HEAD     → config and doc-index as committed at HEAD; git diff -M
 ceilings [--update]   → docs/writing/ceilings.json at HEAD: the counting version first, then each path's count
                          against its ceiling; the base copy's ceilings may only fall, unless the range changes
                          docs/writing/config.json or raises counting_version; --update rewrites the counts
-counts [PATH...]      → findings per folder and register, records left out; gates nothing
+counts [PATH...]      → findings per folder and register, records left out; gates nothing; a path that
+                         matches no file exits 2
 anchors --base REF    → identifiers, codes, numbers and link targets the working copy uses less than REF did,
                          and added relative links that lead nowhere
 ```

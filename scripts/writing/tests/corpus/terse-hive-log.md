@@ -22,3 +22,7 @@ QB9 dummy board
 See [the swarm call-out order (SW2)](swarm.md) for who rings whom. Later notes on SW2 go in that file.
 
 Waiting on #214 for the smoker order.
+
+## Task 4: Update governing specs
+
+Record the cracked lid QB3 in the rota before the next round.

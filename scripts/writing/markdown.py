@@ -6,10 +6,10 @@ nothing explains. A code is a short label for a record, such as ORB-12, KX7, ``b
 it is a pointer. The module reads no file and loads no configuration: callers pass the text, and
 a ``Codes`` that says what a code looks like.
 
-Use the pieces in this order. ``prose_lines`` drops fenced code and blanks link targets.
-``paragraphs`` regroups what is left, so a wrapped line keeps its brackets with their words.
-``bare_spans`` finds the unexplained codes in a paragraph, and ``path_spans`` the file paths,
-whose codes name a file.
+Use the pieces in this order. ``prose_lines`` drops fenced code and blanks link targets and
+reference definitions. ``paragraphs`` regroups what is left, so a wrapped line keeps its brackets
+with their words. ``bare_spans`` finds the unexplained codes in a paragraph, and ``path_spans``
+the file paths, whose codes name a file.
 """
 
 from __future__ import annotations
@@ -35,6 +35,17 @@ PAIRS = {")": "(", "]": "["}
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})")  # the marker may be indented, as it is in a nested list
 HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 LINK_TARGET = re.compile(r"(?<=\])\(([^)]*)\)")
+# A reference definition, as in ``[label]: destination``. A footnote definition does not match.
+REFERENCE = re.compile(r"^\s{0,3}\[(?!\^)[^\]]+\]:\s*<?([^\s>]+)>?")
+# What ``blank_link_targets`` takes for a definition: a label, a colon, one destination with no
+# space in it (or one in angle brackets), an optional quoted title, and nothing more. A prose line
+# that opens like a definition, ``[x]: the ferry rota is late``, is not one.
+DEFINITION = re.compile(r"^\s{0,3}\[(?!\^)[^\]]+\]:\s*(?:<[^<>]*>|[^\s<>]+)"
+                        r"(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^()]*\)))?\s*$")
+# An autolink, ``<https://...>``, and a bare URL. A bare URL ends before the punctuation that
+# closes a sentence or a bracket, and never takes a backtick, which closes the span it stands in.
+AUTOLINK = re.compile(r"<[A-Za-z][A-Za-z0-9+.-]*:[^\s<>]*>")
+BARE_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s<>`]*[^\s<>`.,;:!?'\")\]*_]")
 LIST_ITEM = re.compile(r"^(\s*)(?:[-*+]|\d+[.)]|\(?[a-z][.)])\s+")
 TABLE_ROW = re.compile(r"^\s*\|")
 QUOTE = re.compile(r"^[ \t]*>(?:[ \t]*>)*[ \t]?")
@@ -49,10 +60,20 @@ TOKEN_CLOSERS = "`\"'’”)]}>*_.,;:!?("
 EXTENSION = re.compile(r"\.[A-Za-z][A-Za-z0-9]*(?::[0-9]+(?:-[0-9]+)?)?$")
 
 
+def _spaces(match: re.Match) -> str:
+    return " " * len(match.group())
+
+
 def blank_link_targets(line: str) -> str:
     """``line`` with every Markdown link target replaced by as many spaces, so offsets hold and no
-    target is read as prose."""
-    return LINK_TARGET.sub(lambda match: "(" + " " * len(match.group(1)) + ")", line)
+    target is read as prose. The targets are an inline link's (its parentheses stay), an autolink
+    and a bare URL (both whole). A reference definition, ``[label]: destination``, is no prose
+    at all: the whole line goes blank, after any quote markers."""
+    rest = unquote(line)[1]
+    if DEFINITION.match(rest):
+        return line[:len(line) - len(rest)] + " " * len(rest)
+    line = LINK_TARGET.sub(lambda match: "(" + " " * len(match.group(1)) + ")", line)
+    return BARE_URL.sub(_spaces, AUTOLINK.sub(_spaces, line))
 
 
 def unquote(line: str) -> tuple[int, str]:
@@ -64,7 +85,8 @@ def unquote(line: str) -> tuple[int, str]:
 def prose_lines(text: str) -> Iterator[tuple[int, str]]:
     """Yield (line number, text) for each line of ``text`` outside a fenced code block.
 
-    Line numbers start at 1, and each link target is replaced by spaces. A fence line may be
+    Line numbers start at 1, and each link target is replaced by spaces, a reference definition
+    line whole (it keeps its number). A fence line may be
     indented. A fence that opens within a quote belongs to that quote: when the quote ends, so
     does the fence, and its closing marker must sit at the depth it opened, use the same character
     and be no shorter. Lines that are headings, table rows or list items come through as written;
@@ -148,12 +170,14 @@ def _glossed_brackets(line: str, spans: list[tuple[int, int]],
 def bare_spans(line: str, codes: Codes) -> list[tuple[int, int]]:
     """Positions (start, end) of the unexplained codes in ``line``, left to right.
 
-    Where matches overlap, only one is kept: the earliest start, then the longest. Words listed in
+    Where matches overlap, only one is kept: the earliest start, then the longest. An empty match,
+    which a pattern such as ``[A-Z]*`` finds everywhere, is no code. Words listed in
     ``codes.allowed`` are not codes, and neither is anything inside a bracket that explains it.
     File paths are not considered here, so a code that lies in one is still returned;
     ``path_spans`` locates the paths."""
     matches = sorted(((match.start(), match.end()) for pattern in codes.patterns
-                      for match in pattern.finditer(line)), key=lambda span: (span[0], -span[1]))
+                      for match in pattern.finditer(line) if match.end() > match.start()),
+                     key=lambda span: (span[0], -span[1]))
     kept: list[tuple[int, int]] = []
     for start, end in matches:
         if not kept or start >= kept[-1][1]:

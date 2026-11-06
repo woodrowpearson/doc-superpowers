@@ -62,6 +62,7 @@ As `git(1)` advises, do not run git, or this plugin, inside a `.git` that came f
 
 - It reads Markdown and git output, downloads nothing, and writes a file only through `ceilings --update`. It runs only when called.
 - The engine runs as `python3 -I -B -X utf8`: `PYTHON*` variables, the user site and the current directory stay off its import path, and it writes no bytecode. `DOC_SUPERPOWERS_PYTHON` names the interpreter it runs, so it is as trusted as `PATH`.
+- The lint sets no timeout, and a pattern is not the only way to make it slow. One very long line, or a reorganisation with many deleted and added sentences, can run for minutes. Give the caller its own budget.
 
 ## doc-search
 

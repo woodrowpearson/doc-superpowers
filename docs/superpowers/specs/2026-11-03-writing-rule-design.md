@@ -70,7 +70,7 @@ These would make the work a failure even if every test passed:
   nothing installs them.
 - **Python 3.9 is the floor.** Every source file parses under macOS's own `/usr/bin/python3` (3.9.6).
   Type annotations sit behind `from __future__ import annotations`, and the newest call is
-  `str.removeprefix`, added in 3.9. The tests have not yet run on 3.9; a CI leg will run them.
+  `str.removeprefix`, added in 3.9. The tests run on 3.9, in CI and locally.
 - **bash 3.2 and jq 1.6** for every shell wrapper, as for the rest of the shipped scripts.
 - **Hooks report.** The git tier's hooks never block outside `DOC_SUPERPOWERS_STRICT=1`, and each
   check runs inside the hook budget of 20 seconds by default.
@@ -225,9 +225,10 @@ A file's register comes from, in order:
 3. Nothing: the file is not linted. `docs/archive/`, files that are not Markdown, and Markdown
    outside these paths, such as the root `README.md`, are not linted.
 
-**Records.** An entry whose `doc_type` is a record type (plan, issue, audit, design-spec), or whose
-path is under `docs/archive/`, gets range mode only. `audit` does not count it and it takes no
-ceiling. This matches the freshness check, which never reports a record stale.
+**Records.** An entry whose `doc_type` is a record type (plan, issue, audit, design-spec) gets
+range mode only, and a path under `docs/archive/` is never linted without `--profile`. `audit` does
+not count a record and it takes no ceiling. This matches the freshness check, which never reports a
+record stale.
 
 `docs/writing/config.json` is optional. When present it is merged over `defaults.json` key by key:
 

@@ -137,10 +137,11 @@ It cannot tell whether the words beside a code describe it, or whether a short s
 
 The lint reads prose and leaves the rest alone.
 
-- **Left out.** Front matter (a YAML block from `---` on line 1 to the next `---`), fenced code blocks, headings, table rows and quoted lines that start with `>`.
+- **Left out.** Front matter (a YAML block from `---` on line 1 to the next `---`), fenced code blocks, headings, table rows and quoted lines that start with `>`. Link destinations are left out too: the target of an inline link, an autolink such as `<https://example.com/a>`, a bare URL, and a whole reference definition (`[label]: destination`, with an optional quoted title and nothing after), label and all. A line that only opens like one, such as `[x]: the ferry rota is late`, is prose.
+- **Not left out.** HTML comments and indented code blocks are read as prose. Only a fenced block is code to the lint.
 - **Tool-written lines.** A paragraph that opens with a skip prefix is passed over. The defaults are `Ledger-Claims:` and `Co-Authored-By:`. So is the block a tool writes after a `skip_blocks` header. So are the plan tasks `spec-inject` writes. Their headings read `## Task N: <phrase>`, with two to four `#`, and the phrase starts with Update governing specs, Land the spec amendment, Claims gate, Final claims gate, Ledger notices or Finalize all governing specs. A task runs to the next heading of its level or above. Its wording is the template's, not the author's. A heading that starts with one of those phrases but lacks `Task N:` is not skipped.
 - **Paragraphs.** Lines that wrap are joined with single spaces, so a bracket can open on one line and close on the next. Each list item is a paragraph of its own, and only its indented lines extend it.
-- **Words.** Whitespace-separated tokens, with link targets removed. A link counts as its text. A list marker (a bullet or a number) and a task box (`[ ]`) are not words.
+- **Words.** Whitespace-separated tokens, with link targets removed. A link counts as its text. An autolink or a bare URL counts for no word. A list marker (a bullet or a number) and a task box (`[ ]`) are not words.
 - **Sentences.** A sentence ends at `.`, `!` or `?` followed by whitespace and anything but a lower-case letter. `e.g.`, `i.e.`, `cf.` and `vs.` do not end one, and neither does a file name such as `rota_sync.py`.
 - **Files and encodings.** A byte-order mark is dropped and CRLF reads as LF. A file that is not UTF-8 is an error (exit 2), not a finding.
 
@@ -152,8 +153,10 @@ All five verbs share one exit-code scheme.
 |---|---|
 | 0 | Clean. `counts` exits 0 or 2, never 1. |
 | 1 | Findings: a bare code or a limit exceeded, a ceiling that failed, or an anchor lost. |
-| 2 | A wrong command line, an input that cannot be read or decoded, a malformed configuration or ceilings file, a base git cannot resolve, or a crash in the lint, printed as `writing: internal error: <type>: <message>`. |
+| 2 | A wrong command line, an input that cannot be read or decoded, a malformed configuration or ceilings file, a base git cannot resolve, a file or path that does not exist, a module of the engine that cannot be loaded, or a crash in the lint, printed as `writing: internal error: <type>: <message>`. |
 | 3 | The check could not run. |
+
+A reader that closes the pipe early, as `| head -1` does, changes neither the exit status nor the standard error: the run finishes and returns the status it would have.
 
 Exit 3 prints `writing: skipped (needs python3 3.9 or later)` when the interpreter is missing or too old. It prints `writing: skipped (no scripts/writing/ beside doc-tools.sh)` from a vendored copy of `doc-tools.sh`, which carries no engine. The interpreter is `python3` unless `DOC_SUPERPOWERS_PYTHON` names another. The engine runs as `python3 -I -B -X utf8`: isolated, writing no bytecode, and reading UTF-8 whatever the locale.
 
@@ -161,7 +164,7 @@ Exit 3 prints `writing: skipped (needs python3 3.9 or later)` when the interpret
 
 `writing check [--profile terse|full] [--github] [--format text|json] [--name LABEL] FILE...`
 
-Lints whole files, or standard input for `-`, which may be named once. Standard input has no path, so it has no register and needs `--profile`. `--name` only sets the label its findings carry, and goes with `-`. Without `--profile`, each file's register comes from the lookup in *The registers*, with the path taken from the top of the repository. `--github` is for text GitHub renders, such as a PR body, where an issue number (`#318`) is linked already.
+Lints whole files, or standard input for `-`, which may be named once. Standard input has no path, so it has no register and needs `--profile`. `--name` only sets the label its findings carry, and goes with `-`. Without `--profile`, each file's register comes from the lookup in *The registers*, with the path taken from the top of the repository. `--github` is for text GitHub renders, such as a PR body, where an issue number (`#318`) is linked already. A name that does not exist, or that is a folder, exits 2 before any register is looked up, so a typo cannot read as clean. A file that exists but has no register is named on standard error and is no error.
 
 ### range
 
@@ -186,7 +189,7 @@ See *Ceilings*.
 
 `writing counts [--format text|json] [PATH...]`
 
-It counts the findings of the working tree for each folder and register, leaving out records and files with no register. `PATH` is a git pathspec from the working directory. It counts files git knows or does not ignore, so a new file counts before it is staged. A file at the top of the repository is in the folder `.`. It gates nothing.
+It counts the findings of the working tree for each folder and register, leaving out records and files with no register. `PATH` is a git pathspec from the working directory, and one that matches no file exits 2. It counts files git knows or does not ignore, so a new file counts before it is staged. A file at the top of the repository is in the folder `.`. It gates nothing.
 
 ```text
 .: terse, 2 files, 0 findings
@@ -244,7 +247,7 @@ Density is not in the JSON. `counts --format json` prints an object: `counting_v
 | `registers.doc_types` | A doc-index type and its register, `terse` or `full`. |
 | `registers.paths` | Path rules: a `prefix`, a `suffix` or both, and a `register` that is `terse`, `full` or `null` for never linted. |
 | `limits` | Per register: `sentence`, `item` and `item_sentences`, each a whole number of 1 or more. `item` and `item_sentences` may be `null` for no limit. |
-| `codes` | `patterns` (regular expressions), `allowed` (words that are not codes) and `gloss_chars` (single characters that let a bracket explain what stands before it). |
+| `codes` | `patterns` (regular expressions; a match of no characters is not a code), `allowed` (words that are not codes) and `gloss_chars` (single characters that let a bracket explain what stands before it). |
 | `skip_prefixes` | Line prefixes whose paragraph is left alone. |
 | `skip_blocks` | Headers that open a block of list items a tool wrote. The default is `Implementation:` and `Realized-by:`. |
 
@@ -269,7 +272,7 @@ A ceiling holds a path to the number of findings it has today, so a project can 
 }
 ```
 
-`writing ceilings [--file PATH] [--base REF] [--update]` reads the file as committed at HEAD, counts the Markdown files committed there under each path, each whole and in its own register, and prints one line per path. A count over its ceiling fails, and the findings are listed beneath it. A count under its ceiling fails too, with the number to set, so every gain is recorded. A path added in this range that names no Markdown file the lint reads fails, and so does a ceiling that names a record. A last line names the file and how many paths were checked. With no ceilings file at HEAD or at the base, that line stands alone and the run exits 0.
+`writing ceilings [--file PATH] [--base REF] [--update]` reads the file as committed at HEAD, counts the Markdown files committed there under each path, each whole and in its own register, and prints one line per path. A count over its ceiling fails, and the findings are listed beneath it. A count under its ceiling fails too, with the number to set, so every gain is recorded. A path added in this range that names no Markdown file the lint reads fails, and so does a ceiling that names a record. A last line names the file and how many paths were checked. With no ceilings file at HEAD or at the base, that line stands alone and the run exits 0. When no `--base` is given and HEAD has no file, the base is not looked up, so a repository with no `origin` passes.
 
 **A ceiling may fall but never rise, and a path may not leave the file.** The check compares the file with its copy at the merge base of `--base` and HEAD. `--base` defaults to the target of `origin/HEAD`, else `origin/main`. A ceiling that rises, or a path that leaves the file, passes only when the range changes `docs/writing/config.json` (any edit counts) or raises `counting_version` to the engine's. When it does, the line says which.
 

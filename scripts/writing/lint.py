@@ -16,8 +16,9 @@ plain words hide jargon, or whether the main point comes first.
 ``check`` reads whole files, or standard input for ``-``. A register sets the limits. Without
 ``--profile`` each file's register comes from the project's configuration, by its doc-index type
 and then its path (``config.register_for``), the path being taken from the top of the repository.
-A file with no register is named on standard error and is not a finding. Standard input has no
-path, so it needs ``--profile``; ``--name`` is only the label its findings carry.
+A file with no register is named on standard error and is not a finding; a name that does not
+exist, or is a folder, is an error. Standard input has no path, so it needs ``--profile``;
+``--name`` is only the label its findings carry.
 
 ``range`` judges a branch by the text it wrote. It takes the merge base of BASE and HEAD and
 compares it with the committed HEAD, never with the working tree. A sentence is the branch's own
@@ -39,12 +40,13 @@ files with no register, and a ceiling that names a record is itself a finding. T
 ``{"counting_version": N, "paths": {PATH: COUNT}}``; a file with no version is one from before
 versions, and reads as version 0. A count over its ceiling fails, and so does one under it. A
 ceiling may fall but never rise, and no path may leave the file, unless the range from the merge
-base of BASE (default ``origin/HEAD``, else ``origin/main``) to HEAD changes
-``docs/writing/config.json`` or sets ``counting_version`` to ``COUNTING_VERSION``. A file recorded
-with another version is not compared at all: run ``ceilings --update``, which counts the working
-tree for each listed path and rewrites the file with the engine's version. ``counts`` prints the
-findings of the working tree for each folder and register, passing over records and files with no
-register, for the audit to show.
+base of BASE (default ``origin/HEAD``, else ``origin/main``, looked up only when HEAD has a
+ceilings file) to HEAD changes ``docs/writing/config.json`` or sets ``counting_version`` to
+``COUNTING_VERSION``. A file recorded with another version is not compared at all: run
+``ceilings --update``, which counts the working tree for each listed path and rewrites the file
+with the engine's version. ``counts`` prints the findings of the working tree for each folder and
+register, passing over records and files with no register, for the audit to show; a path that
+matches no file is an error.
 
 The exit status is 0 for a clean run and 1 when there are findings, each printed as
 ``path:line: rule: message``; for ``ceilings``, a count over or under its ceiling, a ceiling that
@@ -64,6 +66,7 @@ the hooks): an explicit ``check``, ``range``, ``ceilings`` or ``counts`` always 
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import posixpath
@@ -73,9 +76,10 @@ import stat
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from difflib import SequenceMatcher
 from pathlib import Path, PurePosixPath
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 # An isolated interpreter (-I) leaves this script's folder off the path, and the modules import
 # each other by name.
@@ -83,11 +87,18 @@ _HERE = str(Path(__file__).resolve().parent)
 if sys.path[:1] != [_HERE]:
     sys.path.insert(0, _HERE)
 
-from config import (CONFIG, REGISTERS, Config, Limits, Malformed, is_record,  # noqa: E402
-                    load, read_index, register_for)
-from markdown import (HEADING, LINK_TARGET, LIST_ITEM, TABLE_ROW, Codes,  # noqa: E402
-                      bare_spans, blank_link_targets, paragraphs, path_spans, prose_lines,
-                      unquote)
+# A module that is missing or broken beside this script ends the run with status 2, as every
+# other fault of the engine does: an uncaught import error would exit 1, which reads as findings.
+try:
+    from config import (CONFIG, REGISTERS, Config, Limits, Malformed,  # noqa: E402
+                        is_record, load, read_index, register_for)
+    from markdown import (HEADING, LINK_TARGET, LIST_ITEM, TABLE_ROW,  # noqa: E402
+                          Codes, bare_spans, blank_link_targets, paragraphs, path_spans,
+                          prose_lines, unquote)
+except Exception as _error:  # a defect in the installation, not a finding
+    print(f"writing: cannot load the engine: {type(_error).__name__}: "
+          + " ".join(str(_error).split()), file=sys.stderr)
+    sys.exit(2)
 
 
 class Finding(NamedTuple):
@@ -157,8 +168,11 @@ def _clean(text: str) -> str:
 
 def _words(text: str) -> int:
     """Count the whitespace-separated tokens left after link targets are removed; the link
-    ``[the ferry rota](docs/rota.md)`` is three words."""
-    return len(LINK_TARGET.sub("", text).split())
+    ``[the ferry rota](docs/rota.md)`` is three words. A code span whose URL was blanked is one
+    word, as it would be with any other word in it."""
+    text = BACKTICK_SPAN.sub(lambda span: span.group() if span.group().strip("` \t") else "`x`",
+                             LINK_TARGET.sub("", text))
+    return len(text.split())
 
 
 def _count(number: int, noun: str) -> str:
@@ -225,9 +239,11 @@ def _body_start(text: str) -> int:
 def _code_spans(text: str, codes: Codes) -> list[tuple[int, int]]:
     """Every code in ``text`` as (start, end), left to right. Of overlapping matches the one
     starting first wins, then the longest, which is the rule ``markdown.bare_spans`` applies;
-    words on the project's allowed list are dropped. ``bare_spans`` picks its codes from these."""
+    words on the project's allowed list are dropped, and so is an empty match (a pattern such as
+    ``[A-Z]*`` finds one everywhere). ``bare_spans`` picks its codes from these."""
     matches = sorted(((match.start(), match.end()) for pattern in codes.patterns
-                      for match in pattern.finditer(text)), key=lambda span: (span[0], -span[1]))
+                      for match in pattern.finditer(text) if match.end() > match.start()),
+                     key=lambda span: (span[0], -span[1]))
     kept: list[tuple[int, int]] = []
     for start, end in matches:
         if not kept or start >= kept[-1][1]:
@@ -919,16 +935,20 @@ def _update_command(file: str) -> str:
     return "writing ceilings --update" + named
 
 
-def check_ceilings(root: Path, file: str, base: str) -> list[Ceiling]:
+def check_ceilings(root: Path, file: str, base: str | None) -> list[Ceiling]:
     """Check the ceilings file committed at HEAD against the files committed there, and against
     the file as it stood where the branch left ``base``. A path is counted over whole files, and
     each gets a line. A ceiling that rose since then, or a path the earlier file listed and this
     one does not, fails unless the range edits the project's writing configuration or moves
     ``counting_version`` to this engine's; the line names which. A file recorded with another
-    version gets one failing line and no counts. ``Malformed`` is raised for a file that is
-    not valid, ``Unreadable`` when git cannot resolve ``base`` or read a file."""
-    merge_base = _merge_base(root, base)
+    version gets one failing line and no counts. ``base`` of ``None`` means the default base
+    (``_default_base``), looked up only when there is a file at HEAD to compare: with none, the run
+    has nothing to check and passes. ``Malformed`` is raised for a file that is not valid,
+    ``Unreadable`` when git cannot resolve ``base`` or read a file."""
     head = _ceilings_at(root, "HEAD", file, "HEAD")
+    if head is None and base is None:  # no file and no base named: nothing to check against
+        return [Ceiling(f"{file}: {_count(0, 'path')} checked at HEAD", False)]
+    merge_base = _merge_base(root, base or _default_base(root))
     before = _ceilings_at(root, merge_base, file, "the base")
     if head is not None and head.version != COUNTING_VERSION:
         return [Ceiling(f"writing ceilings: counted with version {head.version}; this "
@@ -1059,6 +1079,13 @@ def _relative(file: Path, root: Path) -> str | None:
         return None
 
 
+def _usable(name: str) -> None:
+    """Raise ``OSError`` unless ``name`` is a file that can be read, so that a typo or a folder is
+    an error even when no register would have the lint read it."""
+    if stat.S_ISDIR(os.stat(name).st_mode):
+        raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR))
+
+
 def _check(args: argparse.Namespace) -> int:
     reads_stdin = "-" in args.files
     if args.files.count("-") > 1:
@@ -1075,6 +1102,13 @@ def _check(args: argparse.Namespace) -> int:
     every: list[Finding] = []
     for name in args.files:
         label = (args.name or STDIN) if name == "-" else name
+        try:
+            if name != "-":
+                _usable(name)
+        except OSError as error:
+            print(f"writing: cannot read {label}: {error.strerror or error}", file=sys.stderr)
+            status = 2
+            continue
         if args.profile:
             register = args.profile
         else:
@@ -1143,17 +1177,27 @@ def _ceilings(args: argparse.Namespace) -> int:
     if args.update:
         results = update_ceilings(root, file)
     else:
-        results = check_ceilings(root, file, args.base or _default_base(root))
+        results = check_ceilings(root, file, args.base)
     for result in results:
         print(result.line)
         _print_findings(list(result.findings))
     return 1 if any(result.failed for result in results) else 0
 
 
+def _named_files(root: Path, path: str | None) -> list[str]:
+    """The working-tree files under the pathspec ``path`` (the whole repository for ``None``).
+    A pathspec that matches no file is an error, which a typo would otherwise hide as a count of
+    zero."""
+    files = _working_files(root, [] if path is None else [path])
+    if path is not None and not files:
+        raise Unreadable(f"{path}: matches no file")
+    return files
+
+
 def _counts(args: argparse.Namespace) -> int:
     root = _repo_root()
-    tree = Tree(_working_files(root, args.paths), _disk_reader(root), load(root),
-                read_index(root, None))
+    files = [file for path in args.paths or [None] for file in _named_files(root, path)]
+    tree = Tree(list(dict.fromkeys(files)), _disk_reader(root), load(root), read_index(root, None))
     folders = count_folders(tree)
     if args.format == "json":
         print(json.dumps({"counting_version": COUNTING_VERSION,
@@ -1228,6 +1272,56 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+class _Stdout:
+    """Standard output that outlives its reader, as when a command is piped into ``head -1``. On
+    the first ``BrokenPipeError`` it points the descriptor at the null device and carries on, so
+    the run reaches its own return, and the flush the interpreter makes at exit finds nothing to
+    fail on. Without it the run ends in a traceback and status 120."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+        self._live = True
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+    def write(self, text: str) -> int:
+        self._try(self._stream.write, text)
+        return len(text)
+
+    def flush(self) -> None:
+        self._try(self._stream.flush)
+
+    def _try(self, call: Callable[..., object], *args: str) -> None:
+        if not self._live:
+            return
+        try:
+            call(*args)
+        except BrokenPipeError:
+            try:
+                null = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(null, self._stream.fileno())
+                os.close(null)
+            except (OSError, ValueError):  # no descriptor to redirect: drop what comes
+                self._live = False
+
+
+@contextmanager
+def closed_pipe_proof() -> Iterator[None]:
+    """Within the block, standard output is a ``_Stdout``; what it holds is flushed on the way
+    out, so a reader that left shows there and not at the interpreter's exit."""
+    out = sys.stdout
+    if out is None:  # ``>&-``: nothing to wrap, and print drops what it is given
+        yield
+        return
+    sys.stdout = _Stdout(out)
+    try:
+        yield
+    finally:
+        sys.stdout.flush()
+        sys.stdout = out
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the command in ``argv`` (default: the process's arguments) and return its exit
     code. A configuration or a base that cannot be used is reported, not raised."""
@@ -1241,9 +1335,11 @@ def main(argv: list[str] | None = None) -> int:
 
 def entry(argv: list[str] | None = None) -> int:
     """``main``, except that a crash exits 2 with the error on standard error. An uncaught
-    exception would exit 1 and read as findings."""
+    exception would exit 1 and read as findings. A reader that closes the pipe early changes
+    nothing: the run returns the status it would have."""
     try:
-        return main(argv)
+        with closed_pipe_proof():
+            return main(argv)
     except Exception as error:  # a bug, not a finding
         print(f"writing: internal error: {type(error).__name__}: {error}", file=sys.stderr)
         return 2
