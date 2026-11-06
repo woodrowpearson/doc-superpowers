@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -75,6 +76,40 @@ def run(*args: str, cwd: Path, stdin: str | bytes | None = None, script: Path = 
     done = subprocess.run([sys.executable, "-I", "-B", "-X", "utf8", str(script), *args],
                           capture_output=True, cwd=str(cwd), input=data)
     return Result(done.returncode, done.stdout.decode("utf-8"), done.stderr.decode("utf-8"))
+
+
+def run_cut_short(*args: str, cwd: Path, script: Path = LINT) -> Result:
+    """Run ``script`` as ``script ... | head -1`` does: read one line of its standard output, then
+    close the pipe while it still has more to print. Only that first line comes back as ``out``;
+    the code and the standard error are the script's own."""
+    process = subprocess.Popen([sys.executable, "-I", "-B", "-X", "utf8", str(script), *args],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(cwd))
+    assert process.stdout is not None and process.stderr is not None
+    first = process.stdout.readline()
+    process.stdout.close()
+    err = process.stderr.read()
+    process.stderr.close()
+    return Result(process.wait(), first.decode("utf-8"), err.decode("utf-8"))
+
+
+def run_stdout_closed(*args: str, cwd: Path, script: Path = LINT) -> Result:
+    """Run ``script`` as ``script ... >&-`` does: standard output closed, so ``sys.stdout`` is
+    ``None``. Only the code and the standard error come back (``out`` is empty)."""
+    done = subprocess.run(["/bin/sh", "-c", 'exec "$@" >&-', "sh", sys.executable, "-I", "-B",
+                           "-X", "utf8", str(script), *args],
+                          stderr=subprocess.PIPE, cwd=str(cwd))
+    return Result(done.returncode, "", done.stderr.decode("utf-8"))
+
+
+@contextmanager
+def engine_without(*names: str) -> Iterator[Path]:
+    """A copy of the engine's scripts (no tests) in a throwaway directory, minus the files
+    ``names``; yields the directory."""
+    with tempfile.TemporaryDirectory(prefix="writing engine ") as base:
+        folder = Path(base) / "writing"
+        shutil.copytree(WRITING, folder, ignore=shutil.ignore_patterns(
+            "tests", "__pycache__", *names))
+        yield folder
 
 
 def put(root: Path, files: dict[str, str | bytes]) -> None:

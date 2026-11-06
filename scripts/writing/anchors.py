@@ -77,15 +77,21 @@ if sys.path[:1] != [_HERE]:
     sys.path.insert(0, _HERE)
 
 # The lint module owns the git helpers, the code finder and the paragraph joiner. They are shared.
-from config import Malformed, load  # noqa: E402
-from lint import (BACKTICK_SPAN, Unreadable, _code_spans, _join, _line_at,  # noqa: E402
-                  _relative, _repo_root, _run_git, _text_at)
-from markdown import Codes, paragraphs, prose_lines  # noqa: E402
+# A module that is missing or broken beside this script ends the run with status 2: an uncaught
+# import error would exit 1, which reads as a lost anchor.
+try:
+    from config import Malformed, load  # noqa: E402
+    from lint import (BACKTICK_SPAN, Unreadable, _code_spans, _join,  # noqa: E402
+                      _line_at, _relative, _repo_root, _run_git, _text_at,
+                      closed_pipe_proof)
+    from markdown import REFERENCE, Codes, paragraphs, prose_lines  # noqa: E402
+except Exception as _error:  # a defect in the installation, not a finding
+    print(f"writing: cannot load the engine: {type(_error).__name__}: "
+          + " ".join(str(_error).split()), file=sys.stderr)
+    sys.exit(2)
 
 # The destination of an inline link or image; a title after it and angle brackets are left out.
 TARGET = re.compile(r"\]\(\s*<?([^)\s>]+)>?(?:\s+[^)]*)?\)")
-# A reference definition, as in ``[label]: destination``. A footnote definition does not match.
-REFERENCE = re.compile(r"^\s{0,3}\[(?!\^)[^\]]+\]:\s*<?([^\s>]+)>?")
 # Digits kept whole around an inner decimal point or thousands separator.
 NUMBER = re.compile(r"(?<![0-9A-Za-z_.,])[0-9]+(?:[.,][0-9]+)*(?![0-9A-Za-z_])")
 ORDERED_MARKER = re.compile(r"^\s*[0-9]+[.)](?=\s)")
@@ -345,9 +351,11 @@ def main(argv: list[str] | None = None) -> int:
 
 def entry(argv: list[str] | None = None) -> int:
     """``main``, except that a crash exits 2 and prints the error on standard error. Left alone,
-    an exception would exit 1, which a caller takes for a lost anchor."""
+    an exception would exit 1, which a caller takes for a lost anchor. A reader that closes the
+    pipe early changes nothing: the run returns the status it would have."""
     try:
-        return main(argv)
+        with closed_pipe_proof():
+            return main(argv)
     except Exception as error:  # a defect in the check, not a finding
         print(f"writing: internal error: {type(error).__name__}: {error}", file=sys.stderr)
         return 2

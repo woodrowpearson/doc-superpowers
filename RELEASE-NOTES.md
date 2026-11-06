@@ -27,7 +27,7 @@ Nothing to do. A project that never runs `doc-tools.sh writing` is unaffected.
 - **`SECURITY.md`** gains a python3 row in the tool table (floor 3.9, advised 3.12 or later) and states that `docs/writing/config.json` is data whose patterns compile as regular expressions, under the caller's budget. The engine runs as `python3 -I -B -X utf8`.
 
 ### Other
-- **`check-ci.sh writing`** runs the engine's unittest suite (302 tests) under each distinct python3 it finds, `python3` on PATH and `/usr/bin/python3`, and `tests.yml` runs it on both legs. The macOS leg sets `DOC_SP_REQUIRE_FLOOR_PYTHON=1`, so it fails unless a run was on 3.9, the floor.
+- **`check-ci.sh writing`** runs the engine's unittest suite (329 tests) under each distinct python3 it finds, `python3` on PATH and `/usr/bin/python3`, and `tests.yml` runs it on both legs. The macOS leg sets `DOC_SP_REQUIRE_FLOOR_PYTHON=1`, so it fails unless a run was on 3.9, the floor.
 - Verified locally (GitHub Actions does not run on this account): the seven suites under bash 5.x and `/bin/bash` 3.2 (15857 assertions each), the writing suite under python3 3.13.3 and `/usr/bin/python3` 3.9.6, the doc-search pytest suite (863 passed, the 2 live tests skipped), `zizmor` 1.31.1 (no findings over the 3 workflows and the 9 rendered templates), `dep-audit` (no known vulnerabilities), the self-install check, `gitleaks`, `check-version` and `claude plugin validate .`. Every check passed except `tag`, which cannot pass until v3.13.0 is on origin after the merge. **The template change (`doc-release.yml`'s `--allow` list) has not run on GitHub Actions.**
 
 ## v3.12.1 (2026-11-02)

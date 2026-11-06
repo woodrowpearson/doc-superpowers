@@ -106,7 +106,7 @@
 - `doc_types`: plan, issue and audit → terse; design-spec, spec, adr and the living types → full.
 - `paths`, in order: `docs/archive/` → none; `AGENTS.md` and `CLAUDE.md` by name → terse; `docs/plans/` with suffix `-design.md` → full; `docs/plans/` and `docs/issues/` → terse; `docs/` → full.
 
-An unknown `doc_type` in the index is full. The ledger patterns come from `docs/ledger/ledgers.json` `.ledgers[].id`: `(?<![A-Za-z0-9_])(?:<ids, escaped>)-[1-9][0-9]*(?![A-Za-z0-9_])`. The ledger items folder (`items.dir` in the ledger config, default `docs/issues/`) is terse.
+An unknown `doc_type` in the index is full. The ledger patterns come from `docs/ledger/ledgers.json` `.ledgers[].id`: `(?<![A-Za-z0-9_])(?:<ids, escaped>)-[1-9][0-9]*(?![A-Za-z0-9_])`. The ledger items folder (`items.globs` in the ledger config, default `docs/issues/`) is terse.
 
 - [ ] **Step 1: Write the failing tests** in `test_config.py`:
   - `test_defaults_alone_give_the_documented_limits`: `load(empty repo).limits["terse"] == Limits(35, 50, 2)`.

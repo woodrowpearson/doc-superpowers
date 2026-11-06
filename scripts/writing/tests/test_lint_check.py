@@ -132,6 +132,29 @@ class Codes(unittest.TestCase):
         keyed = "KX7 is open.\n\n## Key\n\n- **KX7**: moving the late sailing.\n"
         self.assertEqual(check(keyed), [])
 
+    def test_link_destinations_of_every_form_are_not_prose(self) -> None:
+        cases = {
+            "a reference definition": "[ref]: https://example.com/browse/KX9\n",
+            "a reference definition on a file": "[KX7]: notes.md\n",
+            "a reference definition with a title": '[ref]: <notes/KX9.md> "KX7"\n',
+            "an autolink": "<https://example.com/browse/ORB-12>\n",
+            "an autolink in a sentence": "Read <https://example.com/browse/ORB-12> first.\n",
+            "a bare URL": "Open https://example.com/browse/ORB-12 to read it.\n",
+            "a bare URL that ends a sentence": "Read https://example.com/browse/ORB-12.\n",
+            "a bare URL in brackets": "Read it (https://example.com/browse/ORB-12) first.\n",
+        }
+        for name, text in cases.items():
+            for register in ("terse", "full"):
+                with self.subTest(name=name, register=register):
+                    self.assertEqual(check(f"# Notes\n\n{text}", register), [])
+
+    def test_prose_beside_a_link_destination_is_still_linted(self) -> None:
+        for text in ("KX7 is open, see <https://example.com/a>.\n",
+                     "Read https://example.com/a for KX7 today.\n",
+                     "[ref]: notes.md\n\nKX7 is open.\n"):
+            with self.subTest(text=text):
+                self.assertEqual(rules(check(text)), ["bare-code"])
+
     def test_a_glossed_code_passes_later_only_in_full(self) -> None:
         text = "Moving the late sailing (KX7) is open. Then KX7 is next.\n"
         self.assertEqual(check(text, "full"), [])
@@ -225,6 +248,26 @@ class Codes(unittest.TestCase):
                 self.assertTrue(set(markdown.bare_spans(line, CONFIG.codes)) <= set(spans))
                 self.assertTrue(all(line[start:end] not in CONFIG.codes.allowed
                                     for start, end in spans))
+
+
+    def test_a_pattern_that_can_match_nothing_finds_only_real_codes(self) -> None:
+        # "[A-Z]*" matches the empty string everywhere. An empty match is no code.
+        wide = support.Codes(patterns=(re.compile("[A-Z]*"),), allowed=frozenset(),
+                             gloss_chars=frozenset())
+        text = "hello KX there, and again."
+        self.assertEqual(lint._codes(text, wide), ["KX"])
+        self.assertEqual(support.markdown.bare_codes(text, wide), ["KX"])
+        spans = support.markdown.bare_spans(text, wide)
+        self.assertEqual([text[start:end] for start, end in spans], ["KX"])
+        self.assertEqual(lint._codes("nothing to see here", wide), [])
+
+    def test_a_zero_width_pattern_in_the_project_file_does_not_flood_the_output(self) -> None:
+        with support.git_repo() as repo:
+            put(repo, {"docs/writing/config.json": json.dumps({"codes": {"patterns": ["[A-Z]*"]}}),
+                       "a.md": "# Notes\n\nthe KX gauge reads high.\n"})
+            done = run("check", "--profile", "terse", "a.md", cwd=repo)
+        self.assertEqual(done.code, 1, done.out + done.err)
+        self.assertEqual(re.findall(r"bare-code: \"([^\"]*)\"", done.out), ["KX"])
 
 
 class Skipped(unittest.TestCase):
@@ -416,6 +459,18 @@ class Blocks(unittest.TestCase):
 
 
 class Density(unittest.TestCase):
+    def test_a_url_in_a_span_changes_neither_the_codes_nor_the_density(self) -> None:
+        with_url = "Use `https://example.com/a` for it, and the ferry rota (`KX7`) is open.\n"
+        plain = "Use `exampleword` for it, and the ferry rota (`KX7`) is open.\n"
+        self.assertEqual(rules(check(with_url)), rules(check(plain)))
+        self.assertEqual(check(with_url), [])
+        self.assertEqual(lint.identifier_density(with_url), lint.identifier_density(plain))
+        self.assertEqual(lint.identifier_density(with_url), 2 * 100 / 11)
+
+    def test_a_prose_line_shaped_like_a_definition_is_linted(self) -> None:
+        self.assertEqual(code_of(check("[x]: the ferry rota is late, KX7.\n")[0]), "KX7")
+        self.assertEqual(check("[KX7]: notes.md\n"), [])
+
     def test_density_counts_backtick_spans(self) -> None:
         text = "`one` `two` `three` " + " ".join(["words"] * 97) + ".\n"
         self.assertEqual(lint.identifier_density(text), 3.0)
@@ -544,6 +599,28 @@ class CommandLine(unittest.TestCase):
         self.assertIn("cannot read docs: ", done.err)
         self.assertNotIn("Traceback", done.err)
 
+    def test_a_missing_file_or_a_directory_exits_2_whatever_the_register(self) -> None:
+        with support.git_repo() as repo:
+            put(repo, {"docs/a.md": "Fine.\n", "docs/archive/old.md": "KX7 is open.\n"})
+            for args, want in ((["nosuch.md"], "cannot read nosuch.md: "),
+                               (["docs/nosuch.md"], "cannot read docs/nosuch.md: "),
+                               (["docs"], "cannot read docs: "),
+                               (["docs/archive"], "cannot read docs/archive: ")):
+                with self.subTest(args=args):
+                    done = run("check", *args, cwd=repo)
+                    self.assertEqual(done.code, 2, done.out + done.err)
+                    self.assertIn(want, done.err)
+                    self.assertNotIn("not linted", done.err)
+                    self.assertNotIn("Traceback", done.err)
+            # A file that exists but has no register is still passed over, and is no error.
+            archived = run("check", "docs/archive/old.md", cwd=repo)
+            beside = run("check", "docs/a.md", "nosuch.md", cwd=repo)
+        self.assertEqual(archived.code, 0, archived.out + archived.err)
+        self.assertEqual(archived.err.splitlines(),
+                         ["docs/archive/old.md: not linted (no register)"])
+        self.assertEqual(beside.code, 2, beside.out + beside.err)
+        self.assertIn("docs/a.md: ", beside.out)  # the other file is still linted
+
     def test_a_crash_exits_2_not_1(self) -> None:
         with tempfile.TemporaryDirectory(prefix="writing crash ") as base:
             target = Path(base) / "a.md"
@@ -556,6 +633,59 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertIn("writing: internal error: RuntimeError: boom", err.getvalue())
         self.assertNotIn("Traceback", err.getvalue())
+
+    def test_a_module_that_cannot_be_imported_exits_2_with_one_line(self) -> None:
+        for missing in ("config.py", "markdown.py"):
+            with self.subTest(missing=missing), support.engine_without(missing) as folder, \
+                    support.git_repo() as repo:
+                put(repo, {"a.md": "KX7 is open.\n"})
+                done = run("check", "--profile", "terse", "a.md", cwd=repo,
+                           script=folder / "lint.py")
+                self.assertEqual(done.code, 2, done.out + done.err)
+                self.assertEqual(done.out, "")
+                self.assertEqual(len(done.err.splitlines()), 1, done.err)
+                self.assertTrue(done.err.startswith("writing: "), done.err)
+                self.assertIn(missing.removesuffix(".py"), done.err)
+
+    def test_a_pipe_closed_early_is_quiet_and_keeps_the_exit_code(self) -> None:
+        # ``writing check big.md | head -1``: the reader leaves while output is still coming.
+        many = "# Notes\n\n" + "".join(f"KX{number % 999} is open.\n\n" for number in range(3000))
+        with support.git_repo() as repo:
+            put(repo, {"big.md": many})
+            done = support.run_cut_short("check", "--profile", "terse", "big.md", cwd=repo)
+            as_json = support.run_cut_short("check", "--profile", "terse", "--format", "json",
+                                            "big.md", cwd=repo)
+        for answer in (done, as_json):
+            self.assertEqual(answer.code, 1, answer.out + answer.err)  # findings, as ever
+            self.assertEqual(answer.err, "")
+        self.assertTrue(done.out.startswith("big.md:3: bare-code: "), done.out)
+
+    def test_a_closed_stdout_keeps_the_exit_code_and_is_quiet(self) -> None:
+        # ``writing check a.md >&-``: sys.stdout is None.
+        with support.git_repo() as repo:
+            put(repo, {"found.md": "KX7 is open.\n", "clean.md": "The page is fine.\n"})
+            found = support.run_stdout_closed("check", "--profile", "terse", "found.md", cwd=repo)
+            clean = support.run_stdout_closed("check", "--profile", "terse", "clean.md", cwd=repo)
+        self.assertEqual((found.code, found.err), (1, ""))
+        self.assertEqual((clean.code, clean.err), (0, ""))
+
+    def test_a_closed_stdout_does_not_stop_the_run_in_process(self) -> None:
+        class Gone(io.StringIO):
+            def write(self, text: str) -> int:
+                raise BrokenPipeError(32, "Broken pipe")
+
+            def flush(self) -> None:
+                raise BrokenPipeError(32, "Broken pipe")
+
+        for text, want in (("KX7 is open.\n", 1), ("The page is fine.\n", 0)):
+            with self.subTest(want=want), \
+                    tempfile.TemporaryDirectory(prefix="writing pipe ") as base:
+                target = Path(base) / "a.md"
+                target.write_text(text, encoding="utf-8")
+                err = io.StringIO()
+                with in_directory(Path(base)), redirect_stdout(Gone()), redirect_stderr(err):
+                    status = lint.entry(["check", "--profile", "terse", str(target)])
+                self.assertEqual((status, err.getvalue()), (want, ""))
 
     def test_malformed_config_exits_2(self) -> None:
         cases = (('{"limits": {"terse": {"sentence": 0}}}', "limits.terse.sentence"),

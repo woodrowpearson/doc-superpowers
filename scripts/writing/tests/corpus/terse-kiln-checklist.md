@@ -19,6 +19,8 @@ Hold the peak for twenty minutes after the witness cone bends, then switch the c
 
 The shelf set TK12 was cracked in the last firing.
 
+Save the firing log as UTF-8 text on the studio drive.
+
 Co-Authored-By: someone who is not a prose author
 
 Open the lid only when the dial reads cool; ask the studio lead (SL1) if unsure.

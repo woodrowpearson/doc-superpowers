@@ -171,6 +171,81 @@ ORB-12 appears only inside this fence
         blanked = dict(md.prose_lines("See [the note](docs/NAV-210.md) too"))[1]
         self.assertEqual(blanked, "See [the note](" + " " * len("docs/NAV-210.md") + ") too")
 
+    def test_every_link_form_is_blanked_to_the_same_length(self) -> None:
+        cases = [
+            "See [the note](docs/NAV-210.md) and more",
+            "See <https://example.com/browse/ORB-12> and more",
+            "See https://example.com/browse/ORB-12 and more",
+            "See https://example.com/browse/ORB-12. And more",
+            "[ref]: https://example.com/browse/KX9",
+            "  [KX7]: <notes.md> \"title\"",
+            "> [KX7]: notes.md",
+        ]
+        for line in cases:
+            with self.subTest(line=line):
+                blanked = md.blank_link_targets(line)
+                self.assertEqual(len(blanked), len(line))
+                self.assertNotRegex(blanked, r"ORB|KX|NAV|example|notes")
+
+    def test_trailing_punctuation_and_words_round_a_url_are_kept(self) -> None:
+        self.assertEqual(md.blank_link_targets("Read https://example.com/a. Then go."),
+                         "Read " + " " * len("https://example.com/a") + ". Then go.")
+        self.assertEqual(md.blank_link_targets("(see https://example.com/a)"),
+                         "(see " + " " * len("https://example.com/a") + ")")
+
+    def test_text_that_only_looks_like_a_destination_is_kept(self) -> None:
+        for line in ("Note: use KX7 here", "a [KX7] label", "[^1]: a footnote on KX7",
+                     "use a < b and c > d", "mail me@example.com", "the 12:30 ferry"):
+            with self.subTest(line=line):
+                self.assertEqual(md.blank_link_targets(line), line)
+
+    def test_a_url_inside_a_code_span_leaves_the_span_whole(self) -> None:
+        cases = {
+            "Use `https://example.com/a` for it.":
+                "Use `" + " " * len("https://example.com/a") + "` for it.",
+            "A `https://example.com/a`, then `https://example.com/b` too.":
+                "A `" + " " * len("https://example.com/a") + "`, then `"
+                + " " * len("https://example.com/b") + "` too.",
+            "See https://example.com/a`x`.":
+                "See " + " " * len("https://example.com/a") + "`x`.",
+        }
+        for line, want in cases.items():
+            with self.subTest(line=line):
+                self.assertEqual(dict(md.prose_lines(line))[1], want)
+                self.assertEqual(md.blank_link_targets(line), want)
+
+    def test_only_a_definition_is_blanked_whole(self) -> None:
+        kept = ("[x]: the ferry rota is late", "[KX7]: see notes.md for the ferry rota",
+                "  [ref]: notes.md and KX9", "[ref]: notes.md \"A title\" and more")
+        for line in kept:
+            with self.subTest(line=line):
+                self.assertEqual(dict(md.prose_lines(line))[1], line)
+        blanked = ("[KX7]: notes.md", "[ref]: https://example.com/browse/KX9",
+                   "[ref]: notes.md \"A title\"", "[ref]: notes.md 'A title'",
+                   "[ref]: <notes.md> (A title)", "> [KX7]: notes.md", "   [KX7]:  notes.md  ")
+        for line in blanked:
+            with self.subTest(line=line):
+                self.assertEqual(dict(md.prose_lines(line))[1].strip("> "), "")
+        self.assertEqual(codes_by_line("[x]: the ferry rota is late KX7\n"), [(1, "KX7")])
+
+    def test_a_reference_definition_keeps_its_line_but_not_its_text(self) -> None:
+        # The line stays in the numbering, so a caller that wants the definitions still finds it,
+        # and what it holds is blank, so it is no prose.
+        text = "one\n[KX7]: notes.md\ntwo\n"
+        self.assertEqual(list(md.prose_lines(text)),
+                         [(1, "one"), (2, " " * len("[KX7]: notes.md")), (3, "two")])
+        self.assertEqual(codes_by_line(text), [])
+
+    def test_a_definition_ends_the_paragraph_it_stands_in(self) -> None:
+        paragraphs = list(md.paragraphs(list(md.prose_lines("one\n[KX7]: notes.md\ntwo\n"))))
+        self.assertEqual([[number for number, _ in paragraph] for paragraph in paragraphs],
+                         [[1], [3]])
+
+    def test_bare_codes_skips_the_forms_too(self) -> None:
+        self.assertEqual(bare("[ref]: https://example.com/browse/KX9\n"
+                              "A <https://example.com/ORB-12> and https://example.com/KX7 here"),
+                         [])
+
     def test_a_fence_of_any_kind_or_indent_is_skipped(self) -> None:
         text = "a\n~~~\nORB-12\n~~~\nb\n    ```\n    KX7\n    ```\nc\n"
 

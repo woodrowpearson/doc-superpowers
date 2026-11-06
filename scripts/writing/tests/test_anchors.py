@@ -309,6 +309,20 @@ class Counting(unittest.TestCase):
         self.assertEqual(found("[page]: docs/page-17.md\n"), [
             (1, "number", "17"), (1, "link-target", "docs/page-17.md")])
 
+    def test_a_reference_definition_is_still_read_by_the_anchors(self) -> None:
+        # The lint blanks a definition; the anchor check reads it as it was written.
+        text = "[KX7]: docs/notes-9.md\n"
+        self.assertEqual(found(text), [(1, "code", "KX7"), (1, "number", "9"),
+                                       (1, "link-target", "docs/notes-9.md")])
+        self.assertEqual([(loss.anchor.kind, loss.anchor.text)
+                          for loss in anchors.missing(text, "Gone.\n", DEFAULT_CODES)],
+                         [("code", "KX7"), ("number", "9"), ("link-target", "docs/notes-9.md")])
+
+    def test_an_added_reference_definition_that_leads_nowhere_is_unresolved(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="writing anchors ") as base:
+            self.assertEqual(anchors.unresolved("", "Text.\n\n[KX7]: gone.md\n", Path(base)),
+                             [anchors.Anchor(3, "link-target", "gone.md")])
+
     def test_digits_of_an_identifier_are_not_numbers(self) -> None:
         text = "Set the `retry_limit=4` option.\n"
         self.assertEqual(found(text), [(1, "identifier", "retry_limit=4")])
@@ -546,6 +560,34 @@ class Failures(unittest.TestCase):
             done = run("--base", "main", "docs/a.md", "docs/absent.md", cwd=repo, script=ANCHORS)
         self.assertEqual(done.code, 2, done.out + done.err)
         self.assertEqual(done.out.splitlines(), [f'docs/a.md:5: code: "V-12" {GONE}'])
+
+    def test_a_module_that_cannot_be_imported_exits_2_with_one_line(self) -> None:
+        for missing in ("config.py", "lint.py", "markdown.py"):
+            with self.subTest(missing=missing), support.engine_without(missing) as folder, \
+                    based("Valve V-12 opens.\n", "a.md") as repo:
+                done = run("--base", "HEAD", "a.md", cwd=repo, script=folder / "anchors.py")
+                self.assertEqual(done.code, 2, done.out + done.err)
+                self.assertEqual(done.out, "")
+                self.assertEqual(len(done.err.splitlines()), 1, done.err)
+                self.assertTrue(done.err.startswith("writing: "), done.err)
+                self.assertIn(missing.removesuffix(".py"), done.err)
+
+    def test_a_pipe_closed_early_is_quiet_and_keeps_the_exit_code(self) -> None:
+        many = "".join(f"Valve V-{number} opens.\n\n" for number in range(3000))
+        with based(many, "a.md") as repo:
+            put(repo, {"a.md": "Gone.\n"})
+            done = support.run_cut_short("--base", "HEAD", "a.md", cwd=repo, script=ANCHORS)
+        self.assertEqual(done.code, 1, done.out + done.err)  # anchors were lost, as ever
+        self.assertEqual(done.err, "")
+        self.assertTrue(done.out.startswith("a.md:1: code: "), done.out)
+
+    def test_a_closed_stdout_keeps_the_exit_code_and_is_quiet(self) -> None:
+        with based("Valve V-12 opens.\n", "a.md") as repo:
+            same = support.run_stdout_closed("--base", "HEAD", "a.md", cwd=repo, script=ANCHORS)
+            put(repo, {"a.md": "Gone.\n"})
+            lost = support.run_stdout_closed("--base", "HEAD", "a.md", cwd=repo, script=ANCHORS)
+        self.assertEqual((same.code, same.err), (0, ""))
+        self.assertEqual((lost.code, lost.err), (1, ""))
 
     def test_a_crash_exits_2_not_1(self) -> None:
         # An uncaught exception would exit 1, which a caller reads as a lost anchor.

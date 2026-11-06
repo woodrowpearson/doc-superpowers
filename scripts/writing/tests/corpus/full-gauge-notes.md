@@ -16,6 +16,10 @@ The board's code for our weir is WB-204, and it appears on every return without 
 
 Gaps are logged as RG12 entries. The weir after the footbridge uses the sister code RG13, and only the lower weir is covered here.
 
+Realized-by:
+- RG14 the spare float board
+- RG15 the footbridge sheet
+
 ### Floods
 
 After a flood, clear the debris from the intake before taking any reading, because a blocked intake holds the chamber level high and gives a false figure that stays in the series for weeks.

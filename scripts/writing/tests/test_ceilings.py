@@ -621,6 +621,24 @@ class Base(unittest.TestCase):
         self.assertEqual(neither.code, 2, neither.out + neither.err)
         self.assertIn("origin/main", neither.err)
 
+    def test_no_ceilings_file_and_no_origin_is_a_clean_run(self) -> None:
+        # No file means no check: the base is not looked up, so a repository with no remote is
+        # fine. A base the caller names is still resolved.
+        with forked() as repo:
+            done = run("ceilings", cwd=repo)
+            named = run("ceilings", "--base", "unknown-ref", cwd=repo)
+        self.assertEqual(done.code, 0, done.out + done.err)
+        self.assertEqual(lines(done), [f"{CEILINGS}: 0 paths checked at HEAD"])
+        self.assertEqual(done.err, "")
+        self.assertEqual(named.code, 2, named.out + named.err)
+        self.assertIn("unknown-ref", named.err)
+
+    def test_a_ceilings_file_beside_no_origin_still_exits_2(self) -> None:
+        with forked({CEILINGS: ceilings({})}) as repo:
+            done = run("ceilings", cwd=repo)
+        self.assertEqual(done.code, 2, done.out + done.err)
+        self.assertIn("origin/main", done.err)
+
     def test_a_base_git_cannot_resolve_exits_2_naming_it(self) -> None:
         with forked({CEILINGS: ceilings({})}) as repo:
             done = run("ceilings", "--base", "unknown-ref", cwd=repo)
@@ -723,6 +741,18 @@ class Folders(unittest.TestCase):
         self.assertEqual(done.code, 2, done.out + done.err)
         self.assertIn("cannot read docs/guides/bytes.md: not UTF-8", done.err)
 
+    def test_counts_with_a_path_that_matches_nothing_exits_2(self) -> None:
+        with forked(self.FILES) as repo:
+            for named in (["nonexistent/"], ["docs/specs", "docs/nosuch"], ["docs/nosuch.md"]):
+                with self.subTest(named=named):
+                    done = run("counts", *named, cwd=repo)
+                    self.assertEqual(done.code, 2, done.out + done.err)
+                    self.assertIn("matches no file", done.err)
+                    self.assertIn(named[-1], done.err)
+                    self.assertNotIn("Traceback", done.err)
+            kept = run("counts", "--format", "json", "docs/specs", "docs/plans", cwd=repo)
+        self.assertEqual(kept.code, 0, kept.out + kept.err)
+
     def test_counts_with_a_path_outside_the_repository_exits_2(self) -> None:
         with forked() as repo:
             done = run("counts", "/", cwd=repo)
@@ -735,35 +765,53 @@ class Folders(unittest.TestCase):
 EXPECTED = {
     1: {
         "files": {"terse-hive-log.md": 8, "terse-kiln-checklist.md": 4,
-                  "full-orchard-guide.md": 2, "full-gauge-notes.md": 4},
+                  "full-orchard-guide.md": 3, "full-gauge-notes.md": 4,
+                  "typed-sluice-notes.md": 2},
         "counts": {
             "counting_version": 1,
             "folders": [
-                {"folder": "docs/guides", "register": "full", "files": 2, "findings": 6},
+                {"folder": "docs/guides", "register": "full", "files": 2, "findings": 7},
                 {"folder": "docs/plans", "register": "terse", "files": 2, "findings": 12}],
-            "records_skipped": 0},
+            "records_skipped": 1},
     },
 }
 
+# Where each corpus page is placed, and the register that counts it. The typed page sits in a
+# guides folder, which the path rules read as full, and the doc-index types it as a plan, which
+# the shipped rules read as terse. A plan is a record, so ``counts`` leaves it out and ``check``,
+# which names the file, reads it as terse.
+PLACES = {"terse": ("docs/plans", "terse"), "full": ("docs/guides", "full"),
+          "typed": ("docs/guides", None)}
+TYPED = "plan"
+
 
 class Corpus(unittest.TestCase):
-    """Four invented pages with a known number of findings each. Each is copied into a folder
-    whose register the shipped path rules give it: the terse pages into ``docs/plans``, the full
-    ones into ``docs/guides``. A change to those rules then moves the counts, as a change to a
-    limit or a code pattern does."""
+    """Five invented pages with a known number of findings each. Each is copied into a folder
+    whose register the shipped rules give it: the terse pages into ``docs/plans``, the full ones
+    into ``docs/guides``, and the typed one into ``docs/guides`` too, where the doc-index types it
+    as a plan. A change to the path rules, the type rules, a limit, a code pattern, the words
+    that are no codes, the blocks and tasks that are skipped, or the parser then moves the
+    counts or the findings of one page."""
+
+    @staticmethod
+    def home(name: str) -> str:
+        return f"{PLACES[name.split('-')[0]][0]}/{name}"
 
     @contextmanager
     def placed(self) -> Iterator[Path]:
         with support.git_repo() as repo:
             for source in sorted(CORPUS.glob("*.md")):
-                folder = "docs/plans" if source.name.startswith("terse-") else "docs/guides"
-                put(repo, {f"{folder}/{source.name}": source.read_bytes()})
+                put(repo, {self.home(source.name): source.read_bytes()})
+            typed = {self.home(source.name): {"doc_type": TYPED}
+                     for source in CORPUS.glob("typed-*.md")}
+            put(repo, {INDEX: json.dumps({"docs": typed})})
             yield repo
 
-    def test_the_corpus_has_two_terse_pages_and_two_full_ones(self) -> None:
+    def test_the_corpus_has_two_terse_pages_two_full_ones_and_a_typed_one(self) -> None:
         names = sorted(path.name for path in CORPUS.glob("*.md"))
         self.assertEqual(sorted(EXPECTED[VERSION]["files"]), names)
-        self.assertEqual([name.split("-")[0] for name in names], ["full", "full", "terse", "terse"])
+        self.assertEqual([name.split("-")[0] for name in names],
+                         ["full", "full", "terse", "terse", "typed"])
 
     def test_the_corpus_counts_match_the_counting_version(self) -> None:
         self.assertIn(VERSION, EXPECTED, "a new counting version needs an EXPECTED entry")
@@ -775,21 +823,21 @@ class Corpus(unittest.TestCase):
     def test_each_corpus_page_has_its_known_findings(self) -> None:
         with self.placed() as repo:
             for name, want in EXPECTED[VERSION]["files"].items():
-                folder = "docs/plans" if name.startswith("terse-") else "docs/guides"
                 with self.subTest(name=name):
-                    done = run("check", "--format", "json", f"{folder}/{name}", cwd=repo)
+                    done = run("check", "--format", "json", self.home(name), cwd=repo)
                     self.assertEqual(len(json.loads(done.out)), want, done.out)
 
     def test_the_expected_files_add_up_to_the_expected_counts(self) -> None:
         for version, entry in EXPECTED.items():
             with self.subTest(version=version):
-                registers: dict[str, int] = {}
+                folders: dict[tuple[str, str], int] = {}
                 for name, found in entry["files"].items():
-                    register = name.split("-")[0]
-                    registers[register] = registers.get(register, 0) + found
+                    folder, register = PLACES[name.split("-")[0]]
+                    if register is not None:  # a record is no part of a count
+                        folders[(folder, register)] = folders.get((folder, register), 0) + found
                 self.assertEqual(
-                    {item["register"]: item["findings"] for item in entry["counts"]["folders"]},
-                    {"full": registers["full"], "terse": registers["terse"]})
+                    {(item["folder"], item["register"]): item["findings"]
+                     for item in entry["counts"]["folders"]}, folders)
 
 
 class Usage(unittest.TestCase):

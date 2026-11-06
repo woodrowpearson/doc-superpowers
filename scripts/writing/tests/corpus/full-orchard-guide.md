@@ -18,6 +18,8 @@ The plum variety (FT5) is grafted first because it wakes earliest. Later in the 
 
 Blocks marked PQ88 in the old plan were never replanted.
 
+The trial rows under ridge-~b7e2 were lifted a week early.
+
 ## Key
 
 - **MG3** the medium-vigour stock used on the flat blocks.
