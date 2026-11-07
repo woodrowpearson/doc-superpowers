@@ -14,6 +14,7 @@
 Optional:
 - [ ] Mermaid MCP server configured (for PNG diagram rendering)
 - [ ] [`gh`](https://cli.github.com), authenticated — only for the work ledger's GitHub adapters (`doc-superpowers:ledger-pr-gh`, `doc-superpowers:ledger-items-gh`) and `ledger init --sources github`
+- [ ] `python3` **3.9 or newer** — only for the writing lint (`doc-tools.sh writing`), standard library only, nothing to install; `DOC_SUPERPOWERS_PYTHON` names another interpreter. Without one, a writing verb prints `writing: skipped (needs python3 3.9 or later)` and exits 3
 - [ ] [`uv`](https://docs.astral.sh/uv/) — only for doc-search, the opt-in docs-and-code MCP server (`docs/search/config.json`): it runs the plugin's `search/` Python package, and fetches Python 3.12 when the host has none
 
 ## Installation
@@ -170,6 +171,8 @@ $DOC_TOOLS tools status                            # shows location, drift + the
 ```
 
 A vendored `doc-tools.sh` runs the work ledger from `ledger/` and `adapters/` beside it: without them, every ledger verb (and, on a ledger-enabled project, the claims check V5) exits 2. `hooks install --ci` ships that set on a ledger host (`docs/ledger/config.json` exists) with `doc-ledger-publish` and with each workflow that runs the claims check: after `ledger init --accept` writes the config, re-run `install --ci` (it says so) and commit `.github/scripts/`.
+
+A vendored `doc-tools.sh` has no writing engine beside it, so every `writing` verb there exits 3; run the lint from the plugin's own copy.
 
 Shipping the `doc-pr-release` helpers (`--with-helpers`, or `--helper doc-pr-release`) also creates `RELEASE-NOTES.next/README.md`, the fragment-format spec, when it is absent; an existing one is never overwritten.
 

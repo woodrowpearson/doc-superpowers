@@ -16,6 +16,7 @@ doc-superpowers reads repositories and runs in other people's CI, so the questio
 |---|---|
 | Docs, frontmatter, `docs/.doc-index.json`, ledger items, ref names | Data. Crafted content must not run commands. A case where it does is a vulnerability. |
 | `docs/ledger/config.json`, `docs/spec-claims/`, `docs/search/config.json` | **Code, by design.** See below. |
+| `docs/writing/config.json`, `docs/writing/ceilings.json` | Data. Crafted content must not run commands. The config's code patterns compile as regular expressions in Python's engine, and the lint sets no timeout of its own, so a pattern that backtracks badly slows the run until the caller's budget or CI timeout ends it. |
 | A pull request from a fork | Never runs with this workflow set's secrets: the AI jobs check that the head repository is the same one. |
 | A pull request from a same-repository branch, an `@claude` comment by a member | Instructions can reach the AI agent, which holds secrets. See below. |
 
@@ -44,7 +45,7 @@ This repository's `v*` tags are protected against updates and deletion, and publ
 
 ## Tool versions
 
-These are the floors the code needs. Below the advised version it still runs, and `doc-tools.sh` warns on stderr once a day (`DOC_SUPERPOWERS_NO_TOOL_ADVICE=1` silences it). The floors stay low because distributions backport fixes under old version strings and stock macOS ships older tools, so a hard failure would block users without protecting them.
+These are the floors the code needs. Below the advised version it still runs, and `doc-tools.sh` warns on stderr once a day (`DOC_SUPERPOWERS_NO_TOOL_ADVICE=1` silences it), except for python3, which has its own check. The floors stay low because distributions backport fixes under old version strings and stock macOS ships older tools, so a hard failure would block users without protecting them.
 
 | Tool | Floor | Advised | Why |
 |---|---|---|---|
@@ -53,8 +54,15 @@ These are the floors the code needs. Below the advised version it still runs, an
 | git | 2.36 for claims over merges | 2.43.7, or the fix on your branch (2.44.4, 2.45.4, 2.46.4, 2.47.3, 2.48.2, 2.49.1, 2.50.1) | CVE-2025-48384 and -48385 on cloning a hostile repository; CVE-2022-23521 on reading a hostile `.gitattributes`. Stock macOS Command Line Tools ship 2.39.5. |
 | git, with in-flight refs | | 2.55.0 | CVE-2024-52005: a remote's terminal control characters reach your terminal during `git fetch`. |
 | gawk, where `awk` is gawk | | 5.4.1 | Four 2026 CVEs, one in the `getline` path these scripts use. BWK awk and mawk: nothing reachable. |
+| python3 | 3.9 | 3.12 or later | Only the writing lint runs it, with the standard library alone, and a host without it loses nothing else. 3.9 is past its end of life and gets no security fixes, so the floor is where the lint works, not a version to prefer; stock macOS Command Line Tools ship 3.9.6. There is no daily warning: the writing verbs probe the interpreter themselves and exit 3 below the floor. |
 
 As `git(1)` advises, do not run git, or this plugin, inside a `.git` that came from an untrusted archive.
+
+## The writing lint
+
+- It reads Markdown and git output, downloads nothing, and writes a file only through `ceilings --update`. It runs only when called.
+- The engine runs as `python3 -I -B -X utf8`: `PYTHON*` variables, the user site and the current directory stay off its import path, and it writes no bytecode. `DOC_SUPERPOWERS_PYTHON` names the interpreter it runs, so it is as trusted as `PATH`.
+- The lint sets no timeout, and a pattern is not the only way to make it slow. One very long line, or a reorganisation with many deleted and added sentences, can run for minutes. Give the caller its own budget.
 
 ## doc-search
 

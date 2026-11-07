@@ -16,9 +16,9 @@ Agent: /doc-superpowers <action>      Terminal: doc-superpowers <command>
   search         an MCP server over docs and code (off)      help search
   ledger         keyed work items (off by default)           help ledger
   claims         executable spec claims (off by default)     help claims
+  writing        the writing rule and its lint               help writing
   help [topic]   this page, or one topic; also: version, tools <args>
-
 Agent only: init, audit, review-pr, update, diagram, sync, release, spec-*.
 New here: doc-superpowers setup, then /doc-superpowers init
 doc-superpowers help <topic>
-  (topics: setup search hooks ci ledger claims release)
+  (topics: setup search hooks ci ledger claims release writing)

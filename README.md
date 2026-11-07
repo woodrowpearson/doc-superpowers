@@ -21,6 +21,7 @@ doc-superpowers is a Claude Code skill that treats documentation as a first-clas
 - **Checks spec claims** (opt-in, with `docs/spec-claims/`): executable claims quoted from a spec's normative text, each bound to a check, run by `doc-tools.sh claims` and gated through the spec actions and the hooks
 - **Keeps a work ledger** (opt-in, with `docs/ledger/config.json`): issue files get stable keys, ledger pages and one HTML view are generated from them, related work is found through named contracts, and work in flight on other branches and machines raises notices (`ledger`, `doc-tools.sh ledger`)
 - **Searches docs and code together** (opt-in, with `docs/search/config.json`): doc-search, an MCP server over two local semble indexes — the docs and the code — that answers one ranked list with the doc-index's cross-links on every hit, and can fuse an optional cloud docs leg (Vertex embeddings over Firestore) or run the docs index on an opt-in local transformer model
+- **Lints writing** (opt-in, on demand): the writing rule project teams copy into `AGENTS.md` or `CLAUDE.md`, and a lint that counts what it can of it — bare codes, long sentences, long list items — over whole files or only the sentences a branch adds (`doc-tools.sh writing`)
 - **Drafts release notes** from git history with agent-assisted diff review (`release`)
 - **Syncs CLAUDE.md and README.md** automatically in the actions that write docs (`init`, `update`, `sync`, `release`, `spec-generate`) to prevent drift; in a CI workflow `update` and `sync` report the change instead of editing them
 - **Tracks freshness** via bundled `scripts/doc-tools.sh` — content hashing for docs, content identity (git object ids per code ref) for code
@@ -97,7 +98,7 @@ doc-superpowers setup                          # the same, once setup has linked
 
 It starts from fixed defaults — the doc-index merge driver, the 5 report-only git hooks, the 3 Claude Code hooks — with doc-search, CI, the work ledger, spec claims and the terminal command off until you tick them. **The safety rule: the defaults block no commit, download nothing, call no network and add no CI; nothing is written until you confirm the review, and nothing downloads without *Write and build* and a yes.** setup never commits: it prints the `git add` line for the team's files (`.gitattributes` and the team record, `.claude/doc-superpowers/installed.json`), and a teammate's clone reproduces the recorded setup with `doc-superpowers setup --apply`. `--dry-run` shows the plan and writes nothing. [`references/setup.md`](references/setup.md) has every item, flag and record.
 
-`doc-superpowers help` (or `/doc-superpowers help`) prints a one-screen map of every feature and command; `doc-superpowers help <topic>` one feature (`setup`, `search`, `hooks`, `ci`, `ledger`, `claims`, `release`).
+`doc-superpowers help` (or `/doc-superpowers help`) prints a one-screen map of every feature and command; `doc-superpowers help <topic>` one feature (`setup`, `search`, `hooks`, `ci`, `ledger`, `claims`, `release`, `writing`).
 
 ## Upgrading from 2.x
 
@@ -226,6 +227,18 @@ sh .claude/doc-superpowers/search-mcp.sh query "how are refunds rounded" --scope
 It is **inert without `docs/search/config.json`**: every tool answers `doc-search: not enabled (no docs/search/config.json)`, and every CLI verb but `init`, `check` and `gate` prints it and exits 0. Configuration, the CLI and its exit codes, the tools, the cloud leg's setup and write-path guards, snippets for Cursor, Codex, Gemini CLI and OpenCode, hardware and measured performance, privacy and troubleshooting are in [`references/search.md`](references/search.md).
 
 A repository can also **require** doc-search, so agents stop while it cannot answer instead of working around it: `"required": true` in the config (and optionally `"requires": ">=X.Y.Z"`, a version floor), the gate's hooks (`hooks install --search-gate`, for Claude Code and Codex), and the agent rule `references/search-rule.md` copied into `AGENTS.md` or `CLAUDE.md`. `sh .claude/doc-superpowers/search-mcp.sh check` gives the verdict (`0` ready, `1` not ready, with one fix command, `4` not in force). The hooks gate only a developer who has doc-superpowers installed, and `DOC_SEARCH_GATE=0` turns them off for one developer.
+
+### Writing lint (opt-in)
+
+Text that people and agents read should put first what the reader needs, give every code (a decision, issue or spec id) words or a link, and keep sentences short. The **writing rule** is a marked block, [`references/writing-rule.md`](references/writing-rule.md), that a project copies into `AGENTS.md` or `CLAUDE.md`. The **writing lint** counts what it can of the rule: a code that nothing explains, a sentence over the word limit of its register (`terse` or `full`), and a list item over its limit. It reports a density of backtick spans for information only.
+
+```bash
+doc-superpowers tools writing check docs/guides/getting-started.md   # whole files, each in the register its doc-index type or path gives
+doc-superpowers tools writing range origin/main...HEAD               # only the sentences this branch adds
+doc-superpowers tools writing <ceilings|counts|anchors> --help       # hold old text to a count; count per folder; check a rewrite kept its landmarks
+```
+
+It is **on demand in this release**: nothing calls it, and a project that never runs it is unaffected. It needs python3 3.9 or later (`DOC_SUPERPOWERS_PYTHON` names another interpreter), uses only the standard library and downloads nothing. A host without it gets `writing: skipped (needs python3 3.9 or later)` and exit 3, which is not a finding. The five verbs, their exit codes (0 clean, 1 findings, 2 usage or unreadable input, 3 could not run), the key format, the registers, `docs/writing/config.json` and `docs/writing/ceilings.json` (both optional) are in [`references/writing.md`](references/writing.md); `doc-superpowers help writing` is the one-screen version.
 
 ### Workflow Integration
 
@@ -392,7 +405,7 @@ doc-superpowers/
 │   └── workflows/
 │       ├── doc-freshness-pr.yml
 │       ├── doc-freshness-schedule.yml
-│       └── tests.yml     # This repo only: every shell test suite (bash 5.x + 3.2), the doc-search pytest suite, check-version, self-install check, release tag (main); each step is scripts/check-ci.sh
+│       └── tests.yml     # This repo only: every shell test suite (bash 5.x + 3.2), the writing unittest suite, the doc-search pytest suite, check-version, self-install check, release tag (main); each step is scripts/check-ci.sh
 ├── .opencode/            # OpenCode plugin + installation guide
 │   ├── INSTALL.md
 │   └── plugins/
@@ -411,7 +424,7 @@ doc-superpowers/
 │   └── tests/            # pytest suite (no network: a tiny test-built model, fake cloud clients)
 ├── scripts/
 │   ├── doc-superpowers   # The dispatcher: help, setup, version, and hooks / tools / search pass-throughs (the terminal command)
-│   ├── help/             # The help text, one file per topic (overview, setup, search, hooks, ci, ledger, claims, release)
+│   ├── help/             # The help text, one file per topic (overview, setup, search, hooks, ci, ledger, claims, release, writing)
 │   ├── setup/            # setup's engine: setup.sh, catalog.json, the model / probe / plan / exec / harness libraries, the prompt UI and the TUI, the ~/.local/bin shim template
 │   ├── doc-tools.sh      # Bundled freshness tooling
 │   ├── test-doc-tools.sh # Test suite for doc-tools.sh
@@ -428,6 +441,7 @@ doc-superpowers/
 │   ├── leak-scan.sh              # Machine paths, emails and tokens in tracked files
 │   ├── ledger/                   # The work ledger's modules (lib.sh + sourced *.sh, *.jq, *.awk)
 │   ├── adapters/                 # Reference ledger adapters (ledger-pr-gh.sh, ledger-items-gh.sh; GitHub via gh)
+│   ├── writing/                  # The writing lint (python3 3.9+, standard library only): lint.py, anchors.py, config.py + defaults.json, markdown.py, and tests/ (its unittest suite)
 │   ├── search/launch.sh          # doc-search's launcher (POSIX sh), copied to .claude/doc-superpowers/search-mcp.sh by install --search
 │   ├── merge-doc-index.sh        # Custom git merge driver for .doc-index.json
 │   ├── test-merge-driver.sh      # Test suite for merge driver
@@ -451,6 +465,8 @@ doc-superpowers/
 │   ├── ledger-index.schema.json   # The work-ledger index shape (ledger-index/1)
 │   ├── search.md                  # doc-search (opt-in): config, CLI, tools, cloud leg, other clients
 │   ├── search-rule.md             # The agent rule a repository that requires doc-search copies into AGENTS.md or CLAUDE.md
+│   ├── writing.md                 # The writing rule's reference (opt-in lint): registers, the key, the five verbs, configuration, ceilings, the anchor check
+│   ├── writing-rule.md            # The writing rule: the marked block a project copies into AGENTS.md or CLAUDE.md (its opening marker carries the release version)
 │   ├── integration-patterns.md    # Code review, commit review, wrapper skill integration
 │   └── tool-mappings.md           # Per-client tool names and capabilities
 ├── evals/                # Evaluation test cases
@@ -491,6 +507,7 @@ The skill runs the bundled tooling in `scripts/` and reads `references/` from it
 | `git` | Yes; **≥ 2.36** in a claims-enabled project | Already required by doc-superpowers. A claims check over a commit range that holds a merge reads the merge with `git show --remerge-diff` (git 2.36+); an older git makes that check indeterminate (exit 2) |
 | `jq` | Yes, **≥ 1.6**; 1.8.2 advised | `brew install jq` / `apt install jq`. 1.6 is the floor: the index writers use `--args` / `$ARGS.positional`. `doc-tools.sh` refuses an older jq with a clear error, and warns once a day below the versions in [SECURITY.md](SECURITY.md) (jq, git, gawk) |
 | `sha256sum` or `shasum` | Yes | Standard on Linux/macOS respectively |
+| `python3` | Only for the writing lint (`doc-tools.sh writing`); **≥ 3.9**, 3.12 or later advised | Standard library only, nothing to install. `DOC_SUPERPOWERS_PYTHON` names another interpreter. A host without it skips the lint with exit 3; see [SECURITY.md](SECURITY.md) |
 | `uv` | Only for doc-search (a project with `docs/search/config.json`) | It runs the `search/` package (Python 3.12, which uv fetches if missing); see `references/search.md` |
 | `gh` (GitHub CLI), authenticated | Only for the work ledger's GitHub adapters | `doc-superpowers:ledger-pr-gh`, `doc-superpowers:ledger-items-gh` and `ledger init --sources github`, when a project's `docs/ledger/config.json` names them |
 
