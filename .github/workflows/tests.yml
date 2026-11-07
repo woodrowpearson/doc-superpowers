@@ -1,7 +1,8 @@
 # Shell test suites — the seven suites that gate changes to this repo — the
-# doc-search pytest suite (search/, a uv Python package), the check that this
-# repo's own self-installed CI tier is what the installer would write today,
-# and the security checks (zizmor, dep-audit, gitleaks).
+# writing engine's unittest suite (scripts/writing/tests/, standard library
+# only), the doc-search pytest suite (search/, a uv Python package), the check
+# that this repo's own self-installed CI tier is what the installer would write
+# today, and the security checks (zizmor, dep-audit, gitleaks).
 #
 # Every step runs scripts/check-ci.sh, which runs the same checks locally
 # (`bash scripts/check-ci.sh`: both interpreters, every check; --fast for the
@@ -47,6 +48,7 @@ jobs:
             os: ubuntu-latest
             bash: bash
             bash_major: "5"
+            require_floor_python: "0"
           # macOS's system bash — 3.2.57, frozen at the last GPLv2 release, and
           # the interpreter this repo's own contributors run locally.
           #
@@ -58,6 +60,10 @@ jobs:
             os: macos-latest
             bash: /bin/bash
             bash_major: "3"
+            # The writing engine supports Python 3.9, and macOS's system
+            # /usr/bin/python3 is 3.9.x: this leg is the one that runs the
+            # writing suite on the floor. Linux's python3 is newer.
+            require_floor_python: "1"
 
     env:
       BASH_BIN: ${{ matrix.bash }}
@@ -154,6 +160,17 @@ jobs:
       - name: test-ledger.sh
         run: |
           "$BASH_BIN" scripts/check-ci.sh --bash "$BASH_BIN" --verbose ledger
+
+      # The writing engine's unittest suite (scripts/writing/tests/). check-ci.sh
+      # runs it under each distinct Python it finds (python3 on PATH, and
+      # /usr/bin/python3). DOC_SP_REQUIRE_FLOOR_PYTHON makes the macOS leg fail
+      # unless one run was on Python 3.9, the floor: if an image change ever
+      # drops it, this leg would otherwise stop covering the floor and stay green.
+      - name: writing engine unittest suite
+        env:
+          DOC_SP_REQUIRE_FLOOR_PYTHON: ${{ matrix.require_floor_python }}
+        run: |
+          "$BASH_BIN" scripts/check-ci.sh --bash "$BASH_BIN" --verbose writing
 
       # The doc-search pytest suite (search/, the opt-in MCP server), run once
       # per leg. check-ci.sh runs `uv run --project search --frozen

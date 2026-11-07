@@ -1,5 +1,35 @@
 # Release Notes
 
+## v3.13.0 (2026-11-03)
+
+This release adds the writing rule and a lint for it. The rule asks that a text put first what its reader needs, explain every code, and keep sentences short. The lint counts what it can of that. Both are opt-in and on demand: nothing in this release calls the lint for you.
+
+### Upgrading from 3.12.x
+Nothing to do. A project that never runs `doc-tools.sh writing` is unaffected.
+- **The lint needs python3 3.9 or later**, standard library only. `DOC_SUPERPOWERS_PYTHON` names another interpreter. Without one, a writing verb prints `writing: skipped (needs python3 3.9 or later)` and exits 3, which is not a finding. Nothing else in doc-superpowers needs Python.
+- **CI tier users:** `hooks install --ci` refreshes the vendored `doc-tools.sh`, which gains the writing verbs. That copy has no engine beside it, so a writing verb there exits 3.
+- **`doc-release.yml`** may now also commit `references/writing-rule.md`, the file `bump-version` stamps beside the other two. A project has no such file, so nothing changes for it.
+
+### Added
+- **`doc-tools.sh writing <verb>`**, five verbs (`references/writing.md`; `doc-superpowers tools writing …` from a terminal). Exit 0 clean, 1 findings, 2 a wrong command line, an input that cannot be read or an internal error, 3 could not run.
+  - `check [--profile terse|full] [--github] [--format text|json] [--name LABEL] FILE...|-` lints whole files, or standard input with `--profile`. It reports `bare-code`, `long-sentence` and `long-item`, and a density of backtick spans for information only.
+  - `range BASE...HEAD` lints only the sentences the branch adds. A sentence that rewrites an older one reports only the harm the rewrite did.
+  - `ceilings [--file PATH] [--base REF] [--update]` holds paths to the finding counts recorded in `docs/writing/ceilings.json`. A ceiling may fall and never rise, and the file records the counting version its counts were made with.
+  - `counts [--format text|json] [PATH...]` counts findings per folder and register, and gates nothing.
+  - `anchors --base REF [--format text|json] FILE...` reports the identifiers, codes, numbers and link targets a rewrite uses less often than its base, and added relative links that lead nowhere.
+- **Two registers.** `terse` allows 35 words in a sentence, 50 in a list item and 2 sentences in an item; `full` allows 40 words in a sentence. A file's register comes from its doc-index type, then its path. Plans, issues, audits, `AGENTS.md` and `CLAUDE.md` are `terse`; other docs are `full`; `docs/archive/` is never linted.
+- **Configuration**, both files optional: `docs/writing/config.json` merges over the defaults key by key (registers, limits, code patterns, `skip_prefixes`, `skip_blocks`), and `docs/writing/ceilings.json` holds the ceilings. A project with `docs/ledger/config.json` gets its ledger ids as code shapes.
+- **The rule block**, `references/writing-rule.md`: a block a project copies between `<!-- doc-superpowers:writing-rule vX.Y.Z -->` and its closing marker into `AGENTS.md` or `CLAUDE.md`. `bump-version` writes its stamp and `check-version` checks it, in the doc-superpowers tree only.
+- **`doc-superpowers help writing`**, the one-screen topic.
+- **`doc-tools.sh --help`** gains the writing exit codes and `DOC_SUPERPOWERS_PYTHON`.
+
+### Security
+- **`SECURITY.md`** gains a python3 row in the tool table (floor 3.9, advised 3.12 or later) and states that `docs/writing/config.json` is data whose patterns compile as regular expressions, under the caller's budget. The engine runs as `python3 -I -B -X utf8`.
+
+### Other
+- **`check-ci.sh writing`** runs the engine's unittest suite (329 tests) under each distinct python3 it finds, `python3` on PATH and `/usr/bin/python3`, and `tests.yml` runs it on both legs. The macOS leg sets `DOC_SP_REQUIRE_FLOOR_PYTHON=1`, so it fails unless a run was on 3.9, the floor.
+- Verified locally (GitHub Actions does not run on this account): the seven suites under bash 5.x and `/bin/bash` 3.2 (15857 assertions each), the writing suite under python3 3.13.3 and `/usr/bin/python3` 3.9.6, the doc-search pytest suite (863 passed, the 2 live tests skipped), `zizmor` 1.31.1 (no findings over the 3 workflows and the 9 rendered templates), `dep-audit` (no known vulnerabilities), the self-install check, `gitleaks`, `check-version` and `claude plugin validate .`. Every check passed except `tag`, which cannot pass until v3.13.0 is on origin after the merge. **The template change (`doc-release.yml`'s `--allow` list) has not run on GitHub Actions.**
+
 ## v3.12.1 (2026-11-02)
 
 This patch release renames two identifiers in the ledger scripts. The kit ships those scripts for projects to vendor, so its identifiers should be whole-word names that a downstream token scan won't match by accident.

@@ -229,7 +229,7 @@ It then runs `scripts/doc-superpowers` under the `bash` on `PATH`; with no candi
 
 ## Help
 
-`doc-superpowers help` (or `-h`, `--help`, or no command) prints the overview: every feature and command on one line each, with the topic or reference that has the rest. `doc-superpowers help <topic>` prints one topic: `setup`, `search`, `hooks`, `ci`, `ledger`, `claims`, `release`. Each topic says what the feature is, whether it is on by default, its terminal commands and skill actions, what it commits and what stays local, how to undo it, and its reference.
+`doc-superpowers help` (or `-h`, `--help`, or no command) prints the overview: every feature and command on one line each, with the topic or reference that has the rest. `doc-superpowers help <topic>` prints one topic: `setup`, `search`, `hooks`, `ci`, `ledger`, `claims`, `release`, `writing`. Each topic says what the feature is, whether it is on by default, its terminal commands and skill actions, what it commits and what stays local, how to undo it, and its reference.
 
 - The text is `scripts/help/<topic>.txt` (`overview.txt` for the overview), printed as it is: one source for the terminal and the skill. The skill's `help` action runs `"$ROOT/scripts/doc-superpowers" help [topic]` and shows the output verbatim, in a code block, never paraphrased.
 - Limits (pinned by tests): the overview is at most 24 lines, a topic at most 50, every line at most 80 columns, plain text with no ANSI escapes.

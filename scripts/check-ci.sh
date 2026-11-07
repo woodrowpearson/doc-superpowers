@@ -15,6 +15,13 @@
 #   ledger             the seven suites, scripts/test-<name>.sh, each run under
 #                      every interpreter (BASH_BIN set, so the scripts under
 #                      test run under it too)
+#   writing            the writing engine's unittest suite (scripts/writing/
+#                      tests/, standard library only): `python3 -I -B -X utf8
+#                      -m unittest discover -s scripts/writing/tests -t
+#                      scripts/writing`, run once under each distinct Python
+#                      it finds (python3 on PATH, /usr/bin/python3), each
+#                      one's version printed. A Python below the 3.9 floor is
+#                      skipped with a NOTE. It never touches the network.
 #   search             the doc-search pytest suite (search/, a uv Python
 #                      package): `uv run --project search --frozen
 #                      --all-extras pytest -q`, run once whatever the
@@ -43,8 +50,8 @@
 # --fast        One interpreter (bash 3.2 when the host has it, the support
 #               floor; else the first found), the quick suites only
 #               (spec-status-model, doc-pr-release, merge-driver), then
-#               self-install and check-version. What the maintainer pre-push
-#               hook runs (scripts/install-maintainer-hooks.sh).
+#               writing, self-install and check-version. What the maintainer
+#               pre-push hook runs (scripts/install-maintainer-hooks.sh).
 # --bash PATH   Run the suites under PATH (repeatable) instead of detecting:
 #               detection takes the first bash >= 4 of /opt/homebrew/bin/bash,
 #               /usr/local/bin/bash, /home/linuxbrew/.linuxbrew/bin/bash, the
@@ -60,6 +67,11 @@
 # accept that SKIP locally (DOC_SP_REQUIRE_UV=0: a host without uv skips search,
 # zizmor and dep-audit, loudly).
 #
+# DOC_SP_REQUIRE_FLOOR_PYTHON=1 makes the writing check FAIL unless one of its
+# runs was on Python 3.9, the floor the writing engine supports. It is not set
+# by default: only a host with a 3.9 can meet it (tests.yml sets it on its
+# macOS leg, whose /usr/bin/python3 is 3.9).
+#
 # Exit status: 0 when every check passed, 1 when one failed, 2 on a usage
 # error.
 set -uo pipefail
@@ -67,7 +79,7 @@ set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SUITES="doc-tools hooks spec-status-model doc-pr-release merge-driver spec-claims ledger"
 FAST_SUITES="spec-status-model doc-pr-release merge-driver"
-CHECKS="toolchain $SUITES search self-install zizmor dep-audit gitleaks check-version tag plugin-validate"
+CHECKS="toolchain $SUITES writing search self-install zizmor dep-audit gitleaks check-version tag plugin-validate"
 # What uvx fetches for the security checks: moved on purpose, like any pin.
 ZIZMOR_VERSION=1.31.1
 PIP_AUDIT_VERSION=2.10.1
@@ -171,7 +183,7 @@ fi
 if [ -n "$NAMED" ]; then
   RUN="$NAMED"
 elif [ "$FAST" = 1 ]; then
-  RUN="$FAST_SUITES self-install check-version"
+  RUN="$FAST_SUITES writing self-install check-version"
 else
   RUN="$CHECKS"
 fi
@@ -235,6 +247,74 @@ run_suite() {
     fi
     record "FAIL  test-$s.sh  [$b]  $line  (log: $log)"
     FAILED=1
+  fi
+}
+
+# probe_python <python>: "<major>.<minor>.<micro> <real path>" of an interpreter,
+# or nothing when there is none (or it will not start).
+probe_python() {
+  command -v "$1" >/dev/null 2>&1 || return 1
+  "$1" -I -c 'import os, sys; print("%d.%d.%d %s" % (sys.version_info[:3] + (os.path.realpath(sys.executable),)))' 2>/dev/null
+}
+
+# run_writing: the writing engine's unittest suite, under each distinct Python 3.9
+# or later of python3 (on PATH) and /usr/bin/python3, from the repository root. A
+# run is isolated (-I), writes no bytecode (-B) and reads and writes UTF-8 (-X
+# utf8), as the verbs do. DOC_SP_REQUIRE_FLOOR_PYTHON=1 fails it unless a run was
+# on 3.9.
+run_writing() {
+  local py info ver real major minor seen="" log rc line count=0 floor=0 name
+  for py in python3 /usr/bin/python3; do
+    info=$(probe_python "$py") || continue
+    [ -n "$info" ] || continue
+    read -r ver real <<EOF
+$info
+EOF
+    # The same interpreter by two names runs once.
+    case "$seen" in *"|$real|"*) continue ;; esac
+    seen="$seen|$real|"
+    major=${ver%%.*} minor=${ver#*.} minor=${minor%%.*}
+    if [ "$major" -lt 3 ] || { [ "$major" = 3 ] && [ "$minor" -lt 9 ]; }; then
+      echo "NOTE: $py is Python $ver, below the 3.9 floor: not run" >&2
+      continue
+    fi
+    count=$((count + 1))
+    [ "$major.$minor" != 3.9 ] || floor=1
+    name="writing  [Python $ver $(command -v "$py")]"
+    log="$LOGS/writing.$count.log" rc=0
+    echo "--- writing (unittest) under $(command -v "$py") (Python $ver)"
+    if [ "$VERBOSE" = 1 ]; then
+      (cd "$ROOT" && "$py" -I -B -X utf8 -m unittest discover -s scripts/writing/tests -t scripts/writing) 2>&1 | tee "$log"
+      rc=${PIPESTATUS[0]}
+    else
+      (cd "$ROOT" && "$py" -I -B -X utf8 -m unittest discover -s scripts/writing/tests -t scripts/writing) > "$log" 2>&1 || rc=$?
+    fi
+    # unittest's own closing lines: "Ran 40 tests in 0.345s", then OK or FAILED
+    line=$(grep -a '^Ran ' "$log" | tail -n 1)
+    [ -n "$line" ] || line="(no result line: see $log)"
+    if [ "$rc" = 0 ]; then
+      record "PASS  $name  $line"
+    else
+      if [ "$VERBOSE" = 0 ]; then
+        grep -aE '^(FAIL|ERROR):' "$log" | head -n 60
+      fi
+      record "FAIL  $name  $line  (exit $rc, log: $log)"
+      FAILED=1
+    fi
+  done
+  if [ "$count" = 0 ]; then
+    echo "--- writing (unittest)"
+    err "no python3 3.9 or later found (python3 on PATH, /usr/bin/python3) — the writing suite would not run"
+    record "FAIL  writing (no python3 3.9 or later)"
+    FAILED=1
+  elif [ "$floor" = 0 ]; then
+    if [ "${DOC_SP_REQUIRE_FLOOR_PYTHON:-0}" = 1 ]; then
+      err "no writing run was on Python 3.9, the floor (DOC_SP_REQUIRE_FLOOR_PYTHON=0 accepts that)"
+      record "FAIL  writing (no run on Python 3.9)"
+      FAILED=1
+    else
+      echo "NOTE: no Python 3.9 on this host: the floor leg (tests.yml's macOS) is not run here" >&2
+    fi
   fi
 }
 
@@ -331,6 +411,7 @@ for c in $RUN; do
     toolchain) run_check toolchain check_toolchain ;;
     self-install) run_check self-install env BASH_BIN="$FIRST_BASH" "$FIRST_BASH" scripts/check-self-install.sh ;;
     check-version) run_check check-version "$FIRST_BASH" scripts/doc-tools.sh check-version ;;
+    writing) run_writing ;;
     search) run_search ;;
     zizmor)
       if tool_there zizmor uv "$DOC_SP_REQUIRE_UV" DOC_SP_REQUIRE_UV; then run_check zizmor check_zizmor; fi

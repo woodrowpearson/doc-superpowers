@@ -1783,7 +1783,7 @@ echo "--- setup and help: the help text and the dispatcher ---"
 _DSP="$REPO_ROOT/scripts/doc-superpowers"
 _HELPD="$REPO_ROOT/scripts/help"
 _DS="$(bash_bin_shim "$_DSP")"
-_TOPICS="setup search hooks ci ledger claims release"
+_TOPICS="setup search hooks ci ledger claims release writing"
 
 # _ds_run <cmd…>: run it, keeping stdout, stderr and the status in _DS_OUT,
 # _DS_ERR and _DS_RC. Under set -e a missing dispatcher must fail a test, not
@@ -1843,7 +1843,7 @@ assert_eq '#!/usr/bin/env bash' "$(head -n 1 "$_DSP" 2>/dev/null || true)" "…a
 for _t in overview $_TOPICS; do
   assert_file_exists "$_HELPD/$_t.txt" "scripts/help/$_t.txt exists"
 done
-assert_eq "8" "$(ls "$_HELPD"/*.txt 2>/dev/null | wc -l | tr -d ' ')" "scripts/help holds exactly the overview and the 7 topics"
+assert_eq "9" "$(ls "$_HELPD"/*.txt 2>/dev/null | wc -l | tr -d ' ')" "scripts/help holds exactly the overview and the 8 topics"
 
 # --- help prints the files, byte for byte ---
 for _a in help -h --help; do
@@ -1888,8 +1888,8 @@ for _t in $_TOPICS; do
 done
 assert_contains "$(tail -n 2 "$_HELPD/overview.txt" 2>/dev/null || true)" "doc-superpowers help <topic>" \
   "overview.txt ends with the help-topic line…"
-assert_contains "$(tail -n 2 "$_HELPD/overview.txt" 2>/dev/null || true)" "(topics: setup search hooks ci ledger claims release)" \
-  "…listing the 7 topics in order"
+assert_contains "$(tail -n 2 "$_HELPD/overview.txt" 2>/dev/null || true)" "(topics: setup search hooks ci ledger claims release writing)" \
+  "…listing the 8 topics in order"
 
 # --- the topics ---
 _ds_ref() {
@@ -1907,8 +1907,15 @@ for _t in $_TOPICS; do
   done
   assert_true "$_t.txt: its Terminal line gives a doc-superpowers command" \
     grep -Eq '^Terminal:.* doc-superpowers ' "$_HELPD/$_t.txt"
-  assert_true "$_t.txt: its Skill line gives a /doc-superpowers action" \
-    grep -Eq '^Skill:.* /doc-superpowers' "$_HELPD/$_t.txt"
+  # writing has no skill action yet, and its Skill line says so; every other topic names one.
+  # When the writing rule gets an action, writing.txt names it and this branch goes.
+  if [ "$_t" = writing ]; then
+    assert_true "$_t.txt: its Skill line says there is no skill action yet" \
+      grep -Eq '^Skill:[[:space:]]+none yet\.$' "$_HELPD/$_t.txt"
+  else
+    assert_true "$_t.txt: its Skill line gives a /doc-superpowers action" \
+      grep -Eq '^Skill:.* /doc-superpowers' "$_HELPD/$_t.txt"
+  fi
   _r="references/$(_ds_ref "$_t")"
   assert_true "$_t.txt: its Reference line names $_r" grep -q "^Reference:.*$_r" "$_HELPD/$_t.txt"
   assert_true "$_t.txt: $_r exists" test -f "$REPO_ROOT/$_r"
@@ -1930,6 +1937,10 @@ assert_contains "$(cat "$_HELPD/ci.txt" 2>/dev/null || true)" "doc-freshness-pr"
 assert_contains "$(cat "$_HELPD/search.txt" 2>/dev/null || true)" "docs/search/config.json" "search.txt names the switch"
 assert_contains "$(cat "$_HELPD/ledger.txt" 2>/dev/null || true)" "docs/ledger/config.json" "ledger.txt names the switch"
 assert_contains "$(cat "$_HELPD/claims.txt" 2>/dev/null || true)" "docs/spec-claims/" "claims.txt names the switch"
+_wt="$(tr '\n' ' ' 2>/dev/null <"$_HELPD/writing.txt" | tr -s ' ' || true)"
+assert_contains "$_wt" "docs/writing/config.json" "writing.txt names the config"
+assert_contains "$_wt" "docs/writing/ceilings.json" "…and the ceilings file"
+assert_contains "$_wt" "python3 3.9 or later" "…and the interpreter the lint needs"
 # The ledger's post-commit leg pushes only with in-flight on (references/ledger.md
 # → Hooks); release offers a tag push (references/release.md step 12); the
 # ledger, claims and fragments verbs run from a terminal (tools <verb>).
