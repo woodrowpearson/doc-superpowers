@@ -623,11 +623,14 @@ def test_proxy_recovers_a_lost_daemon() -> None:
     first = FakeBackend()
     first.answer = False  # the call never gets an answer: it is in flight when the daemon dies
     second = FakeBackend()
-    first.lines.append(line(id=1, result={}))
     proxy = Proxy(stdin, out, reopen=lambda: second, fallback=lambda: pytest.fail("no fallback"), backoff=(0.0,))
     t = threading.Thread(target=proxy.run, args=(first,))
     t.start()
     wait_for(lambda: len(first.sent) == 3)
+    with first.cond:  # the handshake is answered; the call is not
+        first.lines.append(line(id=1, result={}))
+        first.cond.notify_all()
+    wait_for(lambda: out.getvalue().count(b"\n") == 1)
     first.die()
     wait_for(lambda: len(second.sent) == 2)
     replay, initialized = second.sent
