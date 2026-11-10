@@ -17,10 +17,21 @@ from doc_search.config import CONFIG_REL
 from doc_search.shared import Place, Proxy, StartError
 
 
-def short_dir() -> Path:
+@pytest.fixture
+def short_dir():
+    """A directory short enough for AF_UNIX socket paths (pytest's tmp paths are not, on macOS)."""
+    import shutil
     import tempfile
 
-    return Path(tempfile.mkdtemp(prefix="dst-", dir="/tmp"))
+    made = []
+
+    def make() -> Path:
+        made.append(Path(tempfile.mkdtemp(prefix="dst-", dir="/tmp")))
+        return made[-1]
+
+    yield make
+    for path in made:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def test_config_rel_matches_the_config_module() -> None:
@@ -54,6 +65,9 @@ def test_key_inputs() -> None:
 def test_runtime_dir_choices(monkeypatch) -> None:
     assert shared.runtime_dir({"DOC_SEARCH_RUNTIME_DIR": "/x"}) == Path("/x")
     monkeypatch.setattr(shared.sys, "platform", "darwin")
+    monkeypatch.setattr(shared, "_darwin_user_temp", lambda: "/var/u/")
+    assert shared.runtime_dir({"TMPDIR": "/session/t/"}) == Path("/var/u/doc-search")  # not a session's own TMPDIR
+    monkeypatch.setattr(shared, "_darwin_user_temp", lambda: None)
     assert shared.runtime_dir({"TMPDIR": "/var/t/"}) == Path("/var/t/doc-search")
     monkeypatch.setattr(shared.sys, "platform", "linux")
     assert shared.runtime_dir({"XDG_RUNTIME_DIR": "/run/user/5"}) == Path("/run/user/5/doc-search")
@@ -86,7 +100,7 @@ def listen(path: Path) -> socket.socket:
     return srv
 
 
-def test_connect_replaces_a_stale_socket() -> None:
+def test_connect_replaces_a_stale_socket(short_dir) -> None:
     place = Place("k" * 16, short_dir())
     stale = listen(place.sock)
     stale.close()  # the file stays, nobody listens: a crashed daemon's socket
@@ -102,7 +116,7 @@ def test_connect_replaces_a_stale_socket() -> None:
     started[0].close()
 
 
-def test_connect_waits_for_a_daemon_that_holds_the_life_lock() -> None:
+def test_connect_waits_for_a_daemon_that_holds_the_life_lock(short_dir) -> None:
     place = Place("k" * 16, short_dir())
     lock = shared.hold_alive(place)
     assert lock is not None
@@ -121,13 +135,13 @@ def test_connect_waits_for_a_daemon_that_holds_the_life_lock() -> None:
     lock.close()
 
 
-def test_connect_gives_up() -> None:
+def test_connect_gives_up(short_dir) -> None:
     place = Place("k" * 16, short_dir())
     with pytest.raises(StartError):
         shared.connect(place, lambda: None, wait_s=0.3)
 
 
-def test_only_one_life_lock() -> None:
+def test_only_one_life_lock(short_dir) -> None:
     place = Place("k" * 16, short_dir())
     first = shared.hold_alive(place)
     assert first is not None and shared.hold_alive(place) is None
@@ -256,3 +270,100 @@ def test_proxy_falls_back_after_the_retries() -> None:
     assert child.sent[0]["method"] == "initialize"
     stdin.release.set()
     t.join(5)
+
+
+def serve_once(path: Path, reply: bytes | None) -> socket.socket:
+    """A listener that reads one hello and answers `reply` (None: closes without a word)."""
+    srv = listen(path)
+
+    def go() -> None:
+        conn, _ = srv.accept()
+        conn.makefile("rb").readline()
+        if reply is not None:
+            conn.sendall(reply)
+        conn.close()
+
+    threading.Thread(target=go, daemon=True).start()
+    return srv
+
+
+@pytest.mark.parametrize(
+    ("reply", "error"),
+    [(b'{"doc_search_daemon": 1, "key": "other"}\n', shared.HelloRefused),
+     (b'{"doc_search_daemon": 2, "key": "KEY"}\n', shared.HelloRefused),
+     (None, shared.HelloLost)],
+)
+def test_hello_refusals(short_dir, reply, error) -> None:
+    place = Place("KEY", short_dir())
+    srv = serve_once(place.sock, reply)
+    sock = shared.connect(place, lambda: None, wait_s=5)
+    with pytest.raises(error):
+        shared.hello(sock, "KEY", None, wait_s=5)
+    sock.close()
+    srv.close()
+
+
+def test_hello_accepted(short_dir) -> None:
+    place = Place("KEY", short_dir())
+    srv = serve_once(place.sock, b'{"doc_search_daemon": 1, "key": "KEY", "version": "x"}\n')
+    sock = shared.connect(place, lambda: None, wait_s=5)
+    assert shared.hello(sock, "KEY", "/w", wait_s=5) is not None
+    sock.close()
+    srv.close()
+
+
+def test_a_pending_initialize_is_sent_again_under_its_own_id() -> None:
+    stdin = SlowStdin([line(id=1, method="initialize", params={})])
+    out = io.BytesIO()
+    first, second = FakeBackend(answer=False), FakeBackend()
+    proxy = Proxy(stdin, out, reopen=lambda: second, fallback=lambda: pytest.fail("no fallback"), backoff=(0.0,))
+    t = threading.Thread(target=proxy.run, args=(first,))
+    t.start()
+    wait_for(lambda: len(first.sent) == 1)
+    first.die()  # the server died while it built: the client's initialize is still waiting
+    wait_for(lambda: out.getvalue().count(b"\n") == 1)
+    stdin.release.set()
+    t.join(5)
+    assert second.sent[0]["id"] == 1
+    assert json.loads(out.getvalue()) == {"jsonrpc": "2.0", "id": 1, "result": {}}
+
+
+def test_a_cut_line_is_never_forwarded() -> None:
+    stdin = SlowStdin([line(id=1, method="initialize", params={}), line(id=2, method="tools/call", params={})])
+    out = io.BytesIO()
+    first, second = FakeBackend(answer=False), FakeBackend()
+    proxy = Proxy(stdin, out, reopen=lambda: second, fallback=lambda: pytest.fail("no fallback"), backoff=(0.0,))
+    t = threading.Thread(target=proxy.run, args=(first,))
+    t.start()
+    wait_for(lambda: len(first.sent) == 2)
+    with first.cond:
+        first.lines.append(line(id=1, result={}))
+        first.lines.append(b'{"jsonrpc": "2.0", "id": 2, "res')  # the server died mid-line
+        first.dead = True
+        first.cond.notify_all()
+    wait_for(lambda: out.getvalue().count(b"\n") == 2)
+    stdin.release.set()
+    t.join(5)
+    answers = [json.loads(x) for x in out.getvalue().splitlines()]
+    assert answers == [{"jsonrpc": "2.0", "id": 1, "result": {}},
+                       {"jsonrpc": "2.0", "id": 2, "error": {"code": -32603, "message": shared.STOPPED}}]
+
+
+def test_a_cancelled_call_is_not_answered_on_loss() -> None:
+    stdin = SlowStdin([line(id=1, method="initialize", params={}), line(id=2, method="tools/call", params={}),
+                       line(method="notifications/cancelled", params={"requestId": 2})])
+    out = io.BytesIO()
+    first, second = FakeBackend(answer=False), FakeBackend()
+    proxy = Proxy(stdin, out, reopen=lambda: second, fallback=lambda: pytest.fail("no fallback"), backoff=(0.0,))
+    t = threading.Thread(target=proxy.run, args=(first,))
+    t.start()
+    wait_for(lambda: len(first.sent) == 3)
+    with first.cond:
+        first.lines.append(line(id=1, result={}))
+        first.cond.notify_all()
+    wait_for(lambda: out.getvalue().count(b"\n") == 1)
+    first.die()
+    wait_for(lambda: len(second.sent) == 1)
+    stdin.release.set()
+    t.join(5)
+    assert [json.loads(x)["id"] for x in out.getvalue().splitlines()] == [1]

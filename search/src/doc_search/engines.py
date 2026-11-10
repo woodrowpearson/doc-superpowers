@@ -560,6 +560,11 @@ class IndexPool:
         with self._lock:
             return list(self._entries)
 
+    def building(self) -> bool:
+        """Whether any resident worktree is building (a shared server does not exit under a build)."""
+        with self._lock:
+            return any(entry.building() for entry in self._entries.values())
+
     def unload_idle(self, idle_s: float) -> list[Path]:
         """Drop the worktrees no `get` has used for `idle_s` (pool clock) that are not building; return them.
 
