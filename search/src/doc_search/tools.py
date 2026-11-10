@@ -131,14 +131,17 @@ class DocTools:
         """For a doc: its metadata and similar passages. For code: the docs covering it and similar code."""
         return self._answer(lambda: self._related(path, Path(worktree), line, limit))
 
-    def status(self, worktree: Path, *, warm: bool = True, default_note: str | None = None) -> str:
+    def status(
+        self, worktree: Path, *, warm: bool = True, default_note: str | None = None, mode: str | None = None
+    ) -> str:
         """The setup and the index state of `worktree` first, then of the other worktrees in memory.
 
         `warm` (the server's behaviour) starts the builds of an asked worktree that is not in memory;
         the command line asks for `warm=False` and only looks. `default_note` (the server's) says why
-        the default worktree is not the launch one, on a `default worktree:` line.
+        the default worktree is not the launch one, on a `default worktree:` line. `mode` (the server's)
+        says how it runs, on a `server:` line: in-process, or shared with its pid and sessions.
         """
-        return self._answer(lambda: self._status(Path(worktree), warm, default_note))
+        return self._answer(lambda: self._status(Path(worktree), warm, default_note, mode))
 
     @staticmethod
     def _answer(job: Callable[[], str]) -> str:
@@ -303,7 +306,9 @@ class DocTools:
 
     # -- status ----------------------------------------------------------------------------------
 
-    def _status(self, worktree: Path, warm: bool = True, default_note: str | None = None) -> str:
+    def _status(
+        self, worktree: Path, warm: bool = True, default_note: str | None = None, mode: str | None = None
+    ) -> str:
         top = worktree.resolve()
         cloud_by = time.monotonic() + STATUS_CLOUD_BUDGET_S  # one budget for every worktree's cloud lines
         code_model = flat(self.cfg.code.model or resolve_model_name()) if self.cfg.code.enabled else "off"
@@ -313,6 +318,7 @@ class DocTools:
             *self._docs_model_lines(),
             f"code model: {code_model}",
             f"semble {IndexPool.semble_version()}",
+            *([f"server: {flat(mode)}"] if mode else []),
             *([f"default worktree: {top} ({flat(default_note)})"] if default_note else []),
             "",
             f"worktree: {top}",
