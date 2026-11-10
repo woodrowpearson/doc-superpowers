@@ -55,7 +55,7 @@ from doc_search import memrelief
 from doc_search.config import load_config
 from doc_search.engines import IndexPool, WorktreeIndexes
 
-from .test_engines import FakeClock, seed
+from test_engines import FakeClock, seed
 
 
 def enabled(git_repo, tiny_model):
@@ -1231,7 +1231,7 @@ import pytest
 from mcp.client.client import Client
 from mcp.client.stdio import StdioServerParameters
 
-from .test_server import seed
+from test_server import seed
 
 pytestmark = pytest.mark.slow
 

@@ -13,7 +13,8 @@ for. A thread that finds a valid cache loads it without queueing; one that waits
 still running, so `get` reads a first build in line as building. A refresh in line is not waited
 for: the previous index serves until the rebuild gets its slot.
 
-Across processes (every session runs its own server over one semble cache), a static build (the
+Across processes (several servers can share one semble cache: in-process servers, one per session, or a
+shared server per repository and configuration, daemon.py), a static build (the
 docs or code index, or the static docs fallback) holds the index's build lock (`buildlock.index_lock`, a `flock` beside the index directory) from its slot
 until it has saved, so one process builds an index and the others wait, then load what it saved.
 The lock is taken inside the slot (slot, then lock: a holder never waits for anything else, so
@@ -21,6 +22,11 @@ no two processes can wait on each other), its wait reads like a wait in line (a 
 index to serve lets its callers go), and the build is timed from the lock. A waiter gives up after
 `build_lock_wait_s` and builds without it; a holder that dies lets go at once. A transformer build
 takes the host's encoder lock instead (below).
+
+*Idle unload.* `unload_idle` (and the reaper thread a server starts, `start_reaper`) drops a worktree no
+`get` has used for a while, unless it is building. After an eviction or an unload the pool runs
+`memrelief.release()`, so the freed heap leaves the process footprint. A worktree's two indexes are about
+1.4 GB on a large repository.
 
 Loading follows semble's own cache: a cache that still matches the tree is loaded from disk
 (`get_validated_cache` then `SembleIndex.load_from_disk`), anything else is rebuilt through
@@ -127,7 +133,7 @@ from semble.cache import find_index_from_cache_folder, get_validated_cache, save
 from semble.index.types import PersistencePath
 from semble.utils import resolve_model_name
 
-from . import buildlock, encode_cache, transformer
+from . import buildlock, encode_cache, memrelief, transformer
 from .config import Config
 from .progress import BuildProgress, ProgressView, intel_mac
 from .transformer import MISSING_EXTRA, TransformerSpec
@@ -348,9 +354,10 @@ class _State:
 
 
 class _Entry:
-    def __init__(self, worktree: Path, states: dict[Kind, _State]) -> None:
+    def __init__(self, worktree: Path, states: dict[Kind, _State], now: float) -> None:
         self.worktree = worktree
         self.states = states
+        self.last_used = now  # the pool clock at the last `get`: idle unload reads it
         self.fallback: _State | None = None  # a transformer docs model's static fallback, until the swap
         self.evicted = False  # dropped from the pool: a transformer build still waiting is cancelled
         # Every save of the docs folder (fallback and transformer) holds this; it alone guards
@@ -470,6 +477,8 @@ class IndexPool:
         self._lock_wait_s = build_lock_wait_s
         self._lane = _BuildLine(1, clock)  # the transformer lane
         self._intel_warned = False
+        self._reaper: threading.Thread | None = None
+        self._reaper_stop = threading.Event()
         spec = cfg.docs.transformer
         self._extra_missing = spec is not None and transformer.extra_missing()
         if spec is not None and not self._extra_missing:
@@ -490,7 +499,7 @@ class IndexPool:
         top = Path(worktree).resolve()
         deadline = time.monotonic() + max(0.0, wait_s)  # real time: the injected clock may not move
         with self._lock:
-            entry = self._touch(top)
+            entry, dropped = self._touch(top)
             now = self.clock()
             waiting: list[tuple[threading.Event, float]] = []
             for state in entry.live():
@@ -502,6 +511,8 @@ class IndexPool:
                     if source is not None and source.index is not None:  # an index serves: an encode may take hours
                         until = min(deadline, time.monotonic() + TRANSFORMER_REFRESH_WAIT_S)
                     waiting.append((state.answerable, until))
+        if dropped:
+            memrelief.release()  # outside the lock: a collection can take a second
         for event, until in waiting:
             event.wait(max(0.0, until - time.monotonic()))
         with self._lock:
@@ -549,6 +560,48 @@ class IndexPool:
         with self._lock:
             return list(self._entries)
 
+    def unload_idle(self, idle_s: float) -> list[Path]:
+        """Drop the worktrees no `get` has used for `idle_s` (pool clock) that are not building; return them.
+
+        The next `get` of a dropped worktree loads it from semble's cache again. Freed heap goes back to the OS.
+        """
+        with self._lock:
+            now = self.clock()
+            gone = [
+                path for path, entry in self._entries.items() if now - entry.last_used >= idle_s and not entry.building()
+            ]
+            for path in gone:
+                self._evict(self._entries.pop(path))
+        if gone:
+            logger.info("doc-search: unloaded %d idle worktree(s): %s", len(gone), ", ".join(map(str, gone)))
+            memrelief.release()
+        return gone
+
+    def start_reaper(self, idle_s: float, interval_s: float = 60.0) -> None:
+        """Run `unload_idle(idle_s)` every `interval_s` real seconds on a daemon thread, until `stop_reaper`.
+
+        Does nothing when `idle_s` is 0 (idle unload off) or a reaper already runs.
+        """
+        if self._reaper is not None or idle_s <= 0:
+            return
+        self._reaper_stop.clear()
+
+        def loop() -> None:
+            while not self._reaper_stop.wait(interval_s):
+                try:
+                    self.unload_idle(idle_s)
+                except Exception:  # noqa: BLE001 - the reaper must outlive one bad pass
+                    logger.exception("doc-search: idle unload failed")
+
+        self._reaper = threading.Thread(target=loop, name="doc-search-reaper", daemon=True)
+        self._reaper.start()
+
+    def stop_reaper(self) -> None:
+        self._reaper_stop.set()
+        if self._reaper is not None:
+            self._reaper.join(5)
+        self._reaper = None
+
     @staticmethod
     def semble_version() -> str:
         try:
@@ -562,11 +615,15 @@ class IndexPool:
 
     # -- entries and the cooldown --------------------------------------------------------
 
-    def _touch(self, top: Path) -> _Entry:
+    def _touch(self, top: Path) -> tuple[_Entry, bool]:
+        """The worktree's entry, made the most recently used, and whether another was evicted for it."""
+        now = self.clock()
         entry = self._entries.get(top)
         if entry is None:
-            entry = self._entries[top] = _Entry(top, self._states())
+            entry = self._entries[top] = _Entry(top, self._states(), now)
+        entry.last_used = now
         self._entries.move_to_end(top)
+        dropped = False
         # Evict least recently used first, but never an entry that is still building: dropping it
         # would let a later get start a second build into the same semble cache directory. A
         # transformer build waiting in the lane does not hold its worktree for hours: the eviction
@@ -578,7 +635,8 @@ class IndexPool:
             if path != top and not other.building():
                 del self._entries[path]
                 self._evict(other)
-        return entry
+                dropped = True
+        return entry, dropped
 
     @staticmethod
     def _evict(entry: _Entry) -> None:
