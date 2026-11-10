@@ -98,7 +98,10 @@ def _build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argumen
         subs[name] = verbs.add_parser(name, help=help_, description=help_, allow_abbrev=False)
         return subs[name]
 
-    verb("serve", "Run the MCP server over stdio.")
+    serve = verb("serve", "Run the MCP server over stdio (the shared server per repository unless --in-process).")
+    serve.add_argument(
+        "--in-process", action="store_true", help="serve in this process, never through the shared server"
+    )
     verb("init", "Write docs/search/config.json (the defaults) when it is absent; never overwrites.")
 
     index = verb("index", "Build both semble indexes for this worktree; with --cloud, write the cloud corpus.")
@@ -262,10 +265,9 @@ def _progress_lines(rt: Any, worktree: Path) -> Iterator[None]:
 
 
 def _serve(args: argparse.Namespace) -> int:
-    from .server import serve
+    from .entry import run_serve
 
-    serve(Path.cwd())
-    return 0
+    return run_serve(args.in_process)
 
 
 # -- init ----------------------------------------------------------------------------------------------------

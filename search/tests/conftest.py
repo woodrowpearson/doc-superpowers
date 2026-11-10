@@ -7,6 +7,7 @@ Tests never touch the network, the user's semble cache, or the user's git config
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -81,6 +82,32 @@ def doc_search_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterato
         "DOC_SEARCH_CACHE_LOCATION changed during the test (monkeypatch.undo()?): "
         "its encode cache may have reached the real doc-search cache"
     )
+
+
+@pytest.fixture(autouse=True)
+def shared_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """No test shares a server unless it asks (DOC_SEARCH_SHARED=1); every daemon a test starts is stopped.
+
+    The socket directory is short and under /tmp: pytest's own tmp paths exceed AF_UNIX's 104 bytes on macOS.
+    """
+    import signal
+    import tempfile
+
+    where = Path(tempfile.mkdtemp(prefix="dsr-", dir="/tmp"))
+    monkeypatch.setenv("DOC_SEARCH_RUNTIME_DIR", str(where))
+    monkeypatch.setenv("DOC_SEARCH_SHARED", "0")
+    monkeypatch.setenv("DOC_SEARCH_DAEMON_IDLE_S", "3")
+    yield where
+    from doc_search.shared import _lock_free
+
+    for alive in where.glob("*.alive"):
+        if _lock_free(alive):
+            continue  # no daemon holds it: its pid may belong to another process by now
+        try:
+            os.kill(int(alive.read_text().split()[0]), signal.SIGTERM)
+        except (ValueError, IndexError, ProcessLookupError, PermissionError):
+            pass
+    shutil.rmtree(where, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

@@ -63,10 +63,15 @@ SHA-256, cut to 16 hex characters, over:
 
 - the launch worktree's top (today's `Runtime(cwd)`);
 - the bytes of its `docs/search/config.json`;
-- doc-search's version and the path of its package (`doc_search.__file__`);
+- doc-search's version, the path of its package, and its modules' sizes and times (a source checkout's
+  edit changes no version);
 - `sys.executable` (the venv, and with it the installed extras);
 - the environment variables that change behaviour: `DOC_SEARCH_*` (but not `DOC_SEARCH_CLIENT_CWD`),
-  `SEMBLE_*`, `HF_*`, `GOOGLE_*` and `CLOUDSDK_*`.
+  `SEMBLE_*`, `HF_*`, `GOOGLE_*`, `CLOUDSDK_*` and `GIT_*`, and `HOME` and `XDG_CACHE_HOME`, under which
+  the caches live.
+
+The daemon computes the key again from its own launch worktree, config and environment. If they no
+longer match, as when the config changed after the proxy read it, it exits.
 
 The Claude desktop app starts every session's project servers in the main checkout. So all its
 sessions on one repository share one daemon, whichever worktree each works in. A config edit, another
@@ -75,7 +80,8 @@ session leaves. Version skew between a launcher and a daemon cannot arise by con
 
 ### Where the files live
 
-- macOS: `$TMPDIR/doc-search/` (per user, mode 0700).
+- macOS: the user's temporary directory (`getconf DARWIN_USER_TEMP_DIR`, else `$TMPDIR`) + `doc-search/`.
+  A session with a `TMPDIR` of its own still finds the shared server.
 - Linux: `$XDG_RUNTIME_DIR/doc-search/`, else `/tmp/doc-search-<uid>/`.
 
 Each daemon has `<key>.sock` (mode 0600), `<key>.alive` (its life lock), `<key>.start` (the start
@@ -94,11 +100,13 @@ The proxy:
 3. Still no connection: it tries `<key>.alive` without blocking.
    - If it gets the lock, no daemon is alive. The proxy lets the lock go and removes a stale
      `<key>.sock`. It then starts the daemon detached (`start_new_session`, stdin from
-     `/dev/null`, output to `<key>.log`).
+     `/dev/null`, output to `<key>.log`). The daemon runs as `python -P -m doc_search.entry`, so the
+     repository's top, its working directory, can never shadow a module.
    - If the lock is held, a daemon is starting. The proxy waits for it.
 4. It polls the socket until it connects, at most 60 s. Then it lets `<key>.start` go.
 
-The daemon takes `<key>.alive` first, without blocking, and holds it for life. If another daemon holds
+The daemon takes `<key>.alive` first, without blocking and before it imports the server, and holds it
+for life. If another daemon holds
 it, it exits. It then removes any old socket and listens before it builds the `Runtime`, so proxies
 queue in the backlog during that 5 to 10 s.
 
@@ -142,16 +150,20 @@ stay in the footprint. A query for an unloaded worktree reloads it from semble's
 
 ### The daemon's life and crashes
 
-- **Idle exit.** With no session for `DOC_SEARCH_DAEMON_IDLE_S`, the daemon stops listening, removes
-  its socket and exits. A proxy that connected in that moment reads end-of-file and recovers as below.
+- **Idle exit.** With no session for `DOC_SEARCH_DAEMON_IDLE_S`, and no build running, the daemon stops
+  listening, removes its socket and exits. A proxy that connected in that moment reads end-of-file
+  before the hello, and tries again (three times), which starts a new daemon.
+- **One session's failure.** The daemon logs it and closes that connection. The other sessions go on.
 - **Crash or kill.** The proxy tracks the client's requests still awaiting an answer, and remembers
   the `initialize` request and the `notifications/initialized` notification. When the connection
   drops:
   1. It answers each pending request with a JSON-RPC error: `doc-search: the shared server
-     stopped; retry the call`.
+     stopped; retry the call`. A request that a cancellation notice withdrew is not answered. A line
+     cut short by the loss is never forwarded.
   2. It reconnects, starting a daemon if needed: three tries with a 1 s, 2 s and 4 s backoff.
   3. It replays `initialize` under an id of its own and drops that answer. It then replays
-     `notifications/initialized`.
+     `notifications/initialized`. When the client's own `initialize` is still waiting (the daemon died
+     while it started), the proxy sends that one again under its id, and the client gets its answer.
   The MCP client keeps its session and sees one failed call.
 - **No daemon after the retries.** The proxy starts `doc-search serve --in-process` as a child and
   replays the handshake to it in the same way. A failure before the first connection needs no
@@ -164,7 +176,8 @@ stay in the footprint. A query for an unloaded worktree reloads it from semble's
 - Cloud sessions (`CLAUDE_CODE_REMOTE` set): in-process by default. A container runs one session,
   so there is nothing to share, and a detached process should not outlive it.
 - No `AF_UNIX` or `fcntl` (Windows): in-process.
-- `doc-search serve --in-process`: today's server, unchanged.
+- `doc-search serve --in-process`: today's server, with one change: it unloads idle worktrees too
+  (`DOC_SEARCH_IDLE_UNLOAD_S`).
 
 `check`, `gate`, `query`, `index`, `status` and `eval` on the command line stay in-process. The
 launcher (`scripts/search/launch.sh`) does not change: `serve` still execs `uv run … doc-search serve`.

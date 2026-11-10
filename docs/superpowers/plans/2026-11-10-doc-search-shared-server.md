@@ -1419,9 +1419,9 @@ from pathlib import Path
 import anyio
 import anyio.to_thread
 from anyio.streams.buffered import BufferedByteReceiveStream
-from mcp import types
+import mcp_types as types
+from mcp.shared._context_streams import create_context_streams  # what mcp.server.stdio frames with
 from mcp.shared.message import SessionMessage
-from mcp.shared.memory import create_context_streams  # the helper stdio_server uses; see Step 5 note
 
 from .server import Runtime, build_server_for, limits
 from .shared import MAX_LINE, PROTOCOL, Place, hold_alive
@@ -1688,7 +1688,7 @@ anyio.run(main)
   - *Troubleshooting*: the log (`<runtime dir>/<key>.log`), `DOC_SEARCH_SHARED=0`, and that a stale socket
     is replaced by the next session.
   - `CLAUDE.md`: in the directory tree's `search/src/doc_search/` line add `entry.py (the console script),
-    shared.py (the proxy), daemon.py (the shared server), memrelief.py`; in the Key Files `search/` row,
+    shared.py (the proxy), daemon.py (the shared server), memrelief.py`. In the Key Files `search/` row,
     one sentence on the shared server; update the pytest count from `uv run --frozen --all-extras pytest -q`'s total.
   - Lint each changed prose file with `bash scripts/doc-tools.sh writing check <file>` (no new findings in
     lines this change wrote).
@@ -1698,3 +1698,27 @@ anyio.run(main)
   or `doc-tools.sh` change).
 
 - [ ] **Step 5: Commit** `git add -A && git commit` with the measured numbers in the body.
+
+## Amendments after review (2026-11-10)
+
+A review of this plan before Task 4 found these; the code on the branch has them, the tasks above do not.
+
+- `daemon.py`:
+  - A connection's failure is caught and logged; it never cancels the listener.
+  - The reader and writer stop on `DelimiterNotFound`, `BrokenResourceError` and `ClosedResourceError`.
+  - The idle exit waits while a build runs (`IndexPool.building()`).
+  - The listener is made with `mode=0o600`.
+  - `run(place, life)` checks the key against its own worktree, config and environment.
+- `entry.py`: `daemon` takes the life lock before it imports `daemon.py` and the server.
+- `shared.py`:
+  - Children run as `python -P -m doc_search.entry`, so the repository cannot shadow a module.
+  - The key adds `GIT_*`, `HOME`, `XDG_CACHE_HOME` and a stamp of the package's modules; `fcntl` is optional.
+  - macOS uses `getconf DARWIN_USER_TEMP_DIR`.
+  - The proxy records a request's id and sends it under one lock. It never forwards a cut line.
+  - It sends a waiting `initialize` again under its own id, and drops cancelled ids.
+  - It closes the new backend's write side when stdin ended during recovery.
+  - A hello lost to an exiting daemon is retried three times. A reconnect waits at most 20 s.
+- Tests:
+  - New cases: hello refusal and loss, the pending `initialize`, a cut line and a cancelled call.
+  - A short-dir fixture cleans up, and life-lock checks replace pid checks.
+  - Servers built in tests start no reaper (`DOC_SEARCH_IDLE_UNLOAD_S=0`).

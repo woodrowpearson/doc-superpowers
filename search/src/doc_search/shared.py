@@ -12,7 +12,6 @@ Standard library only, so the proxy stays small: nothing here imports the MCP SD
 from __future__ import annotations
 
 import errno
-import fcntl
 import hashlib
 import json
 import os
@@ -29,11 +28,21 @@ from typing import IO, BinaryIO, Protocol
 
 from . import __version__
 
+try:
+    import fcntl
+except ImportError:  # Windows: no flock, no shared server
+    fcntl = None  # type: ignore[assignment]
+
 PROTOCOL = 1
 CONFIG_REL = "docs/search/config.json"  # config.CONFIG_REL; a test keeps them equal
 STOPPED = "doc-search: the shared server stopped; retry the call"
-KEY_ENV_PREFIXES = ("DOC_SEARCH_", "SEMBLE_", "HF_", "GOOGLE_", "CLOUDSDK_")
+KEY_ENV_PREFIXES = ("DOC_SEARCH_", "SEMBLE_", "HF_", "GOOGLE_", "CLOUDSDK_", "GIT_")
+KEY_ENV_NAMES = frozenset({"HOME", "XDG_CACHE_HOME"})  # semble's and doc-search's caches live under them
 KEY_ENV_SKIP = frozenset({"DOC_SEARCH_CLIENT_CWD"})
+# `python -P`: the daemon and the fallback child run in the repository, whose top must never shadow a module
+CHILD = (sys.executable, "-P", "-m", "doc_search.entry")
+RECONNECT_WAIT_S = 20.0
+HELLO_RETRIES = 3
 SUN_PATH_MAX = 103 if sys.platform == "darwin" else 107  # sockaddr_un's sun_path, less its NUL
 MAX_LINE = 64 * 1024 * 1024
 LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -41,7 +50,7 @@ LOG_MAX_BYTES = 5 * 1024 * 1024
 
 def shared_wanted(env: Mapping[str, str]) -> bool:
     """Whether `serve` tries the shared server: `DOC_SEARCH_SHARED` decides, else not in a cloud session."""
-    if not hasattr(socket, "AF_UNIX"):
+    if not hasattr(socket, "AF_UNIX") or fcntl is None:
         return False
     switch = env.get("DOC_SEARCH_SHARED", "").strip()
     if switch in ("0", "1"):
@@ -55,22 +64,47 @@ def daemon_key(top: Path, config: bytes, env: Mapping[str, str]) -> str:
         str(top),
         hashlib.sha256(config).hexdigest(),
         __version__,
-        str(Path(__file__).resolve().parent),
+        _code_stamp(),
         sys.executable,
         sorted(
             (name, value)
             for name, value in env.items()
-            if name.startswith(KEY_ENV_PREFIXES) and name not in KEY_ENV_SKIP
+            if (name.startswith(KEY_ENV_PREFIXES) or name in KEY_ENV_NAMES) and name not in KEY_ENV_SKIP
         ),
     ]
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()[:16]
 
 
+def _code_stamp() -> str:
+    """The package's path and its modules' sizes and times: a source checkout's edit gets a new daemon,
+    though its version stays the same."""
+    here = Path(__file__).resolve().parent
+    stamp = hashlib.sha256(str(here).encode())
+    for path in sorted(here.rglob("*.py")):
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        stamp.update(f"{path.relative_to(here)}:{st.st_size}:{st.st_mtime_ns};".encode())
+    return stamp.hexdigest()
+
+
+def _darwin_user_temp() -> str | None:
+    """macOS's per-user temporary directory, whatever TMPDIR a session was given."""
+    try:
+        done = subprocess.run(["getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return (done.stdout.strip() or None) if done.returncode == 0 else None
+
+
 def runtime_dir(env: Mapping[str, str]) -> Path:
     if env.get("DOC_SEARCH_RUNTIME_DIR"):
         return Path(env["DOC_SEARCH_RUNTIME_DIR"])
-    if sys.platform == "darwin" and env.get("TMPDIR"):
-        return Path(env["TMPDIR"]) / "doc-search"  # per user on macOS
+    if sys.platform == "darwin":
+        base = _darwin_user_temp() or env.get("TMPDIR")
+        if base:
+            return Path(base) / "doc-search"  # per user on macOS
     if env.get("XDG_RUNTIME_DIR"):
         return Path(env["XDG_RUNTIME_DIR"]) / "doc-search"
     return Path("/tmp") / f"doc-search-{os.getuid()}"
@@ -132,6 +166,10 @@ class StartError(Exception):
 
 class HelloRefused(Exception):
     """The server at the socket is not the one this session asked for."""
+
+
+class HelloLost(HelloRefused):
+    """The server closed the connection before its hello: it was exiting. Another try starts a new one."""
 
 
 def _try_connect(path: Path) -> socket.socket | None:
@@ -212,9 +250,15 @@ def hello(sock: socket.socket, key: str, client_cwd: str | None, wait_s: float =
     sock.sendall((json.dumps({"doc_search_proxy": PROTOCOL, "key": key, "client_cwd": client_cwd}) + "\n").encode())
     reader = sock.makefile("rb")
     try:
-        reply = json.loads(reader.readline(MAX_LINE) or b"null")
-    except (ValueError, OSError) as err:
-        raise HelloRefused(f"no hello from the shared server: {err}") from err
+        raw = reader.readline(MAX_LINE)
+    except OSError as err:
+        raise HelloLost(f"no hello from the shared server: {err}") from err
+    if not raw.endswith(b"\n"):
+        raise HelloLost("the shared server closed the connection before its hello")
+    try:
+        reply = json.loads(raw)
+    except ValueError as err:
+        raise HelloRefused(f"the shared server's hello is not JSON: {err}") from err
     sock.settimeout(None)
     if not isinstance(reply, dict) or reply.get("doc_search_daemon") != PROTOCOL or reply.get("key") != key:
         raise HelloRefused(f"the shared server answered {reply!r}")
@@ -238,7 +282,7 @@ class SocketBackend:
     def readline(self) -> bytes:
         try:
             return self._reader.readline(MAX_LINE)
-        except OSError:
+        except (OSError, ValueError):  # ValueError: read after close
             return b""
 
     def close_write(self) -> None:
@@ -248,6 +292,7 @@ class SocketBackend:
             pass
 
     def close(self) -> None:
+        self._reader.close()
         self._sock.close()
 
 
@@ -260,7 +305,7 @@ class ChildBackend:
     @classmethod
     def start(cls, cwd: Path, env: Mapping[str, str]) -> ChildBackend:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "doc_search.entry", "serve", "--in-process"],
+            [*CHILD, "serve", "--in-process"],
             cwd=cwd, env=dict(env), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         )
         return cls(proc)
@@ -270,7 +315,10 @@ class ChildBackend:
         self._proc.stdin.flush()
 
     def readline(self) -> bytes:
-        return self._proc.stdout.readline(MAX_LINE)
+        try:
+            return self._proc.stdout.readline(MAX_LINE)
+        except (OSError, ValueError):
+            return b""
 
     def close_write(self) -> None:
         try:
@@ -328,7 +376,6 @@ class Proxy:
             data = self._stdin.readline()
             if not data:
                 break
-            self._note_up(data)
             self._send(data)
         with self._cond:
             self._stdin_done = True
@@ -336,28 +383,40 @@ class Proxy:
         if backend is not None:
             backend.close_write()
 
-    def _note_up(self, data: bytes) -> None:
+    def _note_up(self, data: bytes) -> list[object]:
+        """Remember the handshake; return the ids of the requests in `data` (answered or STOPPED later)."""
+        ids = []
         for msg in _messages(data):
             method = msg.get("method")
             if method == "initialize" and "id" in msg:
                 self._init = msg
             elif method == "notifications/initialized":
                 self._initialized = data
+            elif method == "notifications/cancelled":
+                params = msg.get("params")
+                if isinstance(params, dict) and "requestId" in params:
+                    with self._cond:
+                        self._pending.pop(_id_key(params["requestId"]), None)
             if method is not None and "id" in msg:
-                with self._cond:
-                    self._pending[_id_key(msg["id"])] = msg["id"]
+                ids.append(msg["id"])
+        return ids
 
     def _send(self, data: bytes) -> None:
-        with self._cond:
+        ids = self._note_up(data)
+        with self._cond:  # recording and sending under the lock a recovery swaps the backend under: one answer each
             while self._backend is None and not self._dead:
                 self._cond.wait()
             backend = self._backend
-        if backend is None:
-            return  # nothing left to serve this session; the pending call is answered below
-        try:
-            backend.send(data)
-        except OSError:
-            pass  # the reader sees the loss and recovers; this call is pending and gets STOPPED
+            if backend is None:
+                for request_id in ids:  # nothing left to serve this session
+                    self._write(_stopped(request_id))
+                return
+            for request_id in ids:
+                self._pending[_id_key(request_id)] = request_id
+            try:
+                backend.send(data)
+            except OSError:
+                pass  # the reader sees the loss and recovers; this call is pending and gets STOPPED
 
     # -- the server's side --------------------------------------------------------------------
 
@@ -368,10 +427,11 @@ class Proxy:
             if backend is None:
                 return
             data = backend.readline()
-            if data:
+            if data.endswith(b"\n"):
                 if self._note_down(data):
                     self._write(data)
                 continue
+            # end of file, or a line cut short by the server's loss: never forward a fragment
             with self._cond:
                 done = self._stdin_done
             if done or not self._recover(backend):
@@ -395,14 +455,16 @@ class Proxy:
             self._stdout.flush()
 
     def _recover(self, lost: Backend) -> bool:
+        init_id = _id_key(self._init["id"]) if self._init is not None else None
         with self._cond:
             self._backend = None
-            stranded = list(self._pending.values())
-            self._pending.clear()
+            stranded = [value for key, value in self._pending.items() if key != init_id]
+            init_pending = init_id is not None and init_id in self._pending
+            self._pending = {init_id: self._init["id"]} if init_pending else {}
+            self._replays.clear()  # the lost server's answers never come
         lost.close()
         for request_id in stranded:
-            error = {"code": -32603, "message": STOPPED}
-            self._write((json.dumps({"jsonrpc": "2.0", "id": request_id, "error": error}) + "\n").encode())
+            self._write(_stopped(request_id))
         backend = None
         for delay in self._backoff:
             time.sleep(delay)
@@ -421,7 +483,9 @@ class Proxy:
                     self._cond.notify_all()
                 return False
         try:
-            if self._init is not None:
+            if self._init is not None and init_pending:
+                backend.send((json.dumps(self._init) + "\n").encode())  # its answer goes to the client
+            elif self._init is not None:
                 replay = dict(self._init, id=f"doc-search-proxy-replay-{time.monotonic_ns()}")
                 with self._cond:
                     self._replays.add(_id_key(replay["id"]))
@@ -433,7 +497,15 @@ class Proxy:
         with self._cond:
             self._backend = backend
             self._cond.notify_all()
+            done = self._stdin_done
+        if done:
+            backend.close_write()  # the client left while we reconnected
         return True
+
+
+def _stopped(request_id: object) -> bytes:
+    error = {"code": -32603, "message": STOPPED}
+    return (json.dumps({"jsonrpc": "2.0", "id": request_id, "error": error}) + "\n").encode()
 
 
 def _messages(data: bytes) -> list[dict]:
@@ -461,7 +533,7 @@ def spawn_daemon(place: Place, top: Path, env: Mapping[str, str]) -> None:
     mode = "wb" if place.log.exists() and place.log.stat().st_size > LOG_MAX_BYTES else "ab"
     with open(place.log, mode) as log:
         subprocess.Popen(
-            [sys.executable, "-m", "doc_search.entry", "daemon", "--key", place.key, "--dir", str(place.dir)],
+            [*CHILD, "daemon", "--key", place.key, "--dir", str(place.dir)],
             cwd=top, env=child_env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
             start_new_session=True, close_fds=True,
         )
@@ -485,17 +557,25 @@ def serve_shared(env: Mapping[str, str] = os.environ, cwd: Path | None = None) -
         return None
     client_cwd = env.get("DOC_SEARCH_CLIENT_CWD") or None
 
-    def reopen() -> Backend:
-        sock = connect(place, lambda: spawn_daemon(place, top, env))
+    def reopen(wait_s: float = RECONNECT_WAIT_S) -> Backend:
+        sock = connect(place, lambda: spawn_daemon(place, top, env), wait_s=wait_s)
         try:
             return SocketBackend(sock, hello(sock, place.key, client_cwd))
         except BaseException:
             sock.close()
             raise
 
-    try:
-        first = reopen()
-    except (StartError, HelloRefused, OSError) as err:
-        print(f"doc-search: serving in-process: {err}", file=sys.stderr)
-        return None
+    first = None
+    for attempt in range(HELLO_RETRIES):
+        try:
+            first = reopen(60.0)  # a first start imports and listens: allow a loaded host its minute
+            break
+        except HelloLost as err:  # the server was exiting as we connected: the next try starts another
+            if attempt == HELLO_RETRIES - 1:
+                print(f"doc-search: serving in-process: {err}", file=sys.stderr)
+                return None
+            time.sleep(0.2)
+        except (StartError, HelloRefused, OSError) as err:
+            print(f"doc-search: serving in-process: {err}", file=sys.stderr)
+            return None
     return Proxy(sys.stdin.buffer, sys.stdout.buffer, reopen, lambda: ChildBackend.start(here, env)).run(first)

@@ -469,7 +469,8 @@ def test_serve_cwd_is_the_launch_worktree(git_repo, tiny_model: str) -> None:
 
 
 @pytest.mark.slow
-def test_stdio_smoke(git_repo, tiny_model: str, semble_cache: Path) -> None:
+@pytest.mark.parametrize("shared", ["0", "1"])
+def test_stdio_smoke(git_repo, tiny_model: str, semble_cache: Path, shared: str) -> None:
     """The console script, spawned as an MCP client spawns it: initialize, list tools, search."""
     repo = git_repo()
     seed(repo, tiny_model)
@@ -477,7 +478,7 @@ def test_stdio_smoke(git_repo, tiny_model: str, semble_cache: Path) -> None:
         command="uv",
         args=["run", "--project", str(SEARCH_DIR), "--frozen", "doc-search", "serve"],
         cwd=repo.root,
-        env={**os.environ, "SEMBLE_CACHE_LOCATION": str(semble_cache), "HF_HUB_OFFLINE": "1"},
+        env={**os.environ, "SEMBLE_CACHE_LOCATION": str(semble_cache), "HF_HUB_OFFLINE": "1", "DOC_SEARCH_SHARED": shared},
     )
 
     async def go():

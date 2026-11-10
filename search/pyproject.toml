@@ -28,7 +28,7 @@ local-transformer = [
 ]
 
 [project.scripts]
-doc-search = "doc_search.cli:main"
+doc-search = "doc_search.entry:main"
 
 [dependency-groups]
 dev = [
