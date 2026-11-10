@@ -83,6 +83,13 @@ def doc_search_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterato
     )
 
 
+@pytest.fixture(autouse=True)
+def no_idle_reaper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Servers built in a test start no idle-unload thread (DOC_SEARCH_IDLE_UNLOAD_S=0): it would outlive the
+    test. The idle-unload tests drive `unload_idle` and `start_reaper` themselves."""
+    monkeypatch.setenv("DOC_SEARCH_IDLE_UNLOAD_S", "0")
+
+
 @pytest.fixture(scope="session")
 def tiny_model(tmp_path_factory: pytest.TempPathFactory) -> str:
     """A Model2Vec StaticModel built in-process: seeded random 16-d vectors over VOCAB."""
