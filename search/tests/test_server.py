@@ -469,7 +469,8 @@ def test_serve_cwd_is_the_launch_worktree(git_repo, tiny_model: str) -> None:
 
 
 @pytest.mark.slow
-def test_stdio_smoke(git_repo, tiny_model: str, semble_cache: Path) -> None:
+@pytest.mark.parametrize("shared", ["0", "1"])
+def test_stdio_smoke(git_repo, tiny_model: str, semble_cache: Path, shared: str) -> None:
     """The console script, spawned as an MCP client spawns it: initialize, list tools, search."""
     repo = git_repo()
     seed(repo, tiny_model)
@@ -477,7 +478,7 @@ def test_stdio_smoke(git_repo, tiny_model: str, semble_cache: Path) -> None:
         command="uv",
         args=["run", "--project", str(SEARCH_DIR), "--frozen", "doc-search", "serve"],
         cwd=repo.root,
-        env={**os.environ, "SEMBLE_CACHE_LOCATION": str(semble_cache), "HF_HUB_OFFLINE": "1"},
+        env={**os.environ, "SEMBLE_CACHE_LOCATION": str(semble_cache), "HF_HUB_OFFLINE": "1", "DOC_SEARCH_SHARED": shared},
     )
 
     async def go():
@@ -492,3 +493,33 @@ def test_stdio_smoke(git_repo, tiny_model: str, semble_cache: Path) -> None:
     assert {tool.name for tool in tools.tools} == TOOLS
     assert not result.is_error
     assert "docs/specs/SPEC-PAY-004.md" in result.content[0].text
+
+
+from doc_search.server import Runtime, build_server_for, limits
+
+
+def test_limits_defaults_and_overrides(monkeypatch) -> None:
+    assert limits(True, {}) == (3, 900.0)
+    assert limits(False, {}) == (2, 900.0)
+    assert limits(False, {"DOC_SEARCH_MAX_WORKTREES": "1", "DOC_SEARCH_IDLE_UNLOAD_S": "0"}) == (1, 0.0)
+    assert limits(True, {"DOC_SEARCH_MAX_WORKTREES": "zero", "DOC_SEARCH_IDLE_UNLOAD_S": "-5"}) == (3, 900.0)
+
+
+def test_views_share_the_pool_and_keep_their_own_default(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo, tiny_model)
+    branch = repo.add_worktree("b", "b")
+    rt = Runtime(repo.root, None, 20.0, warm=False, shared=True)
+    one, two = rt.view(None), rt.view(str(branch))
+    assert one.default == repo.root and two.default == branch
+    assert one.pool is rt.pool is two.pool and one.searcher is two.searcher
+    assert rt.pool.max_worktrees == 3
+
+
+def test_status_names_the_server_mode(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo, tiny_model)
+    rt = Runtime(repo.root, None, 60.0)
+    assert "server: in-process" in call(build_server_for(rt), "status")
+    rt.mode = lambda: "shared (pid 7, 2 sessions)"
+    assert "server: shared (pid 7, 2 sessions)" in call(build_server_for(rt.view(None)), "status")

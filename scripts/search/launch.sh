@@ -1,5 +1,5 @@
 #!/bin/sh
-# doc-search launcher v3.13.0
+# doc-search launcher v3.14.0
 # doc-search launcher (POSIX sh): runs the doc-search CLI / MCP server through
 # uv, from wherever doc-superpowers is installed.
 #
