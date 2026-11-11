@@ -4,7 +4,7 @@ This is the rule for the text another person or agent reads: docs, plans, issues
 
 `references/writing.md` holds the key format, the lint that counts what it can of the rule, and how to run it.
 
-<!-- doc-superpowers:writing-rule v3.13.0 -->
+<!-- doc-superpowers:writing-rule v3.14.0 -->
 ## Writing
 
 Every text another person or agent reads follows this rule: docs, plans, issues, pull-request (PR)
