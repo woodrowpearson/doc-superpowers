@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-11-10T21:14:56Z",
+  "generated_at": "2026-11-11T01:28:49Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -14,16 +14,16 @@
         ".github/workflows/tests.yml",
         "search/"
       ],
-      "code_commit": "1e8d6ccee46335889fe5eec33dcfad95394d1443",
+      "code_commit": "2e81193ccf4f963fb91387c8ba4e2cd8bacd3f30",
       "doc_type": "architecture",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-11-10T21:14:56Z",
+      "last_verified": "2026-11-11T01:28:49Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "80c4828c02c3f833794adb724644e5ba565fe5bb",
-        "scripts/": "199dfb0db7213e78e37da221b357f7bb7a392de8",
-        "references/": "1103061e22b8f12f8a790b7bbb98f5f87b6e610b",
+        "scripts/": "f4ea762f927339702dcc56b915f8f7160b19b177",
+        "references/": "ad2e1a564cd64afe32513fc2ec0a38648e67afb3",
         "evals/": "f641eb6ea9edac748d1dad32db58ab3dba984769",
         ".github/workflows/tests.yml": "e052ad3e7fa45a71df1c5e9a22681e271c9d0d56",
         "search/": "8ad4bb0e690b9d7ddb5c8a3be1c710bd1973f35b"
@@ -39,16 +39,16 @@
         ".github/workflows/tests.yml",
         "search/"
       ],
-      "code_commit": "1e8d6ccee46335889fe5eec33dcfad95394d1443",
+      "code_commit": "2e81193ccf4f963fb91387c8ba4e2cd8bacd3f30",
       "doc_type": "codebase-guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-11-10T21:14:56Z",
+      "last_verified": "2026-11-11T01:28:49Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "80c4828c02c3f833794adb724644e5ba565fe5bb",
-        "scripts/": "199dfb0db7213e78e37da221b357f7bb7a392de8",
-        "references/": "1103061e22b8f12f8a790b7bbb98f5f87b6e610b",
+        "scripts/": "f4ea762f927339702dcc56b915f8f7160b19b177",
+        "references/": "ad2e1a564cd64afe32513fc2ec0a38648e67afb3",
         "evals/": "f641eb6ea9edac748d1dad32db58ab3dba984769",
         ".github/workflows/tests.yml": "e052ad3e7fa45a71df1c5e9a22681e271c9d0d56",
         "search/": "8ad4bb0e690b9d7ddb5c8a3be1c710bd1973f35b"
@@ -105,16 +105,16 @@
         "scripts/",
         "references/"
       ],
-      "code_commit": "cb518176a2571e842e8ecd0d917dbe8dbf4b5c1a",
+      "code_commit": "2e81193ccf4f963fb91387c8ba4e2cd8bacd3f30",
       "doc_type": "workflows",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-11-10T21:14:40Z",
+      "last_verified": "2026-11-11T01:28:49Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "80c4828c02c3f833794adb724644e5ba565fe5bb",
-        "scripts/": "199dfb0db7213e78e37da221b357f7bb7a392de8",
-        "references/": "1103061e22b8f12f8a790b7bbb98f5f87b6e610b"
+        "scripts/": "f4ea762f927339702dcc56b915f8f7160b19b177",
+        "references/": "ad2e1a564cd64afe32513fc2ec0a38648e67afb3"
       }
     },
     "docs/plans/2026-03-26-audit-report.md": {
@@ -785,13 +785,13 @@
       ],
       "code_oids": {
         "search/": "8ad4bb0e690b9d7ddb5c8a3be1c710bd1973f35b",
-        "scripts/search/": "4b80142bc821a8f7eeb7289934716cf2f6cef159"
+        "scripts/search/": "f089c4b59eacb6b5647805b4f0c818d6e4da9554"
       },
-      "code_commit": "74ce0e3a9fff18f8109010b36a5f5cd4a8dbad4c",
+      "code_commit": "2e81193ccf4f963fb91387c8ba4e2cd8bacd3f30",
       "doc_type": "guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-11-10T21:14:11Z",
+      "last_verified": "2026-11-11T01:28:49Z",
       "implementation": []
     },
     "docs/superpowers/specs/2026-10-20-doc-search-local-transformer-design.md": {
