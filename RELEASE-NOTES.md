@@ -1,5 +1,42 @@
 # Release Notes
 
+## v3.14.0 (2026-11-10)
+
+This release makes doc-search share one server per repository on a host. Before it, every client session ran its own server. Each server loaded the indexes of up to two worktrees, so a host running many sessions held many copies of the same data. Each session now runs a small proxy that forwards to one shared server. That server also unloads worktrees nobody has used for a while.
+
+### Upgrading from 3.13.x
+Nothing to do: the launcher, `.mcp.json` and the config are unchanged, and so is every tool's answer except a new `status` line.
+- **Opt out on one machine** with `DOC_SEARCH_SHARED=0`. Every session then runs its own server, as before.
+- **Cloud sessions** (`CLAUDE_CODE_REMOTE` set) keep a server of their own unless `DOC_SEARCH_SHARED=1`.
+- **Sessions started before a config edit** keep their server. New sessions get one for the new config.
+
+### Added
+- **One server per repository** (`references/search.md` → *Modes* → *One server per repository*).
+  - `serve` runs a proxy of about 15 MB. It finds the shared server's Unix socket, or starts the server, then forwards the session's stdio to it.
+  - Sessions share a server only when their own servers would behave the same. The key covers the launch worktree, the bytes of `docs/search/config.json`, doc-search's version and code, the Python environment, and the variables that change behaviour.
+  - Each session keeps its own default worktree (`DOC_SEARCH_CLIENT_CWD`).
+  - A server with no session for 600 s, and no build running, exits.
+  - When the server dies, the proxy answers the waiting calls with `doc-search: the shared server stopped; retry the call`, starts or finds another, and replays the MCP handshake. After three failed tries it runs the in-process server instead.
+  - `doc-search serve --in-process` runs the server in the session's own process.
+- **Idle unload.** A worktree no call has used for 900 s is dropped from memory, unless it is building, and the freed heap goes back to the OS. The next call loads it from semble's cache again.
+- **`status`** gains a `server:` line: `shared (pid N, K sessions)` or `in-process`.
+- **New environment variables:** `DOC_SEARCH_SHARED`, `DOC_SEARCH_MAX_WORKTREES` (default 3 shared, 2 in-process), `DOC_SEARCH_IDLE_UNLOAD_S` (default 900, `0` off), `DOC_SEARCH_DAEMON_IDLE_S` (default 600) and `DOC_SEARCH_RUNTIME_DIR`.
+
+### Measured
+On an Apple-silicon laptop (M1 Pro) with 16 GB, before the change, 17 doc-search servers held 17.6 GB, and swap filled. On a repository of 210,664 docs chunks and 152,853 code chunks, one worktree's two indexes cost 1.43 GB in a server.
+- One worktree, two in-process sessions: 3,127 MB. Three shared sessions: 1,593 MB in all.
+- One idle shared session: 1,525 MB, then 390 MB once its worktree was unloaded.
+- A 109-doc repository, six sessions over three worktrees: 1,720 MB in-process, 727 MB shared.
+
+### Security
+- **The shared server's socket** serves repository content to the user's own processes only. Its directory must belong to the user and be closed to others (mode 0700), and the socket is mode 0600.
+- **The shared server and its fallback** run as `python -P`, so a module at the repository's top can never shadow one of doc-search's.
+
+### Other
+- `search/scripts/measure_shared.py` sums the memory of N sessions in either mode, by hand.
+- The design is `docs/superpowers/specs/2026-11-10-doc-search-shared-server-design.md`.
+- Verified locally, since GitHub Actions does not run on this account. The seven suites passed under bash 5.x and `/bin/bash` 3.2 (15857 assertions each), and the writing suite under python3 3.13.3 and `/usr/bin/python3` 3.9.6. So did the doc-search pytest suite (903 passed, the 2 live tests skipped), `zizmor`, `dep-audit`, the self-install check, `gitleaks`, `check-version` and `claude plugin validate .`. In the full run on a loaded host, two timing-bound cases failed once: `add-entry` of 4,000 keys under `/bin/bash` (22 s against a 20 s budget) and the merge driver's signal-during-write case under bash 5.x. Neither script changed in this release. Each passed when re-run alone, on this branch and on the release base (`add-entry` 14 s and 16 s; merge driver 844 of 844 on both). `tag` waits for v3.14.0 to reach origin.
+
 ## v3.13.0 (2026-11-03)
 
 This release adds the writing rule and a lint for it. The rule asks that a text put first what its reader needs, explain every code, and keep sentences short. The lint counts what it can of that. Both are opt-in and on demand: nothing in this release calls the lint for you.

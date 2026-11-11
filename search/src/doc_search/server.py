@@ -12,10 +12,11 @@ Tools return text. Anything that cannot be answered is one line starting `doc-se
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Literal
@@ -80,6 +81,39 @@ STATUS_DESCRIPTION = (
 )
 
 
+SHARED_MAX_WORKTREES = 3  # a shared server serves every session of a repository
+ALONE_MAX_WORKTREES = 2  # a server per session
+IDLE_UNLOAD_S = 900.0
+
+
+def limits(shared: bool, env: Mapping[str, str] = os.environ) -> tuple[int, float]:
+    """The pool's worktree cap and its idle-unload seconds, from the environment (memory is the host's).
+
+    `DOC_SEARCH_MAX_WORKTREES` (default 3 for a shared server, 2 for a server of its own) and
+    `DOC_SEARCH_IDLE_UNLOAD_S` (default 900; 0 turns idle unload off). A value that is not a whole number
+    of worktrees >= 1, or seconds >= 0, keeps the default, with a warning.
+    """
+    cap = SHARED_MAX_WORKTREES if shared else ALONE_MAX_WORKTREES
+    idle = IDLE_UNLOAD_S
+    raw = env.get("DOC_SEARCH_MAX_WORKTREES", "").strip()
+    if raw:
+        if raw.isdigit() and int(raw) >= 1:
+            cap = int(raw)
+        else:
+            logger.warning("doc-search: DOC_SEARCH_MAX_WORKTREES=%r is not a count >= 1; using %d", raw, cap)
+    raw = env.get("DOC_SEARCH_IDLE_UNLOAD_S", "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = -1.0
+        if value >= 0 and value != float("inf"):
+            idle = value
+        else:
+            logger.warning("doc-search: DOC_SEARCH_IDLE_UNLOAD_S=%r is not seconds >= 0; using %g", raw, idle)
+    return cap, idle
+
+
 class _Refusal(Exception):
     """A request that gets a one-line answer instead of a result."""
 
@@ -105,6 +139,7 @@ class Runtime:
         warm: bool = True,
         fallback: bool = True,
         client_cwd: str | None = None,
+        shared: bool = False,
     ) -> None:
         self.repo: RepoInfo | None = None
         self.default: Path | None = None  # the worktree a call without `worktree` gets
@@ -115,6 +150,7 @@ class Runtime:
         self.tools: DocTools | None = None
         self.cloud: CloudLeg | DegradedLeg | None = None
         self.fixed: str | None = None
+        self.mode: Callable[[], str] = lambda: "in-process"  # the `server:` line of `status`; the daemon sets its own
         self._lock = threading.Lock()
         self._corpora: dict[Path, Corpus] = {}
 
@@ -140,7 +176,8 @@ class Runtime:
         if self.repo is None:
             return  # enabled, but there is no repository to search
         self.default, self.default_note = _default_worktree(self.repo, client_cwd)
-        self.pool = pool if pool is not None else IndexPool(self.cfg, fallback=fallback)
+        cap, idle = limits(shared)
+        self.pool = pool if pool is not None else IndexPool(self.cfg, max_worktrees=cap, fallback=fallback)
         # The same cloud leg serves `search` and `status`. It is built without touching the network; one that
         # cannot be built (no cloud extra, no project) is a leg that says so, never a crash.
         cloud = self.cloud = build_cloud_leg(self.cfg.cloud, corpus_for=self.corpus_for) if self.cfg.cloud else None
@@ -148,6 +185,8 @@ class Runtime:
         self.tools = DocTools(self.cfg, self.repo, self.pool, self.corpus_for, cloud=cloud, wait_s=wait_s)
         if warm:
             self.pool.get(self.default, wait_s=0)  # start the builds now; the first call finds them under way
+            if pool is None:
+                self.pool.start_reaper(idle)  # a server's own pool (not a test's); the daemon starts its own
 
     # -- shared by the tools ----------------------------------------------------------------
 
@@ -158,6 +197,18 @@ class Runtime:
             if corpus is None:
                 corpus = self._corpora[worktree] = Corpus(worktree, self.cfg, DocIndex(worktree))
             return corpus
+
+    def view(self, client_cwd: str | None) -> Runtime:
+        """This runtime for one more client: the same config, pool, searcher, tools and corpora, its own default.
+
+        A shared server gives every session a view, so each keeps the default worktree its own server would
+        have chosen (`client_cwd`, as `DOC_SEARCH_CLIENT_CWD`). Starts the new default's builds, as `warm` does.
+        """
+        other = copy.copy(self)  # shallow: everything but the default is shared, the corpora's lock included
+        if self.repo is not None and self.pool is not None and self.fixed is None:
+            other.default, other.default_note = _default_worktree(self.repo, client_cwd)
+            self.pool.get(other.default, wait_s=0)
+        return other
 
     def worktree(self, requested: str | None) -> Path:
         """The worktree a call names (the default one when it names none), or a refusal line."""
@@ -211,7 +262,7 @@ class Runtime:
             tree, note = self.repo.top, flat(err)
         except GitError:
             pass  # git cannot list the worktrees now; status reads the default as it was chosen
-        return self.tools.status(tree, warm=warm, default_note=note)
+        return self.tools.status(tree, warm=warm, default_note=note, mode=self.mode())
 
 
 def _default_worktree(repo: RepoInfo, client_cwd: str | None) -> tuple[Path, str | None]:
@@ -241,7 +292,11 @@ def build_server(
     build before it answers that the index is building (design section 7: 20 s). `client_cwd` is the
     MCP client's working directory; its worktree becomes the default (`Runtime`).
     """
-    rt = Runtime(cwd, pool, wait_s, client_cwd=client_cwd)
+    return build_server_for(Runtime(cwd, pool, wait_s, client_cwd=client_cwd))
+
+
+def build_server_for(rt: Runtime) -> MCPServer:
+    """The MCP server over a runtime: the in-process server's own, or one session's view of a shared one."""
     server = MCPServer("doc-search", version=__version__, instructions=INSTRUCTIONS)
 
     @server.tool(name="search", description=SEARCH_DESCRIPTION)

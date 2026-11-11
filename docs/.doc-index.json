@@ -1,11 +1,11 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-11-06T18:28:44Z",
+  "generated_at": "2026-11-11T01:28:49Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
-      "content_hash": "sha256:fe3b302834b65e5bdecdbd2b11ef720d2433c714bca3d1959e4a5b0858243c6b",
+      "content_hash": "sha256:cb0b04358a9eba7ff4d6b598afbda78ce31ae6c959fc8a68da91228f408d6e8d",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/",
@@ -14,23 +14,23 @@
         ".github/workflows/tests.yml",
         "search/"
       ],
-      "code_commit": "c5cfd11684fe6b28f5a01ecb35e947de69cb0665",
+      "code_commit": "2e81193ccf4f963fb91387c8ba4e2cd8bacd3f30",
       "doc_type": "architecture",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-11-06T18:28:44Z",
+      "last_verified": "2026-11-11T01:28:49Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "80c4828c02c3f833794adb724644e5ba565fe5bb",
-        "scripts/": "199dfb0db7213e78e37da221b357f7bb7a392de8",
-        "references/": "66c20e0981f83581eb9905cae9ea0b40f91ead53",
+        "scripts/": "f4ea762f927339702dcc56b915f8f7160b19b177",
+        "references/": "ad2e1a564cd64afe32513fc2ec0a38648e67afb3",
         "evals/": "f641eb6ea9edac748d1dad32db58ab3dba984769",
         ".github/workflows/tests.yml": "e052ad3e7fa45a71df1c5e9a22681e271c9d0d56",
-        "search/": "2e0c0e02b187d5276156878f85ca1379ee155d81"
+        "search/": "8ad4bb0e690b9d7ddb5c8a3be1c710bd1973f35b"
       }
     },
     "docs/codebase-guide.md": {
-      "content_hash": "sha256:f67d957bf85cea670718dca9d4c099fd71c4859aadc00fcd1853d11ba4a3a703",
+      "content_hash": "sha256:284ef2296262bc6bcbac4bd47ea8cb0133749899d91e0fed53dc32e216e2e5fd",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/",
@@ -39,19 +39,19 @@
         ".github/workflows/tests.yml",
         "search/"
       ],
-      "code_commit": "c5cfd11684fe6b28f5a01ecb35e947de69cb0665",
+      "code_commit": "2e81193ccf4f963fb91387c8ba4e2cd8bacd3f30",
       "doc_type": "codebase-guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-11-06T18:28:44Z",
+      "last_verified": "2026-11-11T01:28:49Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "80c4828c02c3f833794adb724644e5ba565fe5bb",
-        "scripts/": "199dfb0db7213e78e37da221b357f7bb7a392de8",
-        "references/": "66c20e0981f83581eb9905cae9ea0b40f91ead53",
+        "scripts/": "f4ea762f927339702dcc56b915f8f7160b19b177",
+        "references/": "ad2e1a564cd64afe32513fc2ec0a38648e67afb3",
         "evals/": "f641eb6ea9edac748d1dad32db58ab3dba984769",
         ".github/workflows/tests.yml": "e052ad3e7fa45a71df1c5e9a22681e271c9d0d56",
-        "search/": "2e0c0e02b187d5276156878f85ca1379ee155d81"
+        "search/": "8ad4bb0e690b9d7ddb5c8a3be1c710bd1973f35b"
       }
     },
     "docs/conventions.md": {
@@ -99,22 +99,22 @@
       }
     },
     "docs/workflows/doc-superpowers.md": {
-      "content_hash": "sha256:85ea311cbd56a07edd9feb449021ed2497d4213bc6ca842c825351b02e1cc368",
+      "content_hash": "sha256:70d93978672a0e2c3235fae0314e1447b0455c49fea5166deaee17bb3b1b4b33",
       "code_refs": [
         "skills/doc-superpowers/SKILL.md",
         "scripts/",
         "references/"
       ],
-      "code_commit": "c5cfd11684fe6b28f5a01ecb35e947de69cb0665",
+      "code_commit": "2e81193ccf4f963fb91387c8ba4e2cd8bacd3f30",
       "doc_type": "workflows",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-11-06T18:28:44Z",
+      "last_verified": "2026-11-11T01:28:49Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "80c4828c02c3f833794adb724644e5ba565fe5bb",
-        "scripts/": "199dfb0db7213e78e37da221b357f7bb7a392de8",
-        "references/": "66c20e0981f83581eb9905cae9ea0b40f91ead53"
+        "scripts/": "f4ea762f927339702dcc56b915f8f7160b19b177",
+        "references/": "ad2e1a564cd64afe32513fc2ec0a38648e67afb3"
       }
     },
     "docs/plans/2026-03-26-audit-report.md": {
@@ -778,20 +778,20 @@
       "last_verified": null
     },
     "references/search.md": {
-      "content_hash": "sha256:7ba8ba479bbeef26d515db7595f3e796fc551d7713e374a7e4eb3b31db49da56",
+      "content_hash": "sha256:bc96eccb1c339cf2ef6d5b3419242b21b4c3a9754fbdb72e6ee6596f89aebc43",
       "code_refs": [
         "search/",
         "scripts/search/"
       ],
       "code_oids": {
-        "search/": "2e0c0e02b187d5276156878f85ca1379ee155d81",
-        "scripts/search/": "4b80142bc821a8f7eeb7289934716cf2f6cef159"
+        "search/": "8ad4bb0e690b9d7ddb5c8a3be1c710bd1973f35b",
+        "scripts/search/": "f089c4b59eacb6b5647805b4f0c818d6e4da9554"
       },
-      "code_commit": "2d0f31382a0c9e49792376a703387760b64b5c82",
+      "code_commit": "2e81193ccf4f963fb91387c8ba4e2cd8bacd3f30",
       "doc_type": "guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-11-04T21:34:49Z",
+      "last_verified": "2026-11-11T01:28:49Z",
       "implementation": []
     },
     "docs/superpowers/specs/2026-10-20-doc-search-local-transformer-design.md": {
