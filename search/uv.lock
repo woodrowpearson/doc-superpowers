@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
@@ -451,7 +451,7 @@ requires-dist = [
     { name = "onnxruntime", marker = "(platform_machine != 'x86_64' and extra == 'local-transformer') or (sys_platform != 'darwin' and extra == 'local-transformer')", specifier = ">=1.24" },
     { name = "pathspec" },
     { name = "protobuf", marker = "extra == 'local-transformer'" },
-    { name = "semble", specifier = ">=0.7,<0.8" },
+    { name = "semble", specifier = ">=0.7.2,<0.8" },
     { name = "tokenizers", marker = "extra == 'local-transformer'" },
 ]
 provides-extras = ["cloud", "local-transformer"]
@@ -715,8 +715,8 @@ name = "httpcore2"
 version = "2.15.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
-    { name = "truststore", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
+    { name = "h11" },
+    { name = "truststore" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c2/a9/11bc39967bb9dfaab0981ab4d49f519818acbee662a7e76d06813319c838/httpcore2-2.15.1.tar.gz", hash = "sha256:a94b6b3e6260e1a3f035915408d3dcd7dc8e844c2b544b642e227cf98a747af0", size = 69859, upload-time = "2026-10-19T20:14:23.824Z" }
 wheels = [
@@ -1210,11 +1210,11 @@ resolution-markers = [
     "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
 ]
 dependencies = [
-    { name = "flatbuffers", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'" },
-    { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'" },
-    { name = "packaging", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
-    { name = "protobuf", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
+    { name = "flatbuffers" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "packaging" },
+    { name = "protobuf" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9f/a8/3c23a8f75f93122d2b3410bfb74d06d0f8da4ac663185f91866b03f7da1b/onnxruntime-1.23.2-cp311-cp311-macosx_13_0_x86_64.whl", hash = "sha256:87d8b6eaf0fbeb6835a60a4265fde7a3b60157cf1b2764773ac47237b4d48612", size = 19153857, upload-time = "2025-10-22T03:46:37.578Z" },
@@ -1233,11 +1233,11 @@ resolution-markers = [
     "(python_full_version < '3.12' and platform_machine != 'x86_64') or (python_full_version < '3.12' and sys_platform != 'darwin')",
 ]
 dependencies = [
-    { name = "flatbuffers", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.12' and platform_machine != 'x86_64') or (python_full_version < '3.12' and sys_platform != 'darwin')" },
-    { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and platform_machine != 'x86_64') or (python_full_version >= '3.12' and sys_platform != 'darwin')" },
-    { name = "packaging", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
-    { name = "protobuf", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
+    { name = "flatbuffers" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "packaging" },
+    { name = "protobuf" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a7/e7/61b2768393646bd12e31eeb71958193f4e02c98c4980cf9289d19bbb4a8f/onnxruntime-1.31.0-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:cbf1a7f6470ddfe9dbc781966af8ce4a10e1858d75a93f93cc6b9367c9587870", size = 20871717, upload-time = "2026-10-09T04:18:03.504Z" },
@@ -1869,7 +1869,7 @@ wheels = [
 
 [[package]]
 name = "semble"
-version = "0.7.0"
+version = "0.7.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "model2vec" },
@@ -1881,9 +1881,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "vicinity" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b1/36/322a4802521f6a84b1ac5ed1dbd539129c439c78cfaaef1897f79ad8ba1a/semble-0.7.0.tar.gz", hash = "sha256:83a2bfeea20854d1354cfa95ed83ad580fac5dcf8ccdbd4f987da216bf5f694f", size = 121881, upload-time = "2026-10-16T12:16:20.02Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b7/74/2a5df409d0571759de0146e6aa86d31cdff91ca037094ab1af8c9beaf541/semble-0.7.2.tar.gz", hash = "sha256:cf1502914599e631268e1bd0aca9f2d5d31dcdc5f8dd83dbc62cf20978ea28ec", size = 125326, upload-time = "2026-11-03T08:39:34.267Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/af/10/00ed65627f5050d006ea01b363f709bdb208d037176bb2fb8e7044df5c12/semble-0.7.0-py3-none-any.whl", hash = "sha256:06c568d5a06f3a5352f22357d5a7ab17525d4404fddde8f1ae1405e3e87ac4a7", size = 91636, upload-time = "2026-10-16T12:16:18.518Z" },
+    { url = "https://files.pythonhosted.org/packages/4d/a0/c61e106067b84da4edcc79592365fa81d630740cfa6c52383fc14a9dcc35/semble-0.7.2-py3-none-any.whl", hash = "sha256:e0cb9c8ea303f38d7390e5f441fc9c05dbc1eeae6e2afa20e2ab8bef10942e2d", size = 94049, upload-time = "2026-11-03T08:39:32.794Z" },
 ]
 
 [[package]]
@@ -2076,8 +2076,8 @@ name = "uvicorn"
 version = "0.54.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "click", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
-    { name = "h11", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
+    { name = "click" },
+    { name = "h11" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/da/34/30e9280707135d2cfc589dfff3cb796bd07a3aeb1a3e415ba09dd89d7bb4/uvicorn-0.54.0.tar.gz", hash = "sha256:a2e33cbfaa0306f8e6b0c13e0cb89d7d7a2da3e62b90c66e18c33d9807b28620", size = 112283, upload-time = "2026-09-25T06:52:37.601Z" }
 wheels = [
