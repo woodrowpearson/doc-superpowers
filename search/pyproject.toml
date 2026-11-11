@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Opt-in MCP server for doc-superpowers: semble-backed search over a repository's docs and code, with doc-aware metadata."
 requires-python = ">=3.11"
 dependencies = [
-    "semble>=0.7,<0.8",
+    "semble>=0.7.2,<0.8",
     "mcp>=2.3,<3",
     "pathspec",
     # mcp 2.3 imports cryptography in mcp.server.request_state but declares it only through
