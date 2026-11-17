@@ -6038,6 +6038,21 @@ srl_run() {
     /bin/sh "$SCRIPT_DIR/search/launch.sh" "$@" 2>&1) || RUN_RC=$?
 }
 
+# srl_seen <root> <bin> <verb> [VAR=value …]: run the launcher's <verb> (its
+# words split: "gate session-start") with <bin>'s uv in front, <root> as
+# DOC_SUPERPOWERS_ROOT and stdin from /dev/null. The four uv variables the
+# launcher's header names are unset unless given, whatever the shell running
+# this suite holds. Sets RUN_RC and RUN_OUT, as srl_run does.
+srl_seen() {
+  local root=$1 bin=$2 verb=$3
+  shift 3
+  RUN_RC=0
+  # shellcheck disable=SC2086  # the verb and its arguments, split on purpose
+  RUN_OUT=$(env -u UV_PROJECT_ENVIRONMENT -u VIRTUAL_ENV -u UV_WORKING_DIR -u UV_OFFLINE \
+    DOC_SUPERPOWERS_ROOT="$root" CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= PATH="$bin:$REAL_PATH" ${1+"$@"} \
+    /bin/sh "$SCRIPT_DIR/search/launch.sh" $verb </dev/null 2>&1) || RUN_RC=$?
+}
+
 test_launcher_resolution_order() {
   echo "test: launcher: root resolution — DOC_SUPERPOWERS_ROOT, then this repository when it is doc-superpowers, then the newest numeric version in the plugin cache; none: exit 2"
   setup
@@ -6303,6 +6318,48 @@ test_launcher_env_hook() {
   assert_eq "0" "$RUN_RC" "an unparseable hook: exit 0"
   assert_eq "doc-search: ignoring the env hook $hookdir/env.sh (it does not parse)
 uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_OUT" "…one stderr line naming it, and nothing of it is applied"
+  teardown
+}
+
+test_launcher_callers_uv_settings() {
+  echo "test: launcher: a caller's uv location settings — UV_PROJECT_ENVIRONMENT, VIRTUAL_ENV and UV_WORKING_DIR are unset before the env hook is read, so they never reach uv; the env hook can set them for doc-search; UV_OFFLINE is neither set nor cleared"
+  setup
+  local envroot bin hook
+  envroot=$(harness_mktemp_d uvroot)
+  srl_root "$envroot"
+  hook="$envroot/hook.sh"
+  # A uv that reports the four variables as it received them ("unset" when unset).
+  bin=$(harness_mktemp_d uvseen)
+  printf '#!/bin/sh\nprintf "env=%%s venv=%%s cwd=%%s offline=%%s\\n" "${UV_PROJECT_ENVIRONMENT-unset}" "${VIRTUAL_ENV-unset}" "${UV_WORKING_DIR-unset}" "${UV_OFFLINE-unset}"\n' > "$bin/uv"
+  chmod +x "$bin/uv"
+  srl_seen "$envroot" "$bin" serve
+  assert_eq "0:env=unset venv=unset cwd=unset offline=unset" "$RUN_RC:$RUN_OUT" "a caller that sets none: uv gets none, and no UV_OFFLINE is added"
+  # Each is the caller's, for its own project: it does not reach doc-search's uv.
+  srl_seen "$envroot" "$bin" serve UV_PROJECT_ENVIRONMENT="$envroot/the-callers-env"
+  assert_eq "env=unset venv=unset cwd=unset offline=unset" "$RUN_OUT" "a caller's UV_PROJECT_ENVIRONMENT does not reach uv (uv would build doc-search's environment there)"
+  srl_seen "$envroot" "$bin" serve VIRTUAL_ENV="$envroot/the-callers-venv"
+  assert_eq "env=unset venv=unset cwd=unset offline=unset" "$RUN_OUT" "a caller's VIRTUAL_ENV does not reach uv"
+  srl_seen "$envroot" "$bin" serve UV_WORKING_DIR="$envroot/the-callers-dir"
+  assert_eq "env=unset venv=unset cwd=unset offline=unset" "$RUN_OUT" "a caller's UV_WORKING_DIR does not reach uv (doc-search would run in that directory)"
+  srl_seen "$envroot" "$bin" serve UV_PROJECT_ENVIRONMENT=/a VIRTUAL_ENV=/b UV_WORKING_DIR=/c
+  assert_eq "0:env=unset venv=unset cwd=unset offline=unset" "$RUN_RC:$RUN_OUT" "all three at once: none reaches uv, exit 0"
+  # They are unset before the env hook is read, so the hook can set one for doc-search.
+  printf "UV_PROJECT_ENVIRONMENT='%s'\nexport UV_PROJECT_ENVIRONMENT\n" "$envroot/chosen-for-doc-search" > "$hook"
+  srl_seen "$envroot" "$bin" serve DOC_SEARCH_ENV_FILE="$hook" UV_PROJECT_ENVIRONMENT="$envroot/the-callers-env"
+  assert_eq "env=$envroot/chosen-for-doc-search venv=unset cwd=unset offline=unset" "$RUN_OUT" "the env hook's UV_PROJECT_ENVIRONMENT reaches uv, not the caller's"
+  # UV_OFFLINE: the caller's value, or the env hook's, as it is; never one of the launcher's.
+  srl_seen "$envroot" "$bin" serve UV_OFFLINE=1
+  assert_eq "env=unset venv=unset cwd=unset offline=1" "$RUN_OUT" "a caller's UV_OFFLINE=1 reaches uv"
+  srl_seen "$envroot" "$bin" serve UV_OFFLINE=0
+  assert_eq "env=unset venv=unset cwd=unset offline=0" "$RUN_OUT" "a caller's UV_OFFLINE=0 reaches uv unchanged"
+  printf 'UV_OFFLINE=1\nexport UV_OFFLINE\n' > "$hook"
+  srl_seen "$envroot" "$bin" serve DOC_SEARCH_ENV_FILE="$hook"
+  assert_eq "env=unset venv=unset cwd=unset offline=1" "$RUN_OUT" "the env hook's UV_OFFLINE reaches uv when the caller sets none"
+  # check and gate reach uv by the same last line, in a work tree with a gate-era root.
+  srl_seen "$envroot" "$bin" check UV_PROJECT_ENVIRONMENT=/a VIRTUAL_ENV=/b UV_WORKING_DIR=/c
+  assert_eq "0:env=unset venv=unset cwd=unset offline=unset" "$RUN_RC:$RUN_OUT" "check: none of the three reaches uv"
+  srl_seen "$envroot" "$bin" "gate session-start" UV_PROJECT_ENVIRONMENT=/a VIRTUAL_ENV=/b UV_WORKING_DIR=/c
+  assert_eq "0:env=unset venv=unset cwd=unset offline=unset" "$RUN_RC:$RUN_OUT" "gate session-start: none of the three reaches uv"
   teardown
 }
 
@@ -7859,6 +7916,7 @@ test_launcher_transformer_extra
 test_launcher_without_uv
 test_launcher_is_posix_sh
 test_launcher_env_hook
+test_launcher_callers_uv_settings
 test_launcher_client_cwd
 test_launcher_gate_opt_out
 test_launcher_check_gate_outside_a_work_tree
