@@ -46,6 +46,14 @@
 # to stderr (stdout is the MCP stream). It runs in this shell: it should only
 # set variables, and an `exit` in it ends the launcher.
 #
+# A caller's uv settings: UV_PROJECT_ENVIRONMENT, VIRTUAL_ENV and UV_WORKING_DIR
+# are unset before the env hook is read. A caller sets them for its own
+# project. Left in place, the first makes uv build doc-search's environment
+# in the caller's folder, the second makes uv warn at every launch, and the
+# last runs doc-search in another directory. The env hook may set them again,
+# for doc-search alone. UV_OFFLINE is neither set nor cleared: uv reads the
+# caller's value, or the env hook's.
+#
 # The client's working directory (serve only): an MCP client may start the
 # server outside the worktree its session works in. The Claude desktop app, for
 # one, starts project servers in the main checkout (--project-config-root)
@@ -357,6 +365,9 @@ answer_check_gate() {
   fi
   answer_unrunnable "$UV_MISSING" "install uv"
 }
+
+# A caller's uv location settings are for its own project (see the header).
+unset UV_PROJECT_ENVIRONMENT VIRTUAL_ENV UV_WORKING_DIR
 
 ENV_HOOK=${DOC_SEARCH_ENV_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/doc-search/env.sh}
 case $ENV_HOOK in
