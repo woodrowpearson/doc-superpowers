@@ -1,5 +1,24 @@
 # Release Notes
 
+## v3.14.1 (2026-11-16)
+
+This patch release stops a caller's `uv` settings from moving doc-search's environment. The launcher runs doc-search through `uv`, and `uv` reads settings from the environment as well as from its command line. A shell that exports `UV_PROJECT_ENVIRONMENT` for its own project therefore made the launcher's `uv` treat that folder as doc-search's environment and build it there.
+
+### Upgrading from 3.14.0
+- **`hooks install --search` users:** `scripts/search/launch.sh` changed, so the committed `.claude/doc-superpowers/search-mcp.sh` reads `outdated` in `hooks status --search`. Re-run `hooks install --search` and commit the launcher: the committed copy is where the fix runs.
+- **A host that set one of the three variables for doc-search on purpose** now sets it in the env hook (`~/.config/doc-search/env.sh`, or the file `DOC_SEARCH_ENV_FILE` names). The launcher no longer reads it from the calling shell.
+
+### Fixes
+- **The launcher drops a caller's `uv` location settings.** `scripts/search/launch.sh` unsets `UV_PROJECT_ENVIRONMENT`, `VIRTUAL_ENV` and `UV_WORKING_DIR` before it reads the per-user env hook, so the hook can still set one for doc-search alone.
+  - `UV_PROJECT_ENVIRONMENT` made `uv` build doc-search's environment in the caller's folder. Measured with uv 0.10.9 in an empty folder: 52 packages, 162 MB, and `check` still exited 0.
+  - `UV_WORKING_DIR` ran doc-search in another directory, so a search or a readiness check acted on that directory.
+  - `VIRTUAL_ENV` moved nothing and made `uv` warn at every launch.
+
+### Other
+- **`UV_OFFLINE` is unchanged, and now documented:** the launcher neither sets nor clears it. A host that must stay off the package index sets `UV_OFFLINE=1` in the env hook (`references/search.md` → *Configuration* → *Environment*).
+- Variables that change what `uv` installs (`UV_PYTHON`, `UV_NO_SYNC`, `UV_LOCKED`) still reach the launcher's `uv`. They can only disturb doc-search's own environment, and none was measured.
+- Verified locally, since GitHub Actions does not run on this account. Under bash 5.x and `/bin/bash` 3.2: `test-doc-tools.sh` 1797, `test-hooks.sh` 4330, `test-spec-status-model.sh` 1067, `test-doc-pr-release.sh` 696, `test-merge-driver.sh` 844, `test-spec-claims.sh` 3269 and `test-ledger.sh` 3865 assertions passed, none failed. The writing suite passed under python3 3.13.3 and `/usr/bin/python3` 3.9.6, and the doc-search pytest suite passed (903, the 2 live tests skipped). So did `self-install`, `zizmor`, `gitleaks`, `check-version` and `claude plugin validate .`. Not run: `dep-audit`, which needs the network; `search/uv.lock` is unchanged since 3.14.0.
+
 ## v3.14.0 (2026-11-10)
 
 This release makes doc-search share one server per repository on a host. Before it, every client session ran its own server. Each server loaded the indexes of up to two worktrees, so a host running many sessions held many copies of the same data. Each session now runs a small proxy that forwards to one shared server. That server also unloads worktrees nobody has used for a while.
