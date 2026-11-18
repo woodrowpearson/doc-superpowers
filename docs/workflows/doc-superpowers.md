@@ -315,7 +315,7 @@ Update is the **write counterpart** to audit's read-only analysis. It consumes a
    - **Multi-actor sequence diagram** — required if the skill dispatches sub-agents
    - **State diagram** — internals depth only, and only if state tracking is detected
 4. Verify diagram accuracy against current code
-5. Render on this machine with `doc-tools.sh diagram render`, into the co-located `diagrams/` directories the image links name: `docs/architecture/diagrams/` for architecture diagrams, `docs/workflows/diagrams/` for workflow diagrams. Keep each diagram's source in the doc, in the `<details>` block under its PNG. The renderer is pinned and local: no renderer service, no URL output. Where it cannot run (exit 2), keep the source and report the PNGs left unrendered
+5. Render on this machine with `doc-tools.sh diagram render`, into the co-located `diagrams/` directories the image links name: `docs/architecture/diagrams/` for architecture diagrams, `docs/workflows/diagrams/` for workflow diagrams. Keep each diagram's source in the doc, in the `<details>` block under its PNG. The look comes from one Mermaid config file: `--config`, else `DOC_SUPERPOWERS_DIAGRAM_CONFIG`, else `docs/diagrams/config.json`; a block's front matter overrides it, and the security level stays strict. The renderer is pinned and local: no renderer service, no URL output. Where it cannot run (exit 2), keep the source and report the PNGs left unrendered
 6. Flag missing diagrams as P2 Incomplete, and flag diverged ones (the code has moved on)
 
 ## Process: `sync` — Sync Doc Index

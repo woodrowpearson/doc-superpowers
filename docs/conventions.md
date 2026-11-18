@@ -312,6 +312,8 @@ Diagrams live in `diagrams/` subdirectories within their parent section, not in 
 - `docs/architecture/diagrams/c4-context.png` (not `docs/diagrams/c4-context.png`)
 - `docs/workflows/diagrams/sequence-audit.png` (not `docs/diagrams/sequence-audit.png`)
 
+`docs/diagrams/` holds no diagram. Its one file, `docs/diagrams/config.json` when a project keeps one, is the Mermaid config `doc-tools.sh diagram render` reads for every diagram's look.
+
 ## Hooks Conventions
 
 ### Tier Options

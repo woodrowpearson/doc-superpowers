@@ -626,21 +626,25 @@ Client hook (SessionStart / UserPromptSubmit / PreToolUse) → sh "$(git rev-par
 The design is `docs/superpowers/specs/2026-11-17-local-diagram-rendering-design.md`. Exit codes: 0 done, 1 a diagram failed, 2 could not run, 3 usage.
 
 ```
-doc-tools.sh diagram list|render [<doc>...]  (or doc-superpowers tools diagram …)
+doc-tools.sh diagram list|render [--config <file>] [<doc>...]  (or doc-superpowers tools diagram …)
   → git, jq, the work tree's top level (else exit 2); the docs named, or every docs/**/*.md
   → _dg_scan: one awk pass per doc (_DG_AWK): a mermaid fence right after <details> and
     <summary>Mermaid source</summary>, outside any other fence; the image link above the slot
     → _dg_png resolves it from the doc's directory (null: none, a URL, outside the repository);
     ELK from the front matter, an init directive or flowchart-elk
   list → the blocks as a JSON array {doc, line, png, elk}
-  render → no blocks: exit 0, needing nothing
+  render → _dg_config: --config, else DOC_SUPERPOWERS_DIAGRAM_CONFIG, else docs/diagrams/config.json
+      if present, else none; missing (when named), not JSON or not an object: exit 3, naming it
+    → no blocks: exit 0, needing nothing
     → scripts/diagram/ beside doc-tools.sh (a vendored copy has none: exit 2); node ≥ 18 (exit 2)
     → _dg_install: <cache>/<sha256 of package-lock.json>/node_modules, else npm ci --ignore-scripts
       in a fresh directory renamed into place on success (exit 2 on failure, nothing left)
     → _dg_browser: DOC_SUPERPOWERS_CHROME, system Chrome/Chromium, browser.mjs path (exit 2,
       naming install-browser)
     → a job per block with a PNG (one without fails), then node render.mjs --browser --modules --jobs
-      (one page per job; every request but file:, data:, about: aborted and failing its job)
+      [--config] (one page per job; every request but file:, data:, about: aborted and failing its
+      job; the config deep-merged into mermaid.initialize, securityLevel forced to strict and
+      Mermaid's default secure keys kept, so a block's front matter overrides the file but never the level)
     → each ok job whose file is a PNG is moved onto its PNG; a failed one is deleted, the old PNG kept
 doc-tools.sh diagram install-browser
   → the same install, then node browser.mjs install <node_modules> <cache>/browsers: prints the path

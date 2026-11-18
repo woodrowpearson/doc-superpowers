@@ -2,6 +2,7 @@
 // `doc-tools.sh diagram render` (scripts/doc-tools.sh, "Diagrams").
 //
 //   node render.mjs --browser <chrome> --modules <node_modules> --jobs <jobs.json>
+//                   [--config <mermaid-config.json>]
 //
 // <jobs.json> is an array of {id, doc, line, png, elk, source, out}. For each
 // job this opens a page in one headless browser, renders `source` with the
@@ -11,6 +12,16 @@
 //   {"id": 0, "ok": true, "elk": false}
 //   {"id": 1, "ok": false, "error": "...", "blocked": ["https://..."]}
 // The doc-tools.sh side moves `out` onto the PNG only for an ok job.
+//
+// --config names a JSON object of Mermaid settings (theme, themeVariables,
+// themeCSS, flowchart, elk, ...). It is deep-merged over this renderer's own
+// start-up settings and handed to mermaid.initialize, so a block's front
+// matter or init directive still overrides it. Two keys are never taken from
+// it: securityLevel stays "strict", and `secure` (the keys a block may not
+// set) stays Mermaid's default, so no block can loosen the level either.
+//
+// Test seam: with DOC_TOOLS_DIAGRAM_SVG_DIR set, each rendered SVG is also
+// written there, named after its PNG (a.png -> a.svg).
 //
 // Nothing leaves the machine: every request a page makes to anything but a
 // file:, data: or about: URL is aborted, and a job whose page made one fails
@@ -42,8 +53,8 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i];
     const value = argv[i + 1];
-    if (!['--browser', '--modules', '--jobs'].includes(key) || value === undefined) {
-      fail(`usage: node render.mjs --browser <chrome> --modules <node_modules> --jobs <jobs.json> (got ${JSON.stringify(key)})`);
+    if (!['--browser', '--modules', '--jobs', '--config'].includes(key) || value === undefined) {
+      fail(`usage: node render.mjs --browser <chrome> --modules <node_modules> --jobs <jobs.json> [--config <file>] (got ${JSON.stringify(key)})`);
     }
     args[key.slice(2)] = value;
   }
@@ -61,6 +72,37 @@ try {
   fail(`cannot read the job file ${args.jobs}: ${e.message}`);
 }
 if (!Array.isArray(jobs)) fail('the job file is not a JSON array');
+
+function isObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+// deepMerge(base, over): over's keys win; objects merge key by key, anything
+// else (arrays included) is replaced.
+function deepMerge(base, over) {
+  const out = { ...base };
+  for (const [k, v] of Object.entries(over)) {
+    out[k] = isObject(v) && isObject(out[k]) ? deepMerge(out[k], v) : v;
+  }
+  return out;
+}
+
+// c4.wrap false: the setting every hand render before this renderer used.
+let mermaidConfig = { startOnLoad: false, securityLevel: 'strict', c4: { wrap: false } };
+if (args.config) {
+  let file;
+  try {
+    file = JSON.parse(fs.readFileSync(args.config, 'utf8'));
+  } catch (e) {
+    fail(`cannot read the Mermaid config ${args.config}: ${e.message}`);
+  }
+  if (!isObject(file)) fail(`the Mermaid config ${args.config} is not a JSON object`);
+  mermaidConfig = deepMerge(mermaidConfig, file);
+}
+mermaidConfig.startOnLoad = false;
+mermaidConfig.securityLevel = 'strict';
+delete mermaidConfig.secure;
+const svgDir = process.env.DOC_TOOLS_DIAGRAM_SVG_DIR || '';
 
 const mermaidFile = path.join(modules, 'mermaid', 'dist', 'mermaid.esm.min.mjs');
 const elkFile = path.join(modules, '@mermaid-js', 'layout-elk', 'dist', 'mermaid-layout-elk.esm.min.mjs');
@@ -119,14 +161,13 @@ async function renderJob(job) {
     });
     await page.setViewport({ width: WIDTH, height: 800, deviceScaleFactor: SCALE });
     await page.goto(pathToFileURL(pageFile).href, { waitUntil: 'load' });
-    const result = await page.evaluate(async (mermaidUrl, elkUrl, source, elk) => {
+    const result = await page.evaluate(async (mermaidUrl, elkUrl, source, elk, config) => {
       const { default: mermaid } = await import(mermaidUrl);
       if (elk) {
         const { default: layouts } = await import(elkUrl);
         mermaid.registerLayoutLoaders(layouts);
       }
-      // c4.wrap false: the setting every hand render before this renderer used.
-      mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', c4: { wrap: false } });
+      mermaid.initialize(config);
       try {
         const { svg } = await mermaid.render('diagram', source);
         const container = document.getElementById('container');
@@ -136,11 +177,11 @@ async function renderJob(job) {
           img.complete ? null : new Promise((resolve) => { img.onload = resolve; img.onerror = resolve; })));
         await document.fonts.ready;
         const box = container.querySelector('svg').getBoundingClientRect();
-        return { ok: true, x: box.left, y: box.top, width: box.width, height: box.height };
+        return { ok: true, svg, x: box.left, y: box.top, width: box.width, height: box.height };
       } catch (e) {
         return { ok: false, error: String((e && e.message) || e) };
       }
-    }, pathToFileURL(mermaidFile).href, pathToFileURL(elkFile).href, job.source, Boolean(job.elk));
+    }, pathToFileURL(mermaidFile).href, pathToFileURL(elkFile).href, job.source, Boolean(job.elk), mermaidConfig);
     if (!result.ok) return { id: job.id, ok: false, error: result.error, blocked };
     if (!(result.width > 0 && result.height > 0)) {
       return { id: job.id, ok: false, error: 'the diagram rendered empty', blocked };
@@ -155,6 +196,10 @@ async function renderJob(job) {
     // viewport would be cut.
     await page.setViewport({ width: WIDTH, height: Math.max(800, clip.y + clip.height + 8), deviceScaleFactor: SCALE });
     await page.screenshot({ path: job.out, type: 'png', clip, omitBackground: false });
+    if (svgDir) {
+      fs.mkdirSync(svgDir, { recursive: true });
+      fs.writeFileSync(path.join(svgDir, path.basename(String(job.png), '.png') + '.svg'), result.svg);
+    }
     if (blocked.length > 0) {
       return { id: job.id, ok: false, error: 'the page requested an outside URL, which was refused', blocked };
     }

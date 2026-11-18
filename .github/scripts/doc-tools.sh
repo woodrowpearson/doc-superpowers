@@ -3120,13 +3120,20 @@ diagram list|cmd_diagram_list|none|
   layout: elk. Default: every Markdown file under docs/. Exit 0 listed, 2
   could not run (no git, jq or work tree), 3 usage (a doc that is not a
   file).
-diagram render|cmd_diagram_render|none|
-  [<doc>...]
+diagram render|cmd_diagram_render|none|config=
+  [--config <file>] [<doc>...]
   Render each block diagram list finds to its PNG, on this machine: Node
   18 or later runs scripts/diagram/render.mjs in a headless Chrome page
   that aborts every request but file:, data: and about:. Width 1248,
   device scale 2, white background; ELK is registered for the blocks that
-  ask for it. A PNG is replaced only when its render succeeded. The pinned
+  ask for it. The look comes from one Mermaid config file (a JSON object:
+  theme, themeVariables, themeCSS, flowchart, elk and the rest), merged
+  into the renderer's mermaid.initialize: --config <file>, else
+  DOC_SUPERPOWERS_DIAGRAM_CONFIG, else docs/diagrams/config.json when it
+  exists, else none. securityLevel stays strict whatever the file says; a
+  block's own front matter overrides the file. A config file that is
+  missing (when named), not JSON or not an object exits 3, naming it.
+  A PNG is replaced only when its render succeeded. The pinned
   packages (scripts/diagram/package-lock.json) are installed once, with
   npm ci --ignore-scripts, into
   ${XDG_CACHE_HOME:-$HOME/.cache}/doc-superpowers/diagram/<lock hash>.
@@ -3662,7 +3669,7 @@ _shellcheck_opt_names() {
   _OPT_plan="" _OPT_refs="" _OPT_reverify="" _OPT_scheduled="" _OPT_staged="" _OPT_superseded_by=""
   _OPT_tag="" _OPT_tree="" _OPT_warn=""
   _OPT_create="" _OPT_title="" _OPT_body_file="" _OPT_paths="" _OPT_sev=""
-  _OPT_no_repo_adapters="" _OPT_strict="" _OPT_top="" _OPT_pr=""
+  _OPT_no_repo_adapters="" _OPT_strict="" _OPT_top="" _OPT_pr="" _OPT_config=""
   _OPTV_items=() _OPTV_claims=() _OPTV_code_refs=() _OPTV_code_refs_from=() _OPTV_config=() _OPTV_helper=() _OPTV_holds=()
   _OPTV_step=()
 }
@@ -4085,10 +4092,37 @@ _dg_is_png() {
   [ "$(head -c 8 "$1" | od -An -tx1 | tr -d ' \n')" = 89504e470d0a1a0a ]
 }
 
+# _dg_config: the Mermaid config file render hands the renderer, into
+# _DG_CONFIG (a JSON copy in the scratch directory; empty for none) and
+# _DG_CONFIG_NAME (the path as named). --config, else
+# DOC_SUPERPOWERS_DIAGRAM_CONFIG, else docs/diagrams/config.json when it
+# exists. A named file that is missing, or any chosen file that is not a
+# JSON object, is a usage error (exit 3).
+_dg_config() {
+  local p="" how=""
+  _DG_CONFIG="" _DG_CONFIG_NAME=""
+  if _opt_seen config; then
+    p="$_OPT_config" how="--config"
+  elif [ -n "${DOC_SUPERPOWERS_DIAGRAM_CONFIG:-}" ]; then
+    p="$DOC_SUPERPOWERS_DIAGRAM_CONFIG" how="DOC_SUPERPOWERS_DIAGRAM_CONFIG"
+  elif [ -f docs/diagrams/config.json ]; then
+    p="docs/diagrams/config.json" how="the default config"
+  else
+    return 0
+  fi
+  [ -f "$p" ] || _usage_error "diagram render" "no such Mermaid config file '$p' ($how)"
+  jq -e 'type == "object"' "$p" >/dev/null 2>&1 \
+    || _usage_error "diagram render" "the Mermaid config file '$p' ($how) is not a JSON object"
+  jq -c . "$p" > "$_SCRATCH/config.json" 2>/dev/null \
+    || _dg_cannot "cannot copy the Mermaid config file '$p'"
+  _DG_CONFIG="$_SCRATCH/config.json" _DG_CONFIG_NAME="$p"
+}
+
 cmd_diagram_render() {
   _dg_require_repo
   _dg_docs render "$@"
   _scratch_init
+  _dg_config
   _dg_scan "$_SCRATCH/blocks"
   if [ ! -s "$_SCRATCH/blocks" ]; then
     echo "diagram: no Mermaid source blocks in ${#_DG_DOCS[@]} doc(s): nothing to render"
@@ -4128,9 +4162,13 @@ cmd_diagram_render() {
 
   if [ "$id" -gt 0 ]; then
     jq -s . "$_SCRATCH/jobs.ndjson" > "$_SCRATCH/jobs.json" || _dg_cannot "cannot write the job list"
-    local rc=0
+    local rc=0 cfg=()
+    if [ -n "$_DG_CONFIG" ]; then
+      cfg=(--config "$_DG_CONFIG")
+      echo "diagram: Mermaid config: $_DG_CONFIG_NAME"
+    fi
     node "$_DG_DIR/render.mjs" --browser "$_DG_BROWSER" --modules "$_DG_MODULES" \
-      --jobs "$_SCRATCH/jobs.json" > "$_SCRATCH/results" || rc=$?
+      --jobs "$_SCRATCH/jobs.json" ${cfg[@]+"${cfg[@]}"} > "$_SCRATCH/results" || rc=$?
     case "$rc" in
       0|1) ;;
       *) _dg_cannot "the renderer could not run (exit $rc; see above): no PNG was changed" ;;
