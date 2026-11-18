@@ -27,7 +27,7 @@ C4Context
   System_Ext(project, "Target Project", "Codebase being documented — source code, existing docs, scripts, skills")
   System_Ext(adapters, "Host Adapters", "Small executables the host names in its own config. Spec claims: runner, log, config adapters. Work ledger: pr, contracts, items adapters (two GitHub reference adapters ship)")
   System_Ext(github, "GitHub", "Issues and pull requests, read and written through gh by the reference ledger adapters (optional)")
-  System_Ext(chrome, "Local Chrome", "Headless Chrome or Chromium on the developer's machine: renders Mermaid diagrams to PNG for doc-tools.sh diagram, refusing every outside request")
+  System_Ext(chrome, "Local Chrome", "Headless, on this machine; outside requests refused")
   System_Ext(git, "Git", "Version control — staleness detection, diffs, history; remote refs: the ledger key counter, in-flight refs, views branch")
   System_Ext(ci, "GitHub Actions", "CI/CD platform — 2 default shell workflows (PR freshness, weekly audit; neither reports an unrunnable check as all-current), the opt-in ledger views publisher, and 6 opt-in Claude-powered workflows sharing one Anthropic auth preflight")
   System_Ext(wrapper, "Wrapper Skills", "Skills that invoke spec lifecycle actions at pipeline interception points")
