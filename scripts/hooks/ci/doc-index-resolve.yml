@@ -1,0 +1,68 @@
+# doc-superpowers workflow v1
+# Doc index conflict resolver
+# Installed by doc-superpowers hooks installer (by name only: never by
+# --workflows=all, because it pushes to other people's pull request branches)
+#
+# After each push to __BASE_BRANCH__ (and by hand, for every open pull request
+# or one named by its number): every open pull request against
+# __BASE_BRANCH__ whose only conflict is the doc index (docs/.doc-index.json)
+# gets the base merged in, with the index merged entry by entry by
+# doc-superpowers' merge driver (vendored beside the step). The merge is
+# pushed with a lease, so a branch that moved meanwhile is left alone. A push
+# with the job token starts no workflow, so the step dispatches the test
+# workflow install --ci --resolve-test-workflow=<file> recorded (none: the
+# comment asks the author to re-run the checks). Each pull request it merged
+# or could not merge gets one comment, updated in place. A pull request from a
+# fork, labelled no-index-resolve, or GitHub reports as mergeable is not
+# touched. It never runs on a pull_request event, so a pull request's own code
+# never runs with this token.
+
+name: Doc Index Resolve
+
+on:
+  push:
+    branches: [__BASE_BRANCH__]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'One pull request number (empty: every open pull request against __BASE_BRANCH__)'
+        required: false
+        default: ''
+        type: string
+
+# One resolver at a time, never cancelled midway: a run stopped between its
+# push and its dispatch would leave a merge whose checks never started.
+concurrency:
+  group: doc-index-resolve
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # The merge commit pushed to each pull request branch.
+      contents: write
+      # Reading the pull requests, and the one comment on each.
+      pull-requests: write
+      # Dispatching the test workflow on a branch it merged.
+      actions: write
+
+    steps:
+      # The full history: a merge needs the merge base.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Pin jq (checksum-verified)
+        run: .github/scripts/doc-superpowers-steps/install-jq.sh
+
+      - name: Merge the base into pull requests that conflict only in the doc index
+        env:
+          BASE_BRANCH: __BASE_BRANCH__
+          PR: ${{ inputs.pr }}
+          TEST_WORKFLOW: "__RESOLVE_TEST_WORKFLOW__"
+          DOC_SUPERPOWERS_GIT_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/doc-superpowers-steps/index-resolve.sh

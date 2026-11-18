@@ -381,7 +381,7 @@ check_zizmor() {
     sed -e 's/__BASE_BRANCH__/main/g' -e 's/__VERSION__/v0.0.0/g' \
       -e 's/__PLUGIN_COMMIT__/0000000000000000000000000000000000000000/g' \
       -e 's/__CRON_SCHEDULE__/0 9 * * 1/g' -e 's/__CI_STRICT__/0/g' \
-      -e 's|__MARKETPLACE_URL__|https://example.com/plugin.git|g' "$t" > "$dir/.github/workflows/${t##*/}" || return 1
+      -e 's|__MARKETPLACE_URL__|https://example.com/plugin.git|g' -e 's/__RESOLVE_TEST_WORKFLOW__/tests.yml/g' "$t" > "$dir/.github/workflows/${t##*/}" || return 1
   done
   uvx "zizmor@$ZIZMOR_VERSION" --offline --no-progress "$dir" .github/workflows
 }

@@ -3209,6 +3209,93 @@ test_install_help_groups_publish_as_shell_optin() {
   assert_contains "$out" "and except doc-ledger-publish on a host without" "--workflows=all's help names the exception"
 }
 
+test_ci_index_resolve_is_opt_in_by_name() {
+  # doc-index-resolve writes to other people's branches: installed by name
+  # only, never by --workflows=all (design R2), which still refreshes an
+  # installed copy.
+  echo "test: doc-index-resolve — installed by name, never by --workflows=all (which refreshes an installed copy); its step script is vendored; uninstall removes both"
+  local tpl="$HOOKS_DIR/ci/doc-index-resolve.yml"
+  assert_file_exists "$tpl" "the template exists"
+  assert_eq "# doc-superpowers workflow v1" "$(head -n 1 "$tpl" 2>/dev/null || true)" "it carries the workflow marker (the installer owns it)"
+  setup
+  inst install --ci --workflows=all
+  assert_eq "0" "$IRC" "install --ci --workflows=all exits 0"
+  assert_file_not_exists ".github/workflows/doc-index-resolve.yml" "--workflows=all does not install doc-index-resolve"
+  inst install --ci --workflows=doc-index-resolve
+  assert_eq "0" "$IRC" "install --ci --workflows=doc-index-resolve exits 0"
+  assert_file_exists ".github/workflows/doc-index-resolve.yml" "the named workflow is installed"
+  assert_eq "installed" "$(jq -r '.tiers.ci.workflows["doc-index-resolve"].state' .claude/doc-superpowers/installed.json)" "…and recorded"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'TEST_WORKFLOW: ""' "no test workflow chosen: TEST_WORKFLOW is empty"
+  assert_eq "null" "$(jq -r '.tiers.ci.resolve_test_workflow' .claude/doc-superpowers/installed.json)" "…and nothing is recorded for it"
+  assert_true "its step script is vendored executable" test -x .github/scripts/doc-superpowers-steps/index-resolve.sh
+  _assert_installed_workflows_wired "install --ci --workflows=doc-index-resolve"
+  echo "# edited" >> .github/workflows/doc-index-resolve.yml
+  inst install --ci --workflows=all
+  assert_eq "0" "$IRC" "an installed copy: --workflows=all exits 0"
+  assert_not_contains "$(cat .github/workflows/doc-index-resolve.yml)" "# edited" "…and refreshes it"
+  inst uninstall --ci --workflows=doc-index-resolve
+  assert_eq "0" "$IRC" "uninstall --ci --workflows=doc-index-resolve exits 0"
+  assert_file_not_exists ".github/workflows/doc-index-resolve.yml" "the workflow is removed"
+  assert_file_not_exists ".github/scripts/doc-superpowers-steps/index-resolve.sh" "…and its step script with it"
+  teardown
+}
+
+test_ci_resolve_test_workflow_choice() {
+  # --resolve-test-workflow=<file>: the workflow doc-index-resolve dispatches
+  # on a branch it merged (a push with the job token starts none). Recorded
+  # like the other choices; empty is the default and records nothing.
+  echo "test: --resolve-test-workflow — rendered into TEST_WORKFLOW, recorded, reproduced by a plain install, cleared by an empty value; an invalid value exits 2 and writes nothing"
+  local before bad
+  setup
+  inst install --ci --workflows=doc-index-resolve --resolve-test-workflow=tests.yml
+  assert_eq "0" "$IRC" "--resolve-test-workflow=tests.yml exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'TEST_WORKFLOW: "tests.yml"' "rendered into TEST_WORKFLOW"
+  assert_eq "tests.yml" "$(jq -r '.tiers.ci.resolve_test_workflow' .claude/doc-superpowers/installed.json)" "recorded as .tiers.ci.resolve_test_workflow"
+  assert_contains "$IOUT" "test workflow tests.yml" "the install's choices line names it"
+  inst install --ci
+  assert_eq "0" "$IRC" "a plain install --ci exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'TEST_WORKFLOW: "tests.yml"' "…and keeps the recorded choice"
+  inst install --ci --resolve-test-workflow ci.yaml
+  assert_eq "0" "$IRC" "--resolve-test-workflow ci.yaml (a separate value) exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'TEST_WORKFLOW: "ci.yaml"' "a new value replaces it"
+  inst status --ci
+  assert_contains "$IOUT" "test workflow ci.yaml" "status --ci shows the recorded choice"
+  inst status --ci --json
+  assert_eq "ci.yaml" "$(jq -r .tiers.ci.choices.resolve_test_workflow <<<"$IOUT" 2>/dev/null || true)" "…and status --json, under choices"
+  before=$(_tree_state)
+  for bad in ../x.yml 'a b.yml' x.txt '$(x).yml' .yml 'x.yml"' sub/x.yml; do
+    inst install --ci "--resolve-test-workflow=$bad"
+    assert_eq "2" "$IRC" "'$bad' is not a workflow file name: exit 2"
+  done
+  assert_contains "$IOUT" "--resolve-test-workflow" "…the error names the option"
+  assert_eq "$before" "$(_tree_state)" "…and nothing is written"
+  inst install --resolve-test-workflow=tests.yml
+  assert_eq "2" "$IRC" "without --ci: exit 2 (it applies to the CI tier)"
+  printf '%s\n' "$(jq '.tiers.ci.resolve_test_workflow = "../x.yml"' .claude/doc-superpowers/installed.json)" > .claude/doc-superpowers/installed.json
+  before=$(_tree_state)
+  inst install --ci
+  assert_eq "1" "$IRC" "an invalid recorded value: install --ci exits 1"
+  assert_contains "$IOUT" "pass --resolve-test-workflow" "…and names the flag that fixes it"
+  assert_eq "$before" "$(_tree_state)" "…writing nothing"
+  inst install --ci --resolve-test-workflow=
+  assert_eq "0" "$IRC" "--resolve-test-workflow= (empty) exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'TEST_WORKFLOW: ""' "…and clears TEST_WORKFLOW"
+  assert_eq "null" "$(jq -r '.tiers.ci.resolve_test_workflow' .claude/doc-superpowers/installed.json)" "…and the record"
+  teardown
+}
+
+test_install_help_lists_index_resolve_as_shell_optin() {
+  echo "test: install.sh help — doc-index-resolve under 'shell, opt-in by name'; --workflows=all's help says it never installs it; --resolve-test-workflow is described"
+  local out optin claude
+  out=$("$BASH_BIN" "$HOOKS_DIR/install.sh" help 2>&1) || true
+  optin=$(awk '/^  shell, opt-in by name/ { f = 1; next } /^  [^ ]/ { f = 0 } f' <<<"$out")
+  claude=$(awk '/^  Claude-powered/ { f = 1; next } /^  [^ ]/ { f = 0 } f' <<<"$out")
+  assert_contains "$optin" "doc-index-resolve" "doc-index-resolve under 'shell, opt-in by name'"
+  assert_not_contains "$claude" "doc-index-resolve" "…not under Claude-powered"
+  assert_contains "$out" "never doc-index-resolve" "--workflows=all's help names it"
+  assert_contains "$out" "--resolve-test-workflow" "the option is described"
+}
+
 test_install_ci_version_comes_from_doc_tools() {
   # install.sh:22 took the first "## vX.Y.Z" SUBSTRING of RELEASE-NOTES.md,
   # and under pipefail a file without one aborted the installer silently, so
@@ -4220,6 +4307,9 @@ test_ci_publish_template_vendors_ledger
 test_ci_claims_templates_vendor_ledger
 test_ci_workflows_all_skips_publish_without_ledger
 test_install_help_groups_publish_as_shell_optin
+test_ci_index_resolve_is_opt_in_by_name
+test_ci_resolve_test_workflow_choice
+test_install_help_lists_index_resolve_as_shell_optin
 test_install_ci_helpers_false_still_wires_steps
 test_install_ci_version_comes_from_doc_tools
 test_install_ci_writes_state_file_on_first_install
@@ -9062,7 +9152,7 @@ setup_lib() {
 }
 
 test_setup_catalog() {
-  echo "test: #51 setup's catalog: the 15 items of the shared table, in order, with their groups, kinds, options, defaults, scopes and per-user flags; ci.workflows is install.sh's 9 workflows in its order; every item says its scope, whether it blocks a commit and whether it reaches the network, and how to undo it"
+  echo "test: #51 setup's catalog: the 15 items of the shared table, in order, with their groups, kinds, options, defaults, scopes and per-user flags; ci.workflows is install.sh's 10 workflows in its order; every item says its scope, whether it blocks a commit and whether it reaches the network, and how to undo it"
   local cat="$SETUP_ROOT/scripts/setup/catalog.json" got want wf_help id
   assert_true "catalog.json is one JSON object" jq -e 'type == "object"' "$cat"
   got=$(jq -r '[.items[].id] | join(" ")' "$cat" 2>/dev/null || true)
@@ -9103,7 +9193,7 @@ ledger.claude: on,off
 claims: on,off
 bin: on,off"
   assert_eq "$want" "$got" "the options of every toggle, choice and multi (ci.workflows: install.sh help's list)"
-  assert_eq "9" "$(tr ',' '\n' <<<"$wf_help" | grep -c .)" "install.sh lists 9 workflows"
+  assert_eq "10" "$(tr ',' '\n' <<<"$wf_help" | grep -c .)" "install.sh lists 10 workflows"
   for id in $(jq -r '.items[].id' "$cat" 2>/dev/null); do
     got=$(jq -r --arg id "$id" '.items[] | select(.id == $id) | .details' "$cat")
     case "$(jq -r --arg id "$id" '.items[] | select(.id == $id) | .scope' "$cat")" in

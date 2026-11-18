@@ -69,7 +69,10 @@ SHELL_WORKFLOWS="doc-freshness-pr doc-freshness-schedule"
 CI_DEFAULT_WORKFLOWS="$SHELL_WORKFLOWS"
 # Shell workflows outside the default set, installed by name (or by
 # --workflows=all): no AI, no secret (final review OPS-I4).
-SHELL_OPTIN_WORKFLOWS="doc-ledger-publish"
+SHELL_OPTIN_WORKFLOWS="doc-index-resolve doc-ledger-publish"
+# Installed by name only, never by --workflows=all: doc-index-resolve pushes to
+# other people's pull request branches.
+BY_NAME_ONLY_WORKFLOWS="doc-index-resolve"
 # Workflows an earlier version installed and this one no longer ships. A
 # managed copy (the workflow marker) is removed by any install --ci and by a
 # full uninstall, and its state entry dropped; a file without the marker is
@@ -232,6 +235,7 @@ workflow_desc() {
     doc-spec-verify) echo "PR opened/updated touching indexed specs: AI spec-compliance comment; with docs/spec-claims/, a non-AI claims job on every same-repository PR (claims validate, run, attest; findings fail it; with docs/ledger/config.json, ships the ledger helper set: claims V5 reads ledger trackers) (contents: read, pull-requests: write)" ;;
     doc-pr-full-cycle) echo "PR opened touching indexed docs: AI review + update + diagram + sync, a checked step commits docs to the PR branch (contents + pull-requests: write)" ;;
     doc-pr-release) echo "PR pushes: AI release-notes fragment, a checked step commits it to the PR branch; PR body edited (contents + pull-requests: write)" ;;
+    doc-index-resolve) echo "push to the base, and by hand: merges the base into each open same-repository PR whose only conflict is docs/.doc-index.json, with the vendored index merge driver; pushes with a lease, dispatches --resolve-test-workflow, one PR comment (contents + pull-requests + actions: write; by name only)" ;;
     doc-ledger-publish) echo "every 30 minutes and by hand: with docs/ledger/config.json, doc-tools.sh ledger publish renders the work-ledger views from the base and pushes them to views.branch; with the config, ships the ledger helper set (contents: write; pull-requests + issues: read, for the adapters)" ;;
     *) echo "(no description)" ;;
   esac
@@ -370,7 +374,9 @@ CI options (install --ci / --all):
             A CSV of names: install those (an explicit name overrides an earlier
             "removed on purpose"). all: every template, except those removed on
             purpose, and except doc-ledger-publish on a host without
-            docs/ledger/config.json (a note says so; name it to install it).
+            docs/ledger/config.json (a note says so; name it to install it);
+            never doc-index-resolve, which pushes to pull request branches
+            (name it; once installed, all refreshes it).
             none: no workflow, only the vendored doc-tools.sh.
             Without it: the recorded set (a first install: the shell workflows).
   --base-branch NAME        target branch (default: main)
@@ -387,14 +393,22 @@ CI options (install --ci / --all):
                             --marketplace-url= clears the record). Use a mirror
                             your organization controls to keep the plugin's
                             home out of the project's files
+  --resolve-test-workflow=<file>
+                            the workflow file doc-index-resolve dispatches on a
+                            branch it merged (a push with the job token starts
+                            no workflow), e.g. tests.yml; a name of letters,
+                            digits and . _ - ending .yml or .yaml (default:
+                            none, and the comment asks the author to re-run the
+                            checks; recorded only when given, and
+                            --resolve-test-workflow= clears the record)
   --helpers=<true|false>    deprecated, and inert: the helpers ship exactly
                             while an installed workflow runs them.
                             --helpers=false only refuses doc-pr-release
                             (selected, or already installed)
   --force                   also re-install workflows removed on purpose
   The choices are recorded (.claude/doc-superpowers/installed.json, commit it):
-  a plain 'install --ci' reproduces the recorded set, branch, cron, strict and
-  marketplace URL.
+  a plain 'install --ci' reproduces the recorded set, branch, cron, strict,
+  marketplace URL and test workflow.
 
 Uninstall options (uninstall --ci):
   --workflows=<csv|all|none>  which workflows (default: all of them, and the
@@ -840,6 +854,7 @@ render_workflow() {
     -e "s|__CI_STRICT__|$R_STRICT|g" \
     -e "s|__MARKETPLACE_URL__|$R_MARKET|g" \
     -e "s|__PLUGIN_COMMIT__|$R_COMMIT|g" \
+    -e "s|__RESOLVE_TEST_WORKFLOW__|$R_RTW|g" \
     "$1"
 }
 
@@ -2380,6 +2395,13 @@ valid_marketplace_url() {
   [[ "$1" =~ $re ]]
 }
 
+# A workflow file name, as .github/workflows/ holds it and a double-quoted YAML
+# value and a REST path carry it as is: no slash, space, quote or $.
+valid_workflow_file() {
+  local re='^[A-Za-z0-9._-]+\.ya?ml$'
+  [[ "$1" =~ $re ]]
+}
+
 # plugin_marketplace_url: the plugin's own repository (plugin.json's
 # "repository", a URL or {url}) as a git URL ending in .git — where a
 # Claude-powered workflow fetches the plugin unless --marketplace-url names
@@ -2518,6 +2540,11 @@ preflight_ci() {
   [ "$OPT_MARKET_SET" != 1 ] || CI_MARKET="$OPT_MARKET"
   [ -z "$CI_MARKET" ] || valid_marketplace_url "$CI_MARKET" \
     || die "the recorded marketplace URL '$CI_MARKET' is not a git URL a workflow can carry; pass --marketplace-url. Nothing was changed."
+  # The test workflow doc-index-resolve dispatches: flag > recorded > none.
+  CI_RTW="$STATE_RTW"
+  [ "$OPT_RTW_SET" != 1 ] || CI_RTW="$OPT_RTW"
+  [ -z "$CI_RTW" ] || valid_workflow_file "$CI_RTW" \
+    || die "the recorded test workflow '$CI_RTW' is not a workflow file name; pass --resolve-test-workflow. Nothing was changed."
 
   CI_DISK=$(disk_workflows)
   # Every install --ci retires every retired workflow.
@@ -2531,6 +2558,8 @@ preflight_ci() {
           state_wf_get "$w" || true
           if [ "$WF_STATE" = uninstalled ] && [ "$WF_INTENT" = true ] && [ "$FORCE" != true ] && ! in_list "$w" "$CI_DISK"; then
             skip="${skip:+$skip }$w"
+          elif in_list "$w" "$BY_NAME_ONLY_WORKFLOWS"; then
+            : # by name only (an installed copy is refreshed below)
           elif [ "$w" = doc-ledger-publish ] && [ ! -f "$LEDGER_CONFIG" ] && ! in_list "$w" "$CI_DISK" && [ "$WF_STATE" != installed ]; then
             # The 30-minute publish cron on a host without the ledger: billed
             # no-op runs (final review OPS-I2, ruled). Named, it installs.
@@ -2601,6 +2630,7 @@ preflight_ci() {
 
   # sed-escaped once, in the main shell (the version lookup is cached here).
   R_BASE=$(sed_repl "$CI_BASE") R_CRON=$(sed_repl "$CI_CRON") R_STRICT=0 R_VERSION="" R_MARKET="" R_COMMIT=""
+  R_RTW=$(sed_repl "$CI_RTW")
   if [ "$CI_STRICT" = true ]; then
     R_STRICT=1
   fi
@@ -2855,7 +2885,7 @@ install_ci() {
     echo "  Existing $w.yml found (not doc-superpowers-managed), skipping."
   done
   retire_workflows
-  state_set_choices "$CI_BASE" "$CI_CRON" "$CI_STRICT" "$CI_MARKET"
+  state_set_choices "$CI_BASE" "$CI_CRON" "$CI_STRICT" "$CI_MARKET" "$CI_RTW"
   vendor_sync install
   state_flush
 
@@ -2863,7 +2893,7 @@ install_ci() {
   nforeign=$(set -- $CI_FOREIGN; echo $#)
   nskip=$(set -- $CI_SKIP; echo $#)
   echo "CI/CD workflows: $installed installed, $refreshed refreshed, $nforeign skipped (existing non-managed), $nskip skipped (intentionally uninstalled)"
-  echo "  Choices (recorded in $STATE_FILE): base branch $CI_BASE, cron '$CI_CRON', strict $CI_STRICT${CI_MARKET:+, marketplace $CI_MARKET}"
+  echo "  Choices (recorded in $STATE_FILE): base branch $CI_BASE, cron '$CI_CRON', strict $CI_STRICT${CI_MARKET:+, marketplace $CI_MARKET}${CI_RTW:+, test workflow $CI_RTW}"
   for w in $CI_SKIP; do
     echo "  skipping $w.yml (previously uninstalled; pass --workflows=$w to override, or --force)"
   done
@@ -3005,9 +3035,9 @@ status_ci() {
   done
   if [ "$state_ok" = 1 ] && [ "$STATE_HAS_CI" = 1 ]; then
     if $JSON; then
-      st_rec ci.choices "${STATE_BASE:-main}" "${STATE_CRON:-0 9 * * 1}" "${STATE_STRICT:-false}" "$STATE_MARKET"
+      st_rec ci.choices "${STATE_BASE:-main}" "${STATE_CRON:-0 9 * * 1}" "${STATE_STRICT:-false}" "$STATE_MARKET" "$STATE_RTW"
     else
-      echo "  choices: base branch ${STATE_BASE:-main}, cron '${STATE_CRON:-0 9 * * 1}', strict ${STATE_STRICT:-false}${STATE_MARKET:+, marketplace $STATE_MARKET} ($STATE_FILE)"
+      echo "  choices: base branch ${STATE_BASE:-main}, cron '${STATE_CRON:-0 9 * * 1}', strict ${STATE_STRICT:-false}${STATE_MARKET:+, marketplace $STATE_MARKET}${STATE_RTW:+, test workflow $STATE_RTW} ($STATE_FILE)"
     fi
   fi
   # On a ledger host, a claims workflow without the ledger set beside
@@ -3088,7 +3118,8 @@ _STATUS_JSON_JQ='
     elif $r[0] == "ci.wf" then .tiers.ci.workflows[$r[1]] = {state: $r[2]}
     elif $r[0] == "ci.retired" then .tiers.ci.retired += [$r[1]]
     elif $r[0] == "ci.choices" then .tiers.ci.choices = {base_branch: $r[1], cron: $r[2], ci_strict: ($r[3] == "true"),
-                                                      marketplace_url: ($r[4] // "" | n)}
+                                                      marketplace_url: ($r[4] // "" | n),
+                                                      resolve_test_workflow: ($r[5] // "" | n)}
     elif $r[0] == "ci.ledger_gap" then .tiers.ci.claims_without_ledger_helpers += [$r[1]]
     elif $r[0] == "ci.helpers" then .tiers.ci.helpers[$r[1]] = ($r[2] | tonumber)
     elif $r[0] == "ci.removable" then .tiers.ci.removable_vendored += [$r[1]]
@@ -3151,6 +3182,8 @@ CLAUDE_NAMED=false
 OPT_BASE="" OPT_CRON="" OPT_STRICT="" HELPERS=true FORCE=false TRANSIENT=false
 # --marketplace-url: OPT_MARKET_SET=1 once given ("" then clears the record).
 OPT_MARKET="" OPT_MARKET_SET=0
+# --resolve-test-workflow: the same, OPT_RTW_SET=1 once given.
+OPT_RTW="" OPT_RTW_SET=0
 WF_MODE=plain CSV_NAMES=""
 SEEN_CI_OPTS=""
 # --merge-driver-only: the git tier is the merge driver alone (no hook).
@@ -3162,7 +3195,7 @@ allowed() {
   case "$COMMAND:$1" in
     *:--git | *:--claude | *:--ci | *:--all | *:--ledger | *:--ledger-claude | *:--search | *:--search-gate | *:--merge-driver-only) return 0 ;;
     status:--json) return 0 ;;
-    install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force | install:--marketplace-url) return 0 ;;
+    install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force | install:--marketplace-url | install:--resolve-test-workflow) return 0 ;;
     uninstall:--workflows | uninstall:--transient) return 0 ;;
   esac
   return 1
@@ -3177,12 +3210,12 @@ while [ $# -gt 0 ]; do
     *) value="" has_value=0 ;;
   esac
   case "$name" in
-    --git | --claude | --ci | --all | --ledger | --ledger-claude | --search | --search-gate | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url) ;;
+    --git | --claude | --ci | --all | --ledger | --ledger-claude | --search | --search-gate | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow) ;;
     *) usage_error "unknown option: $arg" ;;
   esac
   allowed "$name" || usage_error "$name does not apply to $COMMAND"
   case "$name" in
-    --base-branch | --cron | --workflows | --helpers | --marketplace-url)
+    --base-branch | --cron | --workflows | --helpers | --marketplace-url | --resolve-test-workflow)
       if [ "$has_value" = 0 ]; then
         [ $# -gt 0 ] || die "$name requires a value"
         value="$1"
@@ -3216,6 +3249,11 @@ while [ $# -gt 0 ]; do
         || die "invalid --marketplace-url '$value': a git URL of letters, digits and . _ ~ : / @ % + = , - (no space, quote or \$), not starting with -"
       OPT_MARKET="$value" OPT_MARKET_SET=1
       ;;
+    --resolve-test-workflow)
+      [ -z "$value" ] || valid_workflow_file "$value" \
+        || usage_error "invalid --resolve-test-workflow '$value': a workflow file name in .github/workflows/ (letters, digits and . _ -, ending .yml or .yaml), or empty for none"
+      OPT_RTW="$value" OPT_RTW_SET=1
+      ;;
     --ci-strict)
       case "$has_value:$value" in
         0:* | 1:true) OPT_STRICT=true ;;
@@ -3240,7 +3278,7 @@ while [ $# -gt 0 ]; do
     --transient) TRANSIENT=true ;;
   esac
   case "$name" in
-    --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url)
+    --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow)
       SEEN_CI_OPTS="${SEEN_CI_OPTS:+$SEEN_CI_OPTS }$name"
       ;;
   esac
