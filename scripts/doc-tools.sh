@@ -1580,6 +1580,8 @@ cleanup() {
   # whose rm was cut short. Named by our pid, so it is ours to remove.
   if [ -e "$INDEX_LOCK.gone.$$" ]; then rm -rf "$INDEX_LOCK.gone.$$"; fi
   _claims_worktrees_remove
+  # An interrupted diagram install (_dg_install): never left for a later run.
+  if [ -n "${_DG_INSTALL_TMP:-}" ]; then rm -rf "$_DG_INSTALL_TMP"; fi
   if [ -n "$_SCRATCH" ]; then rm -rf "$_SCRATCH"; fi
   return 0
 }
@@ -3803,7 +3805,8 @@ _dg_docs() {
 
 # awk: every Mermaid source block of the files named, one record per block:
 #   doc  fence-line  link  elk(0|1)  first-source-line  last-source-line
-# tab-separated. A block is a mermaid fence that opens right after
+# separated by 0x1f, never a tab: IFS whitespace would merge the empty link
+# of a block with no image into the next field. A block is a mermaid fence that opens right after
 # <details> and <summary>Mermaid source</summary> (blank lines between them
 # allowed); link is the image link on the last non-blank line above
 # <details>, or "". Lines inside any other fence are never read as slot
@@ -3840,7 +3843,7 @@ FNR == 1 { state = 0; infence = 0; blk = 0; prev = "" }
   sub(/\r$/, "", line)
   if (infence) {
     if (closes(line)) {
-      if (blk) printf "%s\t%d\t%s\t%d\t%d\t%d\n", FILENAME, bline, link, elk, bline + 1, FNR - 1
+      if (blk) printf "%s\037%d\037%s\037%d\037%d\037%d\n", FILENAME, bline, link, elk, bline + 1, FNR - 1
       infence = 0; blk = 0
       next
     }
@@ -3921,7 +3924,7 @@ _dg_png() {
 }
 
 # _dg_scan <out-file>: the blocks of _DG_DOCS, one record per block, with
-# the link resolved to a PNG path:
+# the link resolved to a PNG path (0x1f-separated, as _DG_AWK's):
 #   doc  fence-line  png  elk(0|1)  first-source-line  last-source-line
 _dg_scan() {
   local out="$1" doc line link elk from to
@@ -3931,16 +3934,16 @@ _dg_scan() {
   # files in order too, but a doc named twice is already dropped).
   for doc in "${_DG_DOCS[@]}"; do
     awk "$_DG_AWK" "$doc"
-  done | while IFS=$'\t' read -r doc line link elk from to; do
+  done | while IFS=$'\x1f' read -r doc line link elk from to; do
     _dg_png "$doc" "$link"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$doc" "$line" "$_DG_PNG" "$elk" "$from" "$to"
+    printf '%s\037%s\037%s\037%s\037%s\037%s\n' "$doc" "$line" "$_DG_PNG" "$elk" "$from" "$to"
   done > "$out"
 }
 
 # jq: _dg_scan's records as diagram list's JSON array.
 # shellcheck disable=SC2016  # jq program
 _DG_JQ_LIST='
-  split("\n") | map(select(length > 0) | split("\t")
+  split("\n") | map(select(length > 0) | split("\u001f")
     | {doc: .[0], line: (.[1] | tonumber),
        png: (if .[2] == "" then null else .[2] end), elk: (.[3] == "1")})'
 
@@ -3952,15 +3955,222 @@ cmd_diagram_list() {
   jq -R -s "$_DG_JQ_LIST" < "$_SCRATCH/blocks"
 }
 
+# The renderer's files beside this doc-tools.sh, into _DG_DIR. A vendored
+# copy (.github/scripts/) has doc-tools.sh alone: exit 2.
+_dg_renderer_files() {
+  local f
+  _DG_DIR="$SCRIPT_DIR/diagram"
+  for f in package.json package-lock.json render.mjs browser.mjs; do
+    [ -f "$_DG_DIR/$f" ] \
+      || _dg_cannot "no scripts/diagram/ beside doc-tools.sh ($_DG_DIR/$f is missing): a vendored copy cannot render; run the plugin's doc-tools.sh"
+  done
+}
+
+# Node 18 or later on PATH, or exit 2.
+_dg_node() {
+  local v major
+  command -v node >/dev/null 2>&1 || _dg_cannot "needs Node 18 or later (no node on PATH)"
+  v=$(node --version 2>/dev/null) || _dg_cannot "needs Node 18 or later (node --version failed)"
+  v="${v#v}"
+  major="${v%%.*}"
+  case "$major" in
+    ''|*[!0123456789]*) _dg_cannot "needs Node 18 or later (node --version printed '$v')" ;;
+  esac
+  [ "$major" -ge 18 ] || _dg_cannot "needs Node 18 or later (found $v)"
+}
+
+# The cache root into _DG_CACHE: ${XDG_CACHE_HOME:-$HOME/.cache}/doc-superpowers/diagram.
+_dg_cache_root() {
+  local base="${XDG_CACHE_HOME:-}"
+  if [ -z "$base" ]; then
+    [ -n "${HOME:-}" ] || _dg_cannot "neither XDG_CACHE_HOME nor HOME is set: there is no cache to install the renderer into"
+    base="$HOME/.cache"
+  fi
+  _DG_CACHE="$base/doc-superpowers/diagram"
+}
+
+# The pinned packages, installed once per lockfile: <cache>/<sha256 of the
+# lock>/node_modules, into _DG_MODULES. npm ci --ignore-scripts runs in a
+# fresh directory beside it, which is renamed into place only when it
+# succeeded: a failed or interrupted install leaves nothing a later run would
+# take for an install (cleanup removes _DG_INSTALL_TMP).
+_DG_INSTALL_TMP=""
+_dg_install() {
+  local hash dir tmp
+  _hash_one "$_DG_DIR/package-lock.json"
+  hash="${_HASH#sha256:}"
+  dir="$_DG_CACHE/$hash"
+  _DG_MODULES="$dir/node_modules"
+  [ ! -f "$dir/node_modules/.package-lock.json" ] || return 0
+  command -v npm >/dev/null 2>&1 || _dg_cannot "needs npm to install the renderer's packages (no npm on PATH)"
+  mkdir -p "$_DG_CACHE" 2>/dev/null || _dg_cannot "cannot create the cache directory $_DG_CACHE"
+  tmp=$(mktemp -d "$_DG_CACHE/.install.XXXXXX") || _dg_cannot "cannot create a directory in $_DG_CACHE"
+  _DG_INSTALL_TMP="$tmp"
+  cp "$_DG_DIR/package.json" "$_DG_DIR/package-lock.json" "$tmp/" \
+    || _dg_cannot "cannot copy the package files into $tmp"
+  echo "diagram: installing the renderer's pinned packages into $dir (once per lockfile, npm ci --ignore-scripts)" >&2
+  _scratch_init
+  if ! (cd "$tmp" && npm ci --ignore-scripts --no-audit --no-fund) > "$_SCRATCH/npm.log" 2>&1; then
+    tail -n 20 "$_SCRATCH/npm.log" >&2
+    _dg_cannot "npm ci failed: the renderer's packages are not installed"
+  fi
+  # Another run may have installed the same lock meanwhile; a directory
+  # without the marker is a leftover, never an install.
+  if [ -f "$dir/node_modules/.package-lock.json" ]; then
+    rm -rf "$tmp"
+  else
+    rm -rf "$dir"
+    mv "$tmp" "$dir" || _dg_cannot "cannot move the install into $dir"
+  fi
+  _DG_INSTALL_TMP=""
+}
+
+# The browser into _DG_BROWSER: DOC_SUPERPOWERS_CHROME; else the first system
+# Chrome or Chromium; else the chrome-headless-shell install-browser put in
+# the cache (browser.mjs path). None: exit 2, naming install-browser.
+# DOC_TOOLS_DIAGRAM_SYSTEM_BROWSERS, when set (even empty), replaces the
+# system list with its ':'-separated paths: a test seam, so a suite run never
+# depends on the host's own browsers.
+_dg_browser() {
+  local c cands=() p
+  if [ -n "${DOC_SUPERPOWERS_CHROME:-}" ]; then
+    if [ -f "$DOC_SUPERPOWERS_CHROME" ] && [ -x "$DOC_SUPERPOWERS_CHROME" ]; then
+      _DG_BROWSER="$DOC_SUPERPOWERS_CHROME"
+      return 0
+    fi
+    _dg_cannot "DOC_SUPERPOWERS_CHROME is not an executable file: $DOC_SUPERPOWERS_CHROME"
+  fi
+  if [ -n "${DOC_TOOLS_DIAGRAM_SYSTEM_BROWSERS+set}" ]; then
+    IFS=: read -r -a cands <<<"$DOC_TOOLS_DIAGRAM_SYSTEM_BROWSERS"
+  else
+    cands=(
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+      "/Applications/Chromium.app/Contents/MacOS/Chromium"
+      "${HOME:-/nonexistent}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+      "${HOME:-/nonexistent}/Applications/Chromium.app/Contents/MacOS/Chromium"
+      /usr/bin/google-chrome-stable /usr/bin/google-chrome /opt/google/chrome/chrome
+      /usr/bin/chromium /usr/bin/chromium-browser
+    )
+    for p in google-chrome-stable google-chrome chromium chromium-browser; do
+      c=$(command -v "$p" 2>/dev/null) || continue
+      cands+=("$c")
+    done
+  fi
+  for c in ${cands[@]+"${cands[@]}"}; do
+    if [ -n "$c" ] && [ -f "$c" ] && [ -x "$c" ]; then
+      _DG_BROWSER="$c"
+      return 0
+    fi
+  done
+  c=$(node "$_DG_DIR/browser.mjs" path "$_DG_MODULES" "$_DG_CACHE/browsers" 2>/dev/null) || c=""
+  if [ -n "$c" ] && [ -f "$c" ] && [ -x "$c" ]; then
+    _DG_BROWSER="$c"
+    return 0
+  fi
+  _dg_cannot "no Chrome or Chromium found. Set DOC_SUPERPOWERS_CHROME to one, or install the pinned chrome-headless-shell into the cache: doc-tools.sh diagram install-browser"
+}
+
+# 0 when file $1 starts with the PNG signature.
+_dg_is_png() {
+  [ -s "$1" ] || return 1
+  [ "$(head -c 8 "$1" | od -An -tx1 | tr -d ' \n')" = 89504e470d0a1a0a ]
+}
+
 cmd_diagram_render() {
   _dg_require_repo
   _dg_docs render "$@"
-  _dg_cannot "render is not implemented yet"
+  _scratch_init
+  _dg_scan "$_SCRATCH/blocks"
+  if [ ! -s "$_SCRATCH/blocks" ]; then
+    echo "diagram: no Mermaid source blocks in ${#_DG_DOCS[@]} doc(s): nothing to render"
+    return 0
+  fi
+  _dg_renderer_files
+  _dg_node
+  _dg_cache_root
+  _dg_install
+  _dg_browser
+
+  # The jobs: every block with a PNG. A block without one fails here.
+  local doc line png elk from to id=0 failed=0 rendered=0 src out
+  local j_doc=() j_line=() j_png=() j_out=()
+  : > "$_SCRATCH/jobs.ndjson"
+  while IFS=$'\x1f' read -r doc line png elk from to; do
+    if [ -z "$png" ]; then
+      echo "diagram: FAILED $doc:$line: no image link to a PNG in this repository directly above its <details> slot" >&2
+      failed=$((failed + 1))
+      continue
+    fi
+    if [ "$from" -le "$to" ]; then
+      src=$(sed -n "${from},${to}p" "$doc")
+    else
+      src=""
+    fi
+    mkdir -p "$(dirname "$png")" || _dg_cannot "cannot create the directory of $png"
+    out="$(dirname "$png")/.$(basename "$png").render.$$.$id"
+    _TMP_PATHS+=("$out")
+    jq -cn --argjson id "$id" --arg doc "$doc" --argjson line "$line" --arg png "$png" \
+      --argjson elk "$([ "$elk" = 1 ] && echo true || echo false)" --arg source "$src" --arg out "$PWD/$out" \
+      '{id: $id, doc: $doc, line: $line, png: $png, elk: $elk, source: $source, out: $out}' \
+      >> "$_SCRATCH/jobs.ndjson" || _dg_cannot "cannot write the job list"
+    j_doc+=("$doc") j_line+=("$line") j_png+=("$png") j_out+=("$out")
+    id=$((id + 1))
+  done < "$_SCRATCH/blocks"
+
+  if [ "$id" -gt 0 ]; then
+    jq -s . "$_SCRATCH/jobs.ndjson" > "$_SCRATCH/jobs.json" || _dg_cannot "cannot write the job list"
+    local rc=0
+    node "$_DG_DIR/render.mjs" --browser "$_DG_BROWSER" --modules "$_DG_MODULES" \
+      --jobs "$_SCRATCH/jobs.json" > "$_SCRATCH/results" || rc=$?
+    case "$rc" in
+      0|1) ;;
+      *) _dg_cannot "the renderer could not run (exit $rc; see above): no PNG was changed" ;;
+    esac
+    # One line per result: id, ok, the error, the blocked URLs.
+    jq -r 'select(type == "object" and (.id | type) == "number")
+      | [(.id | tostring), (if .ok == true then "1" else "0" end),
+         ((.error // "") | gsub("[\t\n]"; " ")), ((.blocked // []) | join(" "))] | join("\t")' \
+      "$_SCRATCH/results" > "$_SCRATCH/results.tsv" 2>/dev/null \
+      || _dg_cannot "the renderer printed results that are not JSON: no PNG was changed"
+    local i=0 r_id r_ok r_err r_blocked found
+    while [ "$i" -lt "$id" ]; do
+      found=0 r_ok=0 r_err="" r_blocked=""
+      while IFS=$'\t' read -r r_id r_ok r_err r_blocked; do
+        if [ "$r_id" = "$i" ]; then found=1; break; fi
+      done < "$_SCRATCH/results.tsv"
+      if [ "$found" = 1 ] && [ "$r_ok" = 1 ] && _dg_is_png "${j_out[$i]}"; then
+        mv -f "${j_out[$i]}" "${j_png[$i]}" || _dg_cannot "cannot move the render onto ${j_png[$i]}"
+        echo "rendered ${j_png[$i]} (${j_doc[$i]}:${j_line[$i]})"
+        rendered=$((rendered + 1))
+      else
+        rm -f "${j_out[$i]}"
+        if [ "$found" = 0 ]; then
+          r_err="the renderer reported no result for it"
+        elif [ "$r_ok" = 1 ]; then
+          r_err="the renderer wrote no PNG"
+        fi
+        echo "diagram: FAILED ${j_doc[$i]}:${j_line[$i]} (${j_png[$i]} kept as it was): ${r_err:-unknown error}" >&2
+        if [ -n "$r_blocked" ]; then
+          echo "  the page requested, and was refused: $r_blocked" >&2
+        fi
+        failed=$((failed + 1))
+      fi
+      i=$((i + 1))
+    done
+  fi
+  echo "diagram: $rendered rendered, $failed failed"
+  [ "$failed" -eq 0 ] || exit 1
 }
 
 cmd_diagram_install_browser() {
   [ $# -eq 0 ] || _usage_error "diagram install-browser" "takes no arguments"
-  _dg_cannot "install-browser is not implemented yet"
+  check_deps || _dg_cannot "a required command is missing or too old (see the errors above)"
+  _dg_renderer_files
+  _dg_node
+  _dg_cache_root
+  _dg_install
+  node "$_DG_DIR/browser.mjs" install "$_DG_MODULES" "$_DG_CACHE/browsers" \
+    || _dg_cannot "could not install chrome-headless-shell (see above)"
 }
 
 # Dispatch. --help / help needs nothing: it runs before check_deps.

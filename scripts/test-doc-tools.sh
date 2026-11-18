@@ -8920,6 +8920,317 @@ test_diagram_usage_errors_exit_3() {
   teardown
 }
 
+# _dg_stubs: a copy of the plugin tree the diagram verbs need (doc-tools.sh,
+# and diagram/ with the real package files and placeholder .mjs files), a
+# runner for it ($DG_RUN), a stub node and npm first on PATH, a stub Chrome
+# ($DG_CHROME) and an empty cache (XDG_CACHE_HOME). The stubs log to
+# $STUB_LOG. The stub node's renderer writes a PNG for every job, fails a
+# job whose source holds BAD (with a partial file) or OUTSIDE (naming a
+# blocked URL), writes a non-PNG for NOTPNG, and with STUB_RENDER=cannot
+# exits 2. DOC_TOOLS_DIAGRAM_SYSTEM_BROWSERS (the system-browser list, a test
+# seam) is set empty, so this host's own Chrome is never found.
+_dg_stubs() {
+  local root
+  root=$(harness_mktemp_d diagram-stubs)
+  DG_TREE="$root/tree"
+  mkdir -p "$DG_TREE/diagram" "$root/bin" "$root/log" "$root/cache"
+  cp "$SCRIPT_DIR/doc-tools.sh" "$DG_TREE/"
+  cp "$SCRIPT_DIR/diagram/package.json" "$SCRIPT_DIR/diagram/package-lock.json" "$DG_TREE/diagram/"
+  printf '// placeholder: the stub node never runs it\n' > "$DG_TREE/diagram/render.mjs"
+  printf '// placeholder: the stub node never runs it\n' > "$DG_TREE/diagram/browser.mjs"
+  DG_RUN="$root/run"
+  # The interpreter by its full path: some tests run with a PATH that has no bash.
+  DG_BASH=$(command -v "$BASH_BIN")
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$DG_BASH" "$DG_TREE/doc-tools.sh" > "$DG_RUN"
+  chmod +x "$DG_RUN"
+  DG_CHROME="$root/chrome"
+  printf '#!/bin/sh\nexit 0\n' > "$DG_CHROME"
+  chmod +x "$DG_CHROME"
+  cat > "$root/bin/node" <<'STUB'
+#!/bin/sh
+case "$1" in
+  --version) echo "${STUB_NODE_VERSION:-v20.19.2}"; exit 0 ;;
+esac
+script=$(basename "$1")
+shift
+printf '%s %s\n' "$script" "$*" >> "$STUB_LOG/node"
+case "$script" in
+  browser.mjs)
+    case "$1" in
+      path)
+        if [ -n "${STUB_CACHED_BROWSER:-}" ]; then echo "$STUB_CACHED_BROWSER"; exit 0; fi
+        exit 1 ;;
+      install)
+        if [ "${STUB_INSTALL_RC:-0}" != 0 ]; then echo "browser.mjs: download failed" >&2; exit 2; fi
+        echo "$3/chrome-headless-shell/stub"
+        exit 0 ;;
+    esac ;;
+  render.mjs)
+    jobs="$6"
+    cp "$jobs" "$STUB_LOG/jobs.json"
+    if [ "${STUB_RENDER:-ok}" = cannot ]; then echo "render.mjs: could not launch the browser" >&2; exit 2; fi
+    rc=0
+    n=$(jq length "$jobs")
+    i=0
+    while [ "$i" -lt "$n" ]; do
+      id=$(jq -r ".[$i].id" "$jobs")
+      out=$(jq -r ".[$i].out" "$jobs")
+      src=$(jq -r ".[$i].source" "$jobs")
+      case "$src" in
+        *BAD*) printf 'partial' > "$out"; printf '{"id":%s,"ok":false,"error":"Parse error on line 2"}\n' "$id"; rc=1 ;;
+        *OUTSIDE*) printf '{"id":%s,"ok":false,"error":"the page requested an outside URL","blocked":["https://example.com/x.png"]}\n' "$id"; rc=1 ;;
+        *NOTPNG*) printf 'not a png' > "$out"; printf '{"id":%s,"ok":true}\n' "$id" ;;
+        *) printf '\211PNG\r\n\032\nnew %s' "$id" > "$out"; printf '{"id":%s,"ok":true}\n' "$id" ;;
+      esac
+      i=$((i + 1))
+    done
+    exit "$rc" ;;
+esac
+exit 3
+STUB
+  cat > "$root/bin/npm" <<'STUB'
+#!/bin/sh
+printf '%s|%s\n' "$PWD" "$*" >> "$STUB_LOG/npm"
+if [ "${STUB_NPM_RC:-0}" != 0 ]; then echo "npm ERR! network unreachable" >&2; exit 1; fi
+mkdir -p node_modules && : > node_modules/.package-lock.json
+STUB
+  chmod +x "$root/bin/node" "$root/bin/npm"
+  export STUB_LOG="$root/log" XDG_CACHE_HOME="$root/cache" DOC_TOOLS_DIAGRAM_SYSTEM_BROWSERS=""
+  DG_BIN="$root/bin"
+  DG_LOCKHASH=$(hash_file "$SCRIPT_DIR/diagram/package-lock.json")
+  DG_CACHE="$root/cache/doc-superpowers/diagram"
+}
+
+_dg_stubs_off() {
+  unset STUB_LOG XDG_CACHE_HOME DOC_TOOLS_DIAGRAM_SYSTEM_BROWSERS DOC_SUPERPOWERS_CHROME \
+    STUB_RENDER STUB_NPM_RC STUB_CACHED_BROWSER STUB_INSTALL_RC STUB_NODE_VERSION
+}
+
+# Three docs with blocks and their old PNGs, committed.
+_dg_fixture() {
+  _dg_doc docs/a.md diagrams/a.png 'flowchart LR' '  A --> B'
+  _dg_doc docs/b.md diagrams/b.png '---' 'config:' '  layout: elk' '---' 'flowchart LR' '  A --> B'
+  mkdir -p docs/diagrams
+  printf 'old a' > docs/diagrams/a.png
+  printf 'old b' > docs/diagrams/b.png
+  git add -A && git commit -qm "diagrams"
+}
+
+test_diagram_render_installs_once_into_the_cache() {
+  echo "test: diagram render installs the lock once into \${XDG_CACHE_HOME:-\$HOME/.cache}/doc-superpowers/diagram/<lock sha256> with npm ci --ignore-scripts; a failed install exits 2 and leaves no cache directory"
+  setup
+  _dg_stubs
+  _dg_fixture
+  local out rc
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "0" "$rc" "render exits 0"
+  assert_eq "1" "$(grep -c . "$STUB_LOG/npm" 2>/dev/null || echo 0)" "npm ran once"
+  assert_contains "$(cat "$STUB_LOG/npm" 2>/dev/null)" "|ci --ignore-scripts" "…as npm ci --ignore-scripts"
+  assert_true "…into <cache>/doc-superpowers/diagram/<sha256 of the lock>" test -f "$DG_CACHE/$DG_LOCKHASH/node_modules/.package-lock.json"
+  assert_true "…with the package files beside node_modules" test -f "$DG_CACHE/$DG_LOCKHASH/package-lock.json"
+  assert_contains "$(cat "$STUB_LOG/node" 2>/dev/null)" "--modules $DG_CACHE/$DG_LOCKHASH/node_modules" "the renderer is handed that node_modules"
+  assert_contains "$out" "installing" "the install says so on stderr"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "0|1" "$rc|$(grep -c . "$STUB_LOG/npm")" "a second render installs nothing"
+
+  # $HOME/.cache when XDG_CACHE_HOME is unset.
+  rc=0
+  out=$(env -u XDG_CACHE_HOME PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "0" "$rc" "render with XDG_CACHE_HOME unset exits 0"
+  assert_true "…and installs into \$HOME/.cache/doc-superpowers/diagram/<sha256>" test -f "$HOME/.cache/doc-superpowers/diagram/$DG_LOCKHASH/node_modules/.package-lock.json"
+
+  # A failed install: exit 2, no cache directory, no half-made one left.
+  export XDG_CACHE_HOME="$TEST_DIR/cache2"
+  : > "$STUB_LOG/npm"
+  printf 'old a' > docs/diagrams/a.png
+  printf 'old b' > docs/diagrams/b.png
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" STUB_NPM_RC=1 DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "2" "$rc" "a failed npm ci exits 2"
+  assert_contains "$out" "npm ERR! network unreachable" "…showing npm's error"
+  assert_true "…and leaves no cache directory for the lock" test ! -e "$XDG_CACHE_HOME/doc-superpowers/diagram/$DG_LOCKHASH"
+  assert_eq "" "$(find "$XDG_CACHE_HOME/doc-superpowers/diagram" -mindepth 1 -maxdepth 1 2>/dev/null)" "…and no install directory half made"
+  assert_eq "old a|old b" "$(cat docs/diagrams/a.png)|$(cat docs/diagrams/b.png)" "…and the old PNGs as they were"
+  _dg_stubs_off
+  teardown
+}
+
+test_diagram_render_needs_node_18() {
+  echo "test: diagram render without Node 18 or later, without npm, or from a copy without scripts/diagram/ exits 2; with no blocks it exits 0 needing nothing"
+  setup
+  _dg_stubs
+  _dg_fixture
+  local out rc nonode
+  nonode=$(harness_mktemp_d diagram-nonode)
+  ln -s "$(command -v jq)" "$nonode/jq"
+  ln -s "$(command -v git)" "$nonode/git"
+  for t in sha256sum shasum awk sed find sort head od tr dirname basename mkdir mktemp cp mv rm cat env perl; do
+    if command -v "$t" >/dev/null 2>&1; then ln -s "$(command -v "$t")" "$nonode/$t"; fi
+  done
+  rc=0
+  out=$(PATH="$nonode" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "2" "$rc" "no node on PATH: exit 2"
+  assert_contains "$out" "Node 18 or later" "…naming what it needs"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" STUB_NODE_VERSION=v16.20.2 DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "2" "$rc" "Node 16: exit 2"
+  assert_contains "$out" "16.20.2" "…naming the version found"
+  assert_eq "old a|old b" "$(cat docs/diagrams/a.png)|$(cat docs/diagrams/b.png)" "…and the old PNGs as they were"
+
+  # A copy of doc-tools.sh without diagram/ beside it (a vendored copy).
+  local vend
+  vend=$(harness_mktemp_d diagram-vendored)
+  cp "$SCRIPT_DIR/doc-tools.sh" "$vend/"
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH_BIN" "$vend/doc-tools.sh" > "$vend/run"
+  chmod +x "$vend/run"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$vend/run" diagram render 2>&1) || rc=$?
+  assert_eq "2" "$rc" "a copy without scripts/diagram/ beside it exits 2"
+  assert_contains "$out" "scripts/diagram/" "…naming what is missing"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" "$vend/run" diagram list docs/a.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "…but it can still list"
+
+  # No blocks: nothing to render, nothing needed.
+  rc=0
+  out=$(PATH="$nonode" "$DG_RUN" diagram render docs/architecture.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "a doc with no block: exit 0 without Node"
+  assert_contains "$out" "no Mermaid source blocks" "…saying so"
+  _dg_stubs_off
+  teardown
+}
+
+test_diagram_render_finds_a_browser() {
+  echo "test: diagram render's browser: DOC_SUPERPOWERS_CHROME, then a system Chrome or Chromium, then the cache's chrome-headless-shell; none exits 2 naming install-browser"
+  setup
+  _dg_stubs
+  _dg_fixture
+  local out rc sys
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "0" "$rc" "DOC_SUPERPOWERS_CHROME: exit 0"
+  assert_contains "$(tail -n 1 "$STUB_LOG/node")" "--browser $DG_CHROME " "…and the renderer runs that browser"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$TEST_DIR/no-such-chrome" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "2" "$rc" "DOC_SUPERPOWERS_CHROME naming no executable: exit 2"
+  assert_contains "$out" "no-such-chrome" "…naming it"
+
+  sys=$(harness_mktemp_d diagram-sys)
+  printf '#!/bin/sh\nexit 0\n' > "$sys/Google Chrome"
+  chmod +x "$sys/Google Chrome"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_TOOLS_DIAGRAM_SYSTEM_BROWSERS="$TEST_DIR/none:$sys/Google Chrome" STUB_CACHED_BROWSER="$TEST_DIR/cached" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "0" "$rc" "a system browser: exit 0"
+  assert_contains "$(tail -n 1 "$STUB_LOG/node")" "--browser $sys/Google Chrome " "…the first system path that exists, before the cache"
+
+  printf '#!/bin/sh\nexit 0\n' > "$TEST_DIR/home/cached-shell"
+  chmod +x "$TEST_DIR/home/cached-shell"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" STUB_CACHED_BROWSER="$TEST_DIR/home/cached-shell" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "0" "$rc" "no system browser, one in the cache: exit 0"
+  assert_contains "$(cat "$STUB_LOG/node")" "browser.mjs path $DG_CACHE/$DG_LOCKHASH/node_modules $DG_CACHE/browsers" "…asking browser.mjs for the cache's chrome-headless-shell"
+  assert_contains "$(tail -n 1 "$STUB_LOG/node")" "--browser $TEST_DIR/home/cached-shell " "…and rendering with it"
+
+  printf 'old a' > docs/diagrams/a.png
+  printf 'old b' > docs/diagrams/b.png
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "2" "$rc" "no browser anywhere: exit 2"
+  assert_contains "$out" "doc-tools.sh diagram install-browser" "…naming install-browser"
+  assert_contains "$out" "DOC_SUPERPOWERS_CHROME" "…and the variable"
+  assert_eq "old a|old b" "$(cat docs/diagrams/a.png)|$(cat docs/diagrams/b.png)" "…and the old PNGs as they were"
+  _dg_stubs_off
+  teardown
+}
+
+test_diagram_render_replaces_a_png_only_on_success() {
+  echo "test: diagram render moves each new PNG in only when its render succeeded: a failed, blocked, non-PNG or PNG-less block exits 1 and keeps the old PNG; a renderer that cannot run exits 2"
+  setup
+  _dg_stubs
+  _dg_fixture
+  local out rc
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "every block renders: exit 0"
+  assert_contains "$(cat docs/diagrams/a.png)" "new " "a.png is the new render"
+  assert_contains "$(cat docs/diagrams/b.png)" "new " "b.png is the new render"
+  assert_contains "$out" "rendered docs/diagrams/a.png" "stdout names each PNG rendered"
+  assert_eq "flowchart LR
+  A --> B" "$(jq -r '.[0].source' "$STUB_LOG/jobs.json")" "the job holds the block's source, without its fences"
+  assert_eq "false|true" "$(jq -r '[.[].elk | tostring] | join("|")' "$STUB_LOG/jobs.json")" "…and its ELK flag"
+  assert_eq "" "$(find docs -name '.*.render.*')" "no temporary file is left beside the PNGs"
+
+  printf 'old a' > docs/diagrams/a.png
+  printf 'old b' > docs/diagrams/b.png
+  : > docs/a.md
+  _dg_doc docs/a.md diagrams/a.png 'flowchart LR' '  A --> BAD'
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an invalid source exits 1"
+  assert_eq "old a" "$(cat docs/diagrams/a.png)" "…its old PNG kept, not the partial file"
+  assert_contains "$(cat docs/diagrams/b.png)" "new " "…and the other block still rendered"
+  assert_contains "$out" "docs/a.md:10" "…the failure names the doc and the line"
+  assert_contains "$out" "Parse error on line 2" "…and the renderer's error"
+  assert_eq "" "$(find docs -name '.*.render.*')" "…and no temporary file is left"
+
+  : > docs/a.md
+  _dg_doc docs/a.md diagrams/a.png 'flowchart LR' '  A --> OUTSIDE'
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/a.md 2>&1) || rc=$?
+  assert_eq "1|old a" "$rc|$(cat docs/diagrams/a.png)" "a request to an outside URL exits 1 and keeps the old PNG"
+  assert_contains "$out" "https://example.com/x.png" "…naming the URL"
+
+  : > docs/a.md
+  _dg_doc docs/a.md diagrams/a.png 'flowchart LR' '  A --> NOTPNG'
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/a.md 2>&1) || rc=$?
+  assert_eq "1|old a" "$rc|$(cat docs/diagrams/a.png)" "a render that wrote no PNG exits 1 and keeps the old PNG"
+
+  _dg_doc docs/c.md - 'flowchart LR' '  A --> B'
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/c.md docs/b.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a block with no image link above it exits 1"
+  assert_contains "$out" "docs/c.md:8" "…naming it"
+  assert_contains "$out" "image link" "…and what it lacks"
+
+  printf 'old b' > docs/diagrams/b.png
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" STUB_RENDER=cannot DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/b.md 2>&1) || rc=$?
+  assert_eq "2" "$rc" "a renderer that cannot run exits 2"
+  assert_contains "$out" "could not launch the browser" "…its error shown"
+  assert_eq "old b" "$(cat docs/diagrams/b.png)" "…and the old PNG kept"
+
+  # A PNG whose directory does not exist yet.
+  _dg_doc docs/new/d.md diagrams/d.png 'flowchart LR' '  A --> B'
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/new/d.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "a PNG in a directory not made yet: exit 0"
+  assert_true "…the directory and the PNG made" test -f docs/new/diagrams/d.png
+  _dg_stubs_off
+  teardown
+}
+
+test_diagram_install_browser() {
+  echo "test: diagram install-browser installs the packages if needed, then runs browser.mjs install into <cache>/browsers and prints the path; a failed download exits 2"
+  setup
+  _dg_stubs
+  local out rc
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" "$DG_RUN" diagram install-browser 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "install-browser exits 0"
+  assert_eq "$DG_CACHE/browsers/chrome-headless-shell/stub" "$out" "…printing the browser's path"
+  assert_contains "$(cat "$STUB_LOG/node")" "browser.mjs install $DG_CACHE/$DG_LOCKHASH/node_modules $DG_CACHE/browsers" "…from the cache's packages, into <cache>/browsers"
+  assert_eq "1" "$(grep -c . "$STUB_LOG/npm")" "…having installed the packages first"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" STUB_INSTALL_RC=2 "$DG_RUN" diagram install-browser 2>&1) || rc=$?
+  assert_eq "2" "$rc" "a failed download exits 2"
+  assert_contains "$out" "download failed" "…showing why"
+  _dg_stubs_off
+  teardown
+}
+
 run_tests() {
   echo "=== doc-tools.sh test suite ==="
   echo ""
@@ -9236,6 +9547,11 @@ run_tests() {
   test_diagram_packages_are_pinned
   test_diagram_list_finds_blocks_and_targets
   test_diagram_usage_errors_exit_3
+  test_diagram_render_installs_once_into_the_cache
+  test_diagram_render_needs_node_18
+  test_diagram_render_finds_a_browser
+  test_diagram_render_replaces_a_png_only_on_success
+  test_diagram_install_browser
 
   print_summary
 }
