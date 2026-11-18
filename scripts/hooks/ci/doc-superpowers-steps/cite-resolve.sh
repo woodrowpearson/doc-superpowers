@@ -103,7 +103,7 @@ rc=0
 git merge-file -p --diff3 --ours "$T/head.md" "$T/base.md" "$T/theirs.md" > "$T/ours" 2>/dev/null || rc=$?
 [ "$rc" -le 127 ] || cannot_run "git merge-file --ours failed ($rc)"
 rc=0
-git diff --no-index --no-color --no-ext-diff --no-textconv -U0 "$T/head.md" "$T/ours" > "$T/hunks" 2>/dev/null || rc=$?
+git diff --no-index --no-color --no-ext-diff --no-textconv -U0 --inter-hunk-context=0 "$T/head.md" "$T/ours" > "$T/hunks" 2>/dev/null || rc=$?
 [ "$rc" -le 1 ] || cannot_run "git diff --no-index failed ($rc)"
 
 # The tracked files of the three trees, NUL-separated "mode type oid<TAB>path".
@@ -254,7 +254,9 @@ def main:
         else . end
       | file($tree; $res.H) as $S | file("M"; $res.M) as $Mf
       | ($c.m // $c.n) as $m | ($m - $c.n + 1) as $len
-      | if $c.n < 1 or $len < 1 or $m > ($S | length) then
+      | if $c.n < 1 or $len < 1 then
+          refuse("the block at \($at) cites `\($c | shown)`, an invalid range (lines start at 1, and a range ends at or after its start)")
+        elif $m > ($S | length) then
           refuse("the block at \($at) cites `\($c | shown)` past the end of the file in the \($side) tree")
         else . end
       | $S[$c.n - 1:$m] as $want
@@ -347,5 +349,8 @@ done < "$T/need"
 
 run_jq run "$T/out.json"
 refused "$T/out.json"
-jq -j '.doc' "$T/out.json"
-jq -r '.count' "$T/out.json" >&2
+# The doc and the count go to files first: a late failure prints nothing.
+jq -j '.doc' "$T/out.json" > "$T/doc.out" || cannot_run "cannot write the doc"
+jq -r '.count' "$T/out.json" > "$T/count.out" || cannot_run "cannot write the count"
+cat "$T/doc.out"
+cat "$T/count.out" >&2

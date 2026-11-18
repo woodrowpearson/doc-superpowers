@@ -97,6 +97,10 @@ RETRY="${RESOLVE_RETRY_SECONDS:-10}"
 GIT_USER_NAME="${GIT_USER_NAME:-github-actions[bot]}"
 GIT_USER_EMAIL="${GIT_USER_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}"
 DRIVER="$(dirname "$0")/merge-doc-index.sh"
+# The cite relocator, beside this script; doc-tools.sh, vendored one level up
+# (.github/scripts/doc-tools.sh): the base branch's own copy.
+CITE="$(dirname "$0")/cite-resolve.sh"
+DOC_TOOLS="$(cd "$(dirname "$0")/.." && pwd)/doc-tools.sh"
 
 usage() {
   echo "::error::index-resolve.sh: $*"
@@ -132,7 +136,11 @@ esac
 DRIVER_ABS="$(cd "$(dirname "$DRIVER")" && pwd)/merge-doc-index.sh"
 
 T=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/index-resolve.XXXXXX") || cannot_run "cannot create a scratch directory"
-trap 'rm -rf "$T"' EXIT
+# drop_wt: the re-record's worktree (cite_merge) removed, when there is one.
+drop_wt() {
+  [ ! -e "$T/wt" ] || git worktree remove --force "$T/wt" >/dev/null 2>&1 || rm -rf "$T/wt"
+}
+trap 'drop_wt; rm -rf "$T"' EXIT
 
 # Attributes for the merges, from a tree of their own (--attr-source): none,
 # for the merge without the driver, and one routing the index to it.
@@ -273,6 +281,7 @@ fail() {
 PUSH_FOR_CHECKS="Before you merge, push a commit (\`git pull\`, then \`git commit --allow-empty -m 'Run the checks'\` and \`git push\`), or close and reopen the pull request."
 
 # merged <n> <branch> <merge commit> <checks: started | not-started | none>
+# [<note>]: the note names the docs whose cites were recomputed (R6).
 merged() {
   local checks
   case "$4" in
@@ -282,7 +291,11 @@ merged() {
   esac
   {
     echo "$MARKER"
-    echo "**doc-index-resolve merged \`$(tick "$BASE_BRANCH")\` into this branch** (merge commit $3). The only conflict was the doc index (\`$INDEX\`), which doc-superpowers' index merge driver merged entry by entry."
+    if [ -z "${5:-}" ]; then
+      echo "**doc-index-resolve merged \`$(tick "$BASE_BRANCH")\` into this branch** (merge commit $3). The only conflict was the doc index (\`$INDEX\`), which doc-superpowers' index merge driver merged entry by entry."
+    else
+      echo "**doc-index-resolve merged \`$(tick "$BASE_BRANCH")\` into this branch** (merge commit $3). The only conflicts were the doc index (\`$INDEX\`), which doc-superpowers' index merge driver merged entry by entry, and the cite line numbers in $5"
+    fi
     echo ""
     echo "- Checks: $checks"
     echo "- Next: run \`git pull\` before you push again."
@@ -316,8 +329,144 @@ index_at() {
   git cat-file -p "$1:$INDEX" > "$2" 2>/dev/null || echo '{}' > "$2"
 }
 
+# --- cite line numbers (design 2026-11-18) -----------------------------------
+
+# plural <n> <word>: "1 cite", "2 cites".
+plural() {
+  if [ "$1" = 1 ]; then printf '1 %s' "$2"; else printf '%s %ss' "$1" "$2"; fi
+}
+
+# plain_env <command…>: <command>, every git it runs reading no attribute (the
+# empty attribute source: no filter, textconv or LFS) and running no hook.
+plain_env() {
+  (
+    c="${GIT_CONFIG_COUNT:-0}"
+    export "GIT_CONFIG_KEY_$c=core.hooksPath" "GIT_CONFIG_VALUE_$c=/dev/null"
+    c=$((c + 1))
+    export "GIT_CONFIG_KEY_$c=core.attributesFile" "GIT_CONFIG_VALUE_$c=/dev/null"
+    export GIT_CONFIG_COUNT=$((c + 1)) GIT_ATTR_SOURCE="$EMPTY_TREE"
+    "$@"
+  )
+}
+
+# stage_of <path> <stage> <field: 1 mode | 2 oid>: from $T/stages.
+stage_of() {
+  awk -F'\t' -v p="$1" -v s="$2" -v f="$3" '$2 == p { split($1, x, " "); if (x[3] == s) print x[f] }' "$T/stages"
+}
+
+# cite_doc <path>: whether a conflicted path may be a doc whose cite numbers
+# alone differ (R1): Markdown, changed on both sides from one merge base
+# (stages 1, 2 and 3), and keyed in the head's and the base's index.
+cite_doc() {
+  case "$1" in *.md) ;; *) return 1 ;; esac
+  [ -n "$(stage_of "$1" 1 2)" ] && [ -n "$(stage_of "$1" 2 2)" ] && [ -n "$(stage_of "$1" 3 2)" ] || return 1
+  jq -e --arg k "$1" '(.docs // {}) | has($k)' "$T/h.json" >/dev/null 2>&1 \
+    && jq -e --arg k "$1" '(.docs // {}) | has($k)' "$T/b.json" >/dev/null 2>&1
+}
+
+# not_fresh <tree-ish> <out>: the docs of $T/docs that check-freshness --tree
+# <tree-ish> does not read current with doc_modified false, one per line. 1
+# when check-freshness cannot run or its report cannot be read.
+not_fresh() {
+  plain_env "${BASH:-bash}" "$DOC_TOOLS" check-freshness --tree "$1" > "$T/fresh.json" 2> "$T/fresh.err" || return 1
+  jq -r --rawfile d "$T/docs" '.docs as $f | $d | split("\n")[] | select(. != "")
+    | select((($f[.] // {}).status != "current") or (($f[.] // {}).doc_modified != false))' "$T/fresh.json" > "$2" 2>> "$T/fresh.err"
+}
+
+# cite_merge <n> <branch> <head> <driver tree>: the driver's tree with each
+# doc of $T/docs rewritten by cite-resolve.sh and its index entry re-recorded,
+# into CITE_TREE; CITE_COUNT the cites recomputed. 1 when it skipped or failed
+# the pull request (said already). The worktree goes on every path.
+cite_merge() {
+  local r=0
+  cite_merge_in "$@" || r=$?
+  drop_wt
+  return "$r"
+}
+
+cite_merge_in() {
+  local n="$1" ref="$2" head="$3" tree="$4" doc mode blob rc k=0 idx="$T/cite-index" tree2
+  CITE_COUNT=0 CITE_TREE=""
+  rm -f "$idx"
+  GIT_INDEX_FILE="$idx" git read-tree "$tree" || { fail "$n" "$ref" "git read-tree failed"; return 1; }
+  # fd 3: nothing a call in the loop reads from stdin takes the list.
+  while IFS= read -r doc <&3; do
+    k=$((k + 1))
+    rc=0
+    "${BASH:-bash}" "$CITE" "$doc" "$head" "$BASE_SHA" "$tree" \
+      "$(stage_of "$doc" 1 2)" "$(stage_of "$doc" 2 2)" "$(stage_of "$doc" 3 2)" > "$T/cite-$k.md" 2> "$T/cite.err" || rc=$?
+    case "$rc" in
+      0) ;;
+      1)
+        skip "$n" "$ref" "$(head -n 1 "$T/cite.err")" "the cites of $doc cannot be recomputed"
+        return 1
+        ;;
+      *)
+        fail "$n" "$ref" "cite-resolve.sh could not run on $doc: $(head -n 1 "$T/cite.err")"
+        return 1
+        ;;
+    esac
+    case "$(head -n 1 "$T/cite.err")" in
+      "" | *[!0-9]*) fail "$n" "$ref" "cite-resolve.sh gave no count for $doc"; return 1 ;;
+    esac
+    CITE_COUNT=$((CITE_COUNT + $(head -n 1 "$T/cite.err")))
+    mode=$(stage_of "$doc" 2 1)
+    if ! blob=$(git hash-object -w --no-filters "$T/cite-$k.md") \
+      || ! GIT_INDEX_FILE="$idx" git update-index --cacheinfo "$mode,$blob,$doc"; then
+      fail "$n" "$ref" "cannot write the rewritten $doc"
+      return 1
+    fi
+  done 3< "$T/docs"
+  tree2=$(GIT_INDEX_FILE="$idx" git write-tree) || { fail "$n" "$ref" "git write-tree failed"; return 1; }
+
+  # The re-record: update-index in a worktree at the head holding the merged
+  # files. No hook, filter or LFS process runs there, nor any file of the
+  # pull request: the files come in through read-tree with no attribute.
+  drop_wt
+  if ! plain_env git worktree add -q --detach --no-checkout "$T/wt" "$head" > /dev/null 2> "$T/err" \
+    || ! (cd "$T/wt" && plain_env git read-tree --reset -u "$tree2") > /dev/null 2>> "$T/err"; then
+    fail "$n" "$ref" "cannot set up the worktree for update-index: $(head -n 1 "$T/err")"
+    return 1
+  fi
+  if ! (
+    cd "$T/wt" || exit 1
+    set --
+    while IFS= read -r doc; do set -- "$@" "$doc"; done < "$T/docs"
+    plain_env "${BASH:-bash}" "$DOC_TOOLS" update-index "$@"
+  ) > "$T/update.log" 2>&1; then
+    sed 's/^/  update-index: /' "$T/update.log"
+    skip "$n" "$ref" "doc-tools.sh update-index could not re-record $(list_md < "$T/docs") on the merged files (the resolver's run log says why)." \
+      "update-index failed"
+    return 1
+  fi
+  # update-index stamps last_verified now, but the step only read the cites,
+  # so it verified nothing (R5): each re-recorded entry keeps the newer of
+  # the two sides' last_verified. A jq edit of that one field.
+  if ! jq --slurpfile h "$T/h.json" --slurpfile b "$T/b.json" --rawfile d "$T/docs" '
+      reduce ($d | split("\n")[] | select(. != "")) as $k (.;
+        .docs[$k].last_verified = ([$h[0].docs[$k].last_verified, $b[0].docs[$k].last_verified]
+          | map(select(. != null)) | max))' "$T/wt/$INDEX" > "$T/index.json" 2> "$T/err" \
+    || ! blob=$(git hash-object -w --no-filters "$T/index.json") \
+    || ! GIT_INDEX_FILE="$idx" git update-index --cacheinfo "100644,$blob,$INDEX" \
+    || ! CITE_TREE=$(GIT_INDEX_FILE="$idx" git write-tree); then
+    fail "$n" "$ref" "cannot write the re-recorded index"
+    return 1
+  fi
+
+  # On the final tree, each re-recorded doc reads current (R5).
+  if ! not_fresh "$CITE_TREE" "$T/stale"; then
+    fail "$n" "$ref" "doc-tools.sh check-freshness failed on the merge: $(head -n 1 "$T/fresh.err")"
+    return 1
+  fi
+  if [ -s "$T/stale" ]; then
+    skip "$n" "$ref" "After the merge, \`$(tick "$(head -n 1 "$T/stale")")\` does not read current in the re-recorded doc index." \
+      "$(head -n 1 "$T/stale") is not current after the re-record"
+    return 1
+  fi
+}
+
 resolve_one() {
-  local n="$1" ref="$2" sha mergeable head out rc tree conflicts dropped bring commit tip mb checks
+  local n="$1" ref="$2" sha mergeable head out rc tree conflicts dropped bring commit tip mb checks p side at who final msg note
   local -a inputs
   # The mergeable state, asked once more while GitHub is still computing it.
   if ! gh api "repos/$REPO/pulls/$n" > "$T/pr.json"; then
@@ -361,33 +510,71 @@ resolve_one() {
     return 0
   fi
 
-  # Without the driver: the index must be the only conflict.
+  # Without the driver: the index must conflict, and every other conflict
+  # must be a doc whose cite numbers may alone differ (cite_doc, R1).
   rc=0
-  out=$(git_plain merge-tree --write-tree --no-messages --name-only "$head" "$BASE_SHA" 2>"$T/err") || rc=$?
+  out=$(git_plain -c core.quotePath=false merge-tree --write-tree --no-messages "$head" "$BASE_SHA" 2>"$T/err") || rc=$?
   if [ "$rc" -gt 1 ]; then
     fail "$n" "$ref" "git merge-tree failed: $(head -n 1 "$T/err")"
     return 0
   fi
-  conflicts=$(printf '%s\n' "$out" | sed '1d') || { fail "$n" "$ref" "cannot read git's conflict list"; return 0; }
+  # One line per conflicted stage: "<mode> <oid> <stage><TAB><path>".
+  printf '%s\n' "$out" | sed '1d' > "$T/stages" \
+    || { fail "$n" "$ref" "cannot read git's conflict list"; return 0; }
+  conflicts=$(cut -f2- "$T/stages" | awk 'NF && !seen[$0]++') \
+    || { fail "$n" "$ref" "cannot read git's conflict list"; return 0; }
   if [ "$rc" = 0 ] || [ -z "$conflicts" ]; then
     skip "$n" "$ref" "git merges \`$(tick "$BASE_BRANCH")\` into it without a conflict, so there is nothing for the resolver to settle." \
       "git finds no conflict"
     return 0
   fi
-  if [ "$conflicts" != "$INDEX" ]; then
-    skip "$n" "$ref" "Files other than the doc index conflict: $(printf '%s\n' "$conflicts" | grep -vxF "$INDEX" | list_md)." \
-      "other files conflict ($(printf '%s\n' "$conflicts" | grep -vxF "$INDEX" | head -n 5 | tr '\n' ' ' | sed 's/ $//'))"
+  index_at "$head" "$T/h.json"
+  index_at "$BASE_SHA" "$T/b.json"
+  : > "$T/docs"
+  : > "$T/others"
+  while IFS= read -r p; do
+    [ "$p" != "$INDEX" ] || continue
+    if printf '%s\n' "$conflicts" | grep -qxF "$INDEX" && cite_doc "$p"; then
+      printf '%s\n' "$p" >> "$T/docs"
+    else
+      printf '%s\n' "$p" >> "$T/others"
+    fi
+  done <<<"$conflicts"
+  if [ -s "$T/others" ]; then
+    skip "$n" "$ref" "Files other than the doc index conflict: $(list_md < "$T/others")." \
+      "other files conflict ($(head -n 5 "$T/others" | tr '\n' ' ' | sed 's/ $//'))"
     return 0
   fi
 
-  # With the driver: a clean merge.
+  # A doc's cites are recomputed only from records made against its code:
+  # current, and not modified since, on both sides (R5).
+  if [ -s "$T/docs" ]; then
+    if [ ! -f "$DOC_TOOLS" ]; then
+      fail "$n" "$ref" "doc-tools.sh is not vendored beside the step scripts ($DOC_TOOLS): run scripts/hooks/install.sh install --ci"
+      return 0
+    fi
+    for side in head base; do
+      if [ "$side" = head ]; then at="$head" who="the head"; else at="$BASE_SHA" who="\`$(tick "$BASE_BRANCH")\`"; fi
+      if ! not_fresh "$at" "$T/stale"; then
+        fail "$n" "$ref" "doc-tools.sh check-freshness failed on $side: $(head -n 1 "$T/fresh.err")"
+        return 0
+      fi
+      if [ -s "$T/stale" ]; then
+        skip "$n" "$ref" "\`$(tick "$(head -n 1 "$T/stale")")\` does not read current, unmodified since its record, in the doc index on $who, so its cites cannot be recomputed." \
+          "$(head -n 1 "$T/stale") is not current on $side"
+        return 0
+      fi
+    done
+  fi
+
+  # With the driver: the index merges cleanly; the docs may still conflict.
   rc=0
-  out=$(git_driver merge-tree --write-tree --no-messages "$head" "$BASE_SHA" 2>"$T/err") || rc=$?
+  out=$(git_driver -c core.quotePath=false merge-tree --write-tree --no-messages --name-only "$head" "$BASE_SHA" 2>"$T/err") || rc=$?
   if [ "$rc" -gt 1 ]; then
     fail "$n" "$ref" "git merge-tree failed: $(head -n 1 "$T/err")"
     return 0
   fi
-  if [ "$rc" = 1 ]; then
+  if [ "$rc" = 1 ] && { [ ! -s "$T/docs" ] || printf '%s\n' "$out" | sed '1d' | grep -qxF "$INDEX"; }; then
     sed 's/^/  driver: /' "$T/err"
     skip "$n" "$ref" "The index merge driver found entries that both sides changed in a way it cannot settle (the resolver's run log names them)." \
       "the merge driver could not merge the index"
@@ -395,11 +582,16 @@ resolve_one() {
   fi
   tree=$(printf '%s\n' "$out" | sed -n 1p) || { fail "$n" "$ref" "cannot read the merged tree"; return 0; }
 
+  # The docs' cites recomputed and their entries re-recorded (R3, R5).
+  final="$tree"
+  if [ -s "$T/docs" ]; then
+    cite_merge "$n" "$ref" "$head" "$tree" || return 0
+    final="$CITE_TREE"
+  fi
+
   # No entry dropped.
   mb=$(git merge-base "$head" "$BASE_SHA" 2>/dev/null | head -n 1 || true)
-  index_at "$head" "$T/h.json"
-  index_at "$BASE_SHA" "$T/b.json"
-  index_at "$tree" "$T/r.json"
+  index_at "$final" "$T/r.json"
   if [ -n "$mb" ]; then index_at "$mb" "$T/m.json"; else echo '{}' > "$T/m.json"; fi
   if ! dropped=$(jq -rn --slurpfile h "$T/h.json" --slurpfile b "$T/b.json" --slurpfile m "$T/m.json" \
     --slurpfile r "$T/r.json" "$DROPPED_JQ" 2>"$T/err"); then
@@ -413,7 +605,7 @@ resolve_one() {
   fi
 
   # No workflow file: the job token cannot push one.
-  bring=$(git diff --name-only "$head" "$tree" -- .github/workflows/) \
+  bring=$(git diff --name-only "$head" "$final" -- .github/workflows/) \
     || { fail "$n" "$ref" "git diff failed on the merge"; return 0; }
   if [ -n "$bring" ]; then
     skip "$n" "$ref" "The merge brings files under \`.github/workflows/\` ($(printf '%s\n' "$bring" | list_md)), which the workflow token cannot push." \
@@ -421,10 +613,17 @@ resolve_one() {
     return 0
   fi
 
+  # The message and the comment name the docs and the cites (R6); an
+  # index-only merge says what it always said.
+  msg="Only the doc index ($INDEX) conflicted; doc-superpowers' index merge driver merged it (doc-index-resolve)."
+  note=""
+  if [ -s "$T/docs" ]; then
+    msg="The doc index ($INDEX) and the cite line numbers in $(paste -sd ',' "$T/docs" | sed 's/,/, /g') conflicted. doc-superpowers' index merge driver merged the index; doc-index-resolve recomputed $(plural "$CITE_COUNT" cite) against the merged code and re-recorded those docs' index entries, keeping the newer last_verified."
+    note="$(list_md < "$T/docs"): the resolver recomputed $(plural "$CITE_COUNT" cite) against the merged code and re-recorded those docs' index entries, keeping the newer \`last_verified\` of the two sides."
+  fi
   commit=$(GIT_AUTHOR_NAME="$GIT_USER_NAME" GIT_AUTHOR_EMAIL="$GIT_USER_EMAIL" \
     GIT_COMMITTER_NAME="$GIT_USER_NAME" GIT_COMMITTER_EMAIL="$GIT_USER_EMAIL" \
-    git commit-tree "$tree" -p "$head" -p "$BASE_SHA" -m "Merge branch '$BASE_BRANCH' into $ref" \
-    -m "Only the doc index ($INDEX) conflicted; doc-superpowers' index merge driver merged it (doc-index-resolve).") \
+    git commit-tree "$final" -p "$head" -p "$BASE_SHA" -m "Merge branch '$BASE_BRANCH' into $ref" -m "$msg") \
     || { fail "$n" "$ref" "git commit-tree failed"; return 0; }
 
   if ! git push -q origin --force-with-lease="refs/heads/$ref:$head" "$commit:refs/heads/$ref"; then
@@ -453,7 +652,7 @@ resolve_one() {
       echo "::warning::PR #$n ($ref): merged, but $TEST_WORKFLOW could not be dispatched on it (gh api failed, above)"
     fi
   fi
-  merged "$n" "$ref" "$commit" "$checks"
+  merged "$n" "$ref" "$commit" "$checks" "$note"
 }
 
 while IFS=$'\037' read -r n ref sha why; do
