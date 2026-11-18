@@ -145,7 +145,7 @@ C4Container
   UpdateRelStyle(hooks, ledger, $offsetX="0", $offsetY="64")
   UpdateRelStyle(search, project, $offsetX="0", $offsetY="12")
   UpdateRelStyle(search, gcloud, $offsetX="0", $offsetY="16")
-  UpdateRelStyle(agents, search, $offsetX="-60", $offsetY="0")
+  UpdateRelStyle(agents, search, $offsetX="-320", $offsetY="0")
   UpdateRelStyle(ledger, ledgerdata, $offsetX="0", $offsetY="40")
   UpdateRelStyle(ledger, project, $offsetX="0", $offsetY="-8")
   UpdateRelStyle(ledger, adapters, $offsetX="0", $offsetY="24")
