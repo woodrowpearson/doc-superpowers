@@ -8781,6 +8781,41 @@ test_writing_verbs_write_no_bytecode() {
   teardown
 }
 
+# --- Diagram verbs (diagram list | render | install-browser) ---
+#
+# The renderer is Node (scripts/diagram/): its packages are pinned by
+# package.json and package-lock.json and installed into a cache outside the
+# repository, never committed. doc-tools.sh finds the blocks, the cache and a
+# browser, and moves each PNG in only when its render succeeded.
+
+_DG_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+test_diagram_packages_are_pinned() {
+  echo "test: diagram: package.json and its lock pin mermaid 11.17.2, layout-elk 0.2.3 and puppeteer-core 24.43.1 exactly, Node 18 or later; no node_modules is tracked"
+  local pkg="$SCRIPT_DIR/diagram/package.json" lock="$SCRIPT_DIR/diagram/package-lock.json" name want tracked
+  assert_file_exists "$pkg" "scripts/diagram/package.json exists"
+  assert_file_exists "$lock" "scripts/diagram/package-lock.json exists"
+  [ -f "$pkg" ] && [ -f "$lock" ] || return 0
+  for name in mermaid@11.17.2 @mermaid-js/layout-elk@0.2.3 puppeteer-core@24.43.1; do
+    want="${name##*@}"
+    name="${name%@*}"
+    assert_eq "$want" "$(jq -r --arg n "$name" '.dependencies[$n]' "$pkg")" "package.json pins $name to exactly $want"
+    assert_eq "$want" "$(jq -r --arg n "$name" '.packages[""].dependencies[$n]' "$lock")" "the lock's root pins $name to exactly $want"
+    assert_eq "$want" "$(jq -r --arg n "node_modules/$name" '.packages[$n].version' "$lock")" "the lock installs $name $want"
+  done
+  assert_eq "2.13.2" "$(jq -r '.packages["node_modules/@puppeteer/browsers"].version' "$lock")" "the lock installs @puppeteer/browsers 2.13.2 (install-browser uses it)"
+  assert_eq ">=18" "$(jq -r '.engines.node' "$pkg")" "package.json names Node 18 or later"
+  assert_eq "3" "$(jq -r '.lockfileVersion' "$lock")" "the lock is lockfileVersion 3 (npm 7 or later reads it)"
+  assert_eq "0" "$(jq '[.dependencies | to_entries[] | select(.value | test("^[0-9]+\\.[0-9]+\\.[0-9]+$") | not)] | length' "$pkg")" "every dependency is an exact version, never a range"
+  if git -C "$_DG_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    tracked=$(git -C "$_DG_ROOT" ls-files -- 'scripts/diagram' | grep -c 'node_modules' || true)
+    assert_eq "0" "$tracked" "git tracks no node_modules under scripts/diagram/"
+    assert_true "git ignores scripts/diagram/node_modules/" git -C "$_DG_ROOT" check-ignore -q scripts/diagram/node_modules/x
+  else
+    record_skip "diagram packages: the plugin is not a git checkout, so what git tracks cannot be checked"
+  fi
+}
+
 run_tests() {
   echo "=== doc-tools.sh test suite ==="
   echo ""
@@ -9092,6 +9127,9 @@ run_tests() {
   test_writing_execs_the_engine_isolated
   test_writing_skipped_where_the_engine_is_not_beside_doc_tools
   test_writing_verbs_write_no_bytecode
+
+  # --- Diagram verbs ---
+  test_diagram_packages_are_pinned
 
   print_summary
 }
