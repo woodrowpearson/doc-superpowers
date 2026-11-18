@@ -9548,6 +9548,35 @@ test_diagram_render_config_for_real() {
   teardown
 }
 
+test_diagram_render_config_allowlist_for_real() {
+  echo "test: diagram render --config, for real: only the allowlisted Mermaid keys reach mermaid.initialize; dompurifyConfig, secure, securityLevel, startOnLoad and any __proto__/constructor/prototype key are dropped, each named on one warning line"
+  _dg_real_ready "diagram config allowlist real render" || return 0
+  unset DOC_SUPERPOWERS_DIAGRAM_CONFIG
+  setup
+  local out rc svg
+  svg="$TEST_DIR/svg"
+  # FORBID_TAGS b would strip the <b> of the label if dompurifyConfig reached
+  # Mermaid's sanitiser: its <b> staying shows the key was dropped.
+  printf '%s\n' '{"dompurifyConfig": {"FORBID_TAGS": ["b"]}, "startOnLoad": true, "theme": "base",' \
+    ' "themeVariables": {"primaryColor": "#00ff00", "constructor": {"x": 1}},' \
+    ' "flowchart": {"__proto__": {"curve": "basis"}, "curve": "linear"}, "notAKey": 1}' > look.json
+  _dg_doc docs/s.md diagrams/s.png 'flowchart LR' '  A["<b>bold</b> text"] --> B'
+  DOC_TOOLS_DIAGRAM_SVG_DIR="$svg" _dg_real_render out rc "diagram config allowlist real render" \
+    --config look.json docs/s.md || { teardown; return 0; }
+  assert_eq "0" "$rc" "the diagram renders with the config: exit 0 ($(printf '%s' "$out" | tail -n 2 | tr '\n' ' '))"
+  assert_contains "$(cat "$svg/s.svg" 2>/dev/null)" "<b>bold</b>" "dompurifyConfig never reaches Mermaid: the label keeps its <b>"
+  assert_contains "$(cat "$svg/s.svg" 2>/dev/null)" "#00ff00" "an allowlisted key (themeVariables) still reaches the theme"
+  local warn
+  warn=$(printf '%s\n' "$out" | grep -c 'not accepted' || true)
+  assert_eq "1" "$warn" "one warning line names the dropped keys"
+  local k
+  for k in dompurifyConfig startOnLoad notAKey themeVariables.constructor flowchart.__proto__; do
+    assert_contains "$(printf '%s\n' "$out" | grep 'not accepted')" "$k" "…naming $k"
+  done
+  assert_not_contains "$(printf '%s\n' "$out" | grep 'not accepted')" "primaryColor" "…and no accepted key"
+  teardown
+}
+
 # _dg_svg_nodes <svg>: each flowchart node's id and translate, one a line.
 _dg_svg_nodes() {
   grep -oE '<g class="node [^>]*>' "$1" | grep -oE 'flowchart-[A-Za-z0-9]+|translate\([^)]*\)' | paste -d' ' - -
@@ -9950,6 +9979,7 @@ run_tests() {
   test_diagram_install_browser
   test_diagram_render_for_real
   test_diagram_render_config_for_real
+  test_diagram_render_config_allowlist_for_real
   test_diagram_render_nested_front_matter_for_real
   test_diagram_no_renderer_service_is_named
 

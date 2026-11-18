@@ -3126,13 +3126,20 @@ diagram render|cmd_diagram_render|none|config=
   18 or later runs scripts/diagram/render.mjs in a headless Chrome page
   that aborts every request but file:, data: and about:. Width 1248,
   device scale 2, white background; ELK is registered for the blocks that
-  ask for it. The look comes from one Mermaid config file (a JSON object:
-  theme, themeVariables, themeCSS, flowchart, elk and the rest), merged
-  into the renderer's mermaid.initialize: --config <file>, else
+  ask for it. The look comes from one Mermaid config file, a JSON object
+  merged into the renderer's mermaid.initialize: --config <file>, else
   DOC_SUPERPOWERS_DIAGRAM_CONFIG, else docs/diagrams/config.json when it
-  exists, else none. securityLevel stays strict whatever the file says; a
-  block's own front matter overrides the file. A config file that is
-  missing (when named), not JSON or not an object exits 3, naming it.
+  exists, else none. Only these top-level keys are taken from it: theme,
+  themeVariables, themeCSS, fontFamily, fontSize, look, layout, elk,
+  flowchart, sequence, gantt, classDiagram, stateDiagram, er, journey,
+  pie, quadrantChart, requirement, mindmap, timeline, gitGraph, c4,
+  sankey, xyChart, block, packet, architecture, wrap, maxTextSize,
+  maxEdges, darkMode, htmlLabels, deterministicIds, deterministicIDSeed.
+  Any other key (dompurifyConfig, secure, securityLevel, startOnLoad...)
+  and any __proto__, constructor or prototype key is dropped, with one
+  warning line naming it; securityLevel stays strict. A block's own front
+  matter overrides the file. A config file that is missing (when named),
+  not JSON or not an object exits 3, naming it.
   A PNG is replaced only when its render succeeded. The pinned
   packages (scripts/diagram/package-lock.json) are installed once, with
   npm ci --ignore-scripts, into

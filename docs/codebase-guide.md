@@ -644,7 +644,9 @@ doc-tools.sh diagram list|render [--config <file>] [<doc>...]  (or doc-superpowe
       naming install-browser)
     → a job per block with a PNG (one without fails), then node render.mjs --browser --modules --jobs
       [--config] (one page per job; every request but file:, data:, about: aborted and failing its
-      job; the config deep-merged into mermaid.initialize, securityLevel forced to strict and
+      job; the config's allowlisted keys (CONFIG_KEYS; any other, and __proto__/constructor/
+      prototype at any depth, dropped with one warning line) deep-merged into
+      mermaid.initialize, securityLevel forced to strict and
       Mermaid's default secure keys kept, so a block's front matter overrides the file but never the level)
     → each ok job whose file is a PNG is moved onto its PNG; a failed one is deleted, the old PNG kept
 doc-tools.sh diagram install-browser

@@ -13,12 +13,16 @@
 //   {"id": 1, "ok": false, "error": "...", "blocked": ["https://..."]}
 // The doc-tools.sh side moves `out` onto the PNG only for an ok job.
 //
-// --config names a JSON object of Mermaid settings (theme, themeVariables,
-// themeCSS, flowchart, elk, ...). It is deep-merged over this renderer's own
-// start-up settings and handed to mermaid.initialize, so a block's front
-// matter or init directive still overrides it. Two keys are never taken from
-// it: securityLevel stays "strict", and `secure` (the keys a block may not
-// set) stays Mermaid's default, so no block can loosen the level either.
+// --config names a JSON object of Mermaid settings. Only the keys of
+// CONFIG_KEYS are taken from it (the look and the layouts: theme,
+// themeVariables, themeCSS, flowchart, elk, ...); any other top-level key
+// (dompurifyConfig, secure, securityLevel, startOnLoad among them) and any
+// __proto__, constructor or prototype key at any depth is dropped, and one
+// warning line on stderr names what was. What is kept is deep-merged over
+// this renderer's own start-up settings and handed to mermaid.initialize, so
+// a block's front matter or init directive still overrides it. securityLevel
+// stays "strict", and `secure` (the keys a block may not set) stays
+// Mermaid's default, so no block can loosen the level either.
 //
 // Test seam: with DOC_TOOLS_DIAGRAM_SVG_DIR set, each rendered SVG is also
 // written there, named after its PNG (a.png -> a.svg).
@@ -87,6 +91,53 @@ function deepMerge(base, over) {
   return out;
 }
 
+// The top-level keys a config file may set: the look, the layouts and the
+// diagram types' own settings. Nothing that touches sanitising or the
+// security level (dompurifyConfig, secure, securityLevel) is among them.
+const CONFIG_KEYS = new Set([
+  'theme', 'themeVariables', 'themeCSS', 'fontFamily', 'fontSize', 'look', 'layout', 'elk',
+  'flowchart', 'sequence', 'gantt', 'classDiagram', 'stateDiagram', 'er', 'journey', 'pie',
+  'quadrantChart', 'requirement', 'mindmap', 'timeline', 'gitGraph', 'c4', 'sankey', 'xyChart',
+  'block', 'packet', 'architecture', 'wrap', 'maxTextSize', 'maxEdges', 'darkMode', 'htmlLabels',
+  'deterministicIds', 'deterministicIDSeed',
+]);
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+// withoutUnsafeKeys(value, where, dropped): a copy of value with every
+// __proto__, constructor and prototype key removed at any depth, each one's
+// dotted path pushed onto dropped.
+function withoutUnsafeKeys(value, where, dropped) {
+  if (Array.isArray(value)) return value.map((v, i) => withoutUnsafeKeys(v, `${where}[${i}]`, dropped));
+  if (!isObject(value)) return value;
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (UNSAFE_KEYS.has(k)) {
+      dropped.push(`${where}.${k}`);
+      continue;
+    }
+    out[k] = withoutUnsafeKeys(v, `${where}.${k}`, dropped);
+  }
+  return out;
+}
+
+// allowedConfig(file): the CONFIG_KEYS of file, cleaned; one warning line
+// names every key that was dropped.
+function allowedConfig(file) {
+  const dropped = [];
+  const out = {};
+  for (const [k, v] of Object.entries(file)) {
+    if (!CONFIG_KEYS.has(k)) {
+      dropped.push(k);
+      continue;
+    }
+    out[k] = withoutUnsafeKeys(v, k, dropped);
+  }
+  if (dropped.length > 0) {
+    process.stderr.write(`render.mjs: Mermaid config keys not accepted, dropped: ${dropped.join(', ')}\n`);
+  }
+  return out;
+}
+
 // c4.wrap false: the setting every hand render before this renderer used.
 let mermaidConfig = { startOnLoad: false, securityLevel: 'strict', c4: { wrap: false } };
 if (args.config) {
@@ -97,7 +148,7 @@ if (args.config) {
     fail(`cannot read the Mermaid config ${args.config}: ${e.message}`);
   }
   if (!isObject(file)) fail(`the Mermaid config ${args.config} is not a JSON object`);
-  mermaidConfig = deepMerge(mermaidConfig, file);
+  mermaidConfig = deepMerge(mermaidConfig, allowedConfig(file));
 }
 mermaidConfig.startOnLoad = false;
 mermaidConfig.securityLevel = 'strict';
