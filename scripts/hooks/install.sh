@@ -403,6 +403,17 @@ CI options (install --ci / --all):
                             push, which the comment asks for when none is named
                             (default: none; recorded only when given, and
                             --resolve-test-workflow= clears the record)
+  --resolve-test-pr-input=<name>
+                            the test workflow's workflow_dispatch input that
+                            takes the pull request's number: the dispatch then
+                            sends inputs[<name>]=<number>, and nothing else of
+                            the pull request. Opt-in, because GitHub refuses an
+                            input the workflow does not declare. A letter or _,
+                            then letters, digits, _ and - (default: none, and
+                            the dispatch sends no inputs; without
+                            --resolve-test-workflow it has no effect; recorded
+                            only when given, and --resolve-test-pr-input=
+                            clears the record)
   --helpers=<true|false>    deprecated, and inert: the helpers ship exactly
                             while an installed workflow runs them.
                             --helpers=false only refuses doc-pr-release
@@ -857,6 +868,7 @@ render_workflow() {
     -e "s|__MARKETPLACE_URL__|$R_MARKET|g" \
     -e "s|__PLUGIN_COMMIT__|$R_COMMIT|g" \
     -e "s|__RESOLVE_TEST_WORKFLOW__|$R_RTW|g" \
+    -e "s|__RESOLVE_TEST_PR_INPUT__|$R_RPI|g" \
     "$1"
 }
 
@@ -2404,6 +2416,14 @@ valid_workflow_file() {
   [[ "$1" =~ $re ]]
 }
 
+# A workflow_dispatch input name, as GitHub takes one and a double-quoted YAML
+# value and gh's -f inputs[<name>]=<value> carry it as is: a letter or _, then
+# letters, digits, _ and -.
+valid_input_name() {
+  local re='^[A-Za-z_][A-Za-z0-9_-]*$'
+  [[ "$1" =~ $re ]]
+}
+
 # plugin_marketplace_url: the plugin's own repository (plugin.json's
 # "repository", a URL or {url}) as a git URL ending in .git — where a
 # Claude-powered workflow fetches the plugin unless --marketplace-url names
@@ -2547,6 +2567,11 @@ preflight_ci() {
   [ "$OPT_RTW_SET" != 1 ] || CI_RTW="$OPT_RTW"
   [ -z "$CI_RTW" ] || valid_workflow_file "$CI_RTW" \
     || die "the recorded test workflow '$CI_RTW' is not a workflow file name; pass --resolve-test-workflow. Nothing was changed."
+  # Its workflow_dispatch input for the pull request's number: the same.
+  CI_RPI="$STATE_RPI"
+  [ "$OPT_RPI_SET" != 1 ] || CI_RPI="$OPT_RPI"
+  [ -z "$CI_RPI" ] || valid_input_name "$CI_RPI" \
+    || die "the recorded pull request input '$CI_RPI' is not an input name; pass --resolve-test-pr-input. Nothing was changed."
 
   CI_DISK=$(disk_workflows)
   # Every install --ci retires every retired workflow.
@@ -2632,7 +2657,7 @@ preflight_ci() {
 
   # sed-escaped once, in the main shell (the version lookup is cached here).
   R_BASE=$(sed_repl "$CI_BASE") R_CRON=$(sed_repl "$CI_CRON") R_STRICT=0 R_VERSION="" R_MARKET="" R_COMMIT=""
-  R_RTW=$(sed_repl "$CI_RTW")
+  R_RTW=$(sed_repl "$CI_RTW") R_RPI=$(sed_repl "$CI_RPI")
   if [ "$CI_STRICT" = true ]; then
     R_STRICT=1
   fi
@@ -2895,7 +2920,7 @@ install_ci() {
     echo "  Existing $w.yml found (not doc-superpowers-managed), skipping."
   done
   retire_workflows
-  state_set_choices "$CI_BASE" "$CI_CRON" "$CI_STRICT" "$CI_MARKET" "$CI_RTW"
+  state_set_choices "$CI_BASE" "$CI_CRON" "$CI_STRICT" "$CI_MARKET" "$CI_RTW" "$CI_RPI"
   vendor_sync install
   state_flush
 
@@ -2903,7 +2928,10 @@ install_ci() {
   nforeign=$(set -- $CI_FOREIGN; echo $#)
   nskip=$(set -- $CI_SKIP; echo $#)
   echo "CI/CD workflows: $installed installed, $refreshed refreshed, $nforeign skipped (existing non-managed), $nskip skipped (intentionally uninstalled)"
-  echo "  Choices (recorded in $STATE_FILE): base branch $CI_BASE, cron '$CI_CRON', strict $CI_STRICT${CI_MARKET:+, marketplace $CI_MARKET}${CI_RTW:+, test workflow $CI_RTW}"
+  echo "  Choices (recorded in $STATE_FILE): base branch $CI_BASE, cron '$CI_CRON', strict $CI_STRICT${CI_MARKET:+, marketplace $CI_MARKET}${CI_RTW:+, test workflow $CI_RTW}${CI_RPI:+, pr input $CI_RPI}"
+  if [ -n "$CI_RPI" ] && [ -z "$CI_RTW" ]; then
+    echo "  note: --resolve-test-pr-input $CI_RPI has no effect without --resolve-test-workflow (nothing is dispatched); it is recorded for when one is named"
+  fi
   for w in $CI_SKIP; do
     echo "  skipping $w.yml (previously uninstalled; pass --workflows=$w to override, or --force)"
   done
@@ -3045,9 +3073,9 @@ status_ci() {
   done
   if [ "$state_ok" = 1 ] && [ "$STATE_HAS_CI" = 1 ]; then
     if $JSON; then
-      st_rec ci.choices "${STATE_BASE:-main}" "${STATE_CRON:-0 9 * * 1}" "${STATE_STRICT:-false}" "$STATE_MARKET" "$STATE_RTW"
+      st_rec ci.choices "${STATE_BASE:-main}" "${STATE_CRON:-0 9 * * 1}" "${STATE_STRICT:-false}" "$STATE_MARKET" "$STATE_RTW" "$STATE_RPI"
     else
-      echo "  choices: base branch ${STATE_BASE:-main}, cron '${STATE_CRON:-0 9 * * 1}', strict ${STATE_STRICT:-false}${STATE_MARKET:+, marketplace $STATE_MARKET}${STATE_RTW:+, test workflow $STATE_RTW} ($STATE_FILE)"
+      echo "  choices: base branch ${STATE_BASE:-main}, cron '${STATE_CRON:-0 9 * * 1}', strict ${STATE_STRICT:-false}${STATE_MARKET:+, marketplace $STATE_MARKET}${STATE_RTW:+, test workflow $STATE_RTW}${STATE_RPI:+, pr input $STATE_RPI} ($STATE_FILE)"
     fi
   fi
   # On a ledger host, a claims workflow without the ledger set beside
@@ -3129,7 +3157,8 @@ _STATUS_JSON_JQ='
     elif $r[0] == "ci.retired" then .tiers.ci.retired += [$r[1]]
     elif $r[0] == "ci.choices" then .tiers.ci.choices = {base_branch: $r[1], cron: $r[2], ci_strict: ($r[3] == "true"),
                                                       marketplace_url: ($r[4] // "" | n),
-                                                      resolve_test_workflow: ($r[5] // "" | n)}
+                                                      resolve_test_workflow: ($r[5] // "" | n),
+                                                      resolve_test_pr_input: ($r[6] // "" | n)}
     elif $r[0] == "ci.ledger_gap" then .tiers.ci.claims_without_ledger_helpers += [$r[1]]
     elif $r[0] == "ci.helpers" then .tiers.ci.helpers[$r[1]] = ($r[2] | tonumber)
     elif $r[0] == "ci.removable" then .tiers.ci.removable_vendored += [$r[1]]
@@ -3194,6 +3223,8 @@ OPT_BASE="" OPT_CRON="" OPT_STRICT="" HELPERS=true FORCE=false TRANSIENT=false
 OPT_MARKET="" OPT_MARKET_SET=0
 # --resolve-test-workflow: the same, OPT_RTW_SET=1 once given.
 OPT_RTW="" OPT_RTW_SET=0
+# --resolve-test-pr-input: the same, OPT_RPI_SET=1 once given.
+OPT_RPI="" OPT_RPI_SET=0
 WF_MODE=plain CSV_NAMES=""
 SEEN_CI_OPTS=""
 # --merge-driver-only: the git tier is the merge driver alone (no hook).
@@ -3205,7 +3236,7 @@ allowed() {
   case "$COMMAND:$1" in
     *:--git | *:--claude | *:--ci | *:--all | *:--ledger | *:--ledger-claude | *:--search | *:--search-gate | *:--merge-driver-only) return 0 ;;
     status:--json) return 0 ;;
-    install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force | install:--marketplace-url | install:--resolve-test-workflow) return 0 ;;
+    install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force | install:--marketplace-url | install:--resolve-test-workflow | install:--resolve-test-pr-input) return 0 ;;
     uninstall:--workflows | uninstall:--transient) return 0 ;;
   esac
   return 1
@@ -3220,12 +3251,12 @@ while [ $# -gt 0 ]; do
     *) value="" has_value=0 ;;
   esac
   case "$name" in
-    --git | --claude | --ci | --all | --ledger | --ledger-claude | --search | --search-gate | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow) ;;
+    --git | --claude | --ci | --all | --ledger | --ledger-claude | --search | --search-gate | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input) ;;
     *) usage_error "unknown option: $arg" ;;
   esac
   allowed "$name" || usage_error "$name does not apply to $COMMAND"
   case "$name" in
-    --base-branch | --cron | --workflows | --helpers | --marketplace-url | --resolve-test-workflow)
+    --base-branch | --cron | --workflows | --helpers | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input)
       if [ "$has_value" = 0 ]; then
         [ $# -gt 0 ] || die "$name requires a value"
         value="$1"
@@ -3264,6 +3295,11 @@ while [ $# -gt 0 ]; do
         || usage_error "invalid --resolve-test-workflow '$value': a workflow file name in .github/workflows/ (letters, digits and . _ -, ending .yml or .yaml), or empty for none"
       OPT_RTW="$value" OPT_RTW_SET=1
       ;;
+    --resolve-test-pr-input)
+      [ -z "$value" ] || valid_input_name "$value" \
+        || usage_error "invalid --resolve-test-pr-input '$value': a workflow_dispatch input name (a letter or _, then letters, digits, _ and -), or empty for none"
+      OPT_RPI="$value" OPT_RPI_SET=1
+      ;;
     --ci-strict)
       case "$has_value:$value" in
         0:* | 1:true) OPT_STRICT=true ;;
@@ -3288,7 +3324,7 @@ while [ $# -gt 0 ]; do
     --transient) TRANSIENT=true ;;
   esac
   case "$name" in
-    --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow)
+    --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input)
       SEEN_CI_OPTS="${SEEN_CI_OPTS:+$SEEN_CI_OPTS }$name"
       ;;
   esac

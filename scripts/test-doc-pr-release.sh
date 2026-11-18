@@ -4256,7 +4256,7 @@ test_index_resolve_template() {
   echo "Test: doc-index-resolve.yml — a push to the base and workflow_dispatch (one optional pr), never a pull_request event; one job: contents, pull-requests and actions write, one run at a time never cancelled, a timeout, the pinned checkout with no persisted token and full history, the jq pin, then the step with its env"
   yaml_unavailable "index_resolve_template" && return 0
   local dir json
-  dir=$(installed_repo --ci --workflows=doc-index-resolve --resolve-test-workflow=tests.yml) \
+  dir=$(installed_repo --ci --workflows=doc-index-resolve --resolve-test-workflow=tests.yml --resolve-test-pr-input=pr) \
     || { assert_true "install --ci --workflows=doc-index-resolve" false; return 0; }
   assert_eq "# doc-superpowers workflow v1" "$(head -n 1 "$dir/.github/workflows/doc-index-resolve.yml")" "the workflow marker on line 1"
   json=$(_yaml_json "$dir/.github/workflows/doc-index-resolve.yml")
@@ -4276,9 +4276,9 @@ test_index_resolve_template() {
   json=$(jq 'del(.jobs[].steps[] | select((.run // "") | endswith("install-jq.sh")))' <<<"$json")
   assert_eq "1" "$(jq '[.jobs[].steps[] | select(.run != null)] | length' <<<"$json")" "then one run: step"
   # shellcheck disable=SC2016  # the workflow's literal expressions
-  assert_eq '.github/scripts/doc-superpowers-steps/index-resolve.sh|main|${{ inputs.pr }}|tests.yml|${{ github.token }}|${{ github.token }}' \
-    "$(jq -r '[.jobs[].steps[] | select(.run != null)] | first | "\(.run | rtrimstr("\n"))|\(.env.BASE_BRANCH)|\(.env.PR)|\(.env.TEST_WORKFLOW)|\(.env.DOC_SUPERPOWERS_GIT_TOKEN)|\(.env.GH_TOKEN)"' <<<"$json")" \
-    "…the step, with the base, the dispatch input, the recorded test workflow and the job token for git and gh"
+  assert_eq '.github/scripts/doc-superpowers-steps/index-resolve.sh|main|${{ inputs.pr }}|tests.yml|pr|${{ github.token }}|${{ github.token }}' \
+    "$(jq -r '[.jobs[].steps[] | select(.run != null)] | first | "\(.run | rtrimstr("\n"))|\(.env.BASE_BRANCH)|\(.env.PR)|\(.env.TEST_WORKFLOW)|\(.env.TEST_PR_INPUT)|\(.env.DOC_SUPERPOWERS_GIT_TOKEN)|\(.env.GH_TOKEN)"' <<<"$json")" \
+    "…the step, with the base, the dispatch input, the recorded test workflow and its pull request input, and the job token for git and gh"
 }
 
 test_index_resolve_usage_errors() {
@@ -4317,7 +4317,7 @@ test_index_resolve_merges_an_index_only_conflict() {
   assert_eq "" "$(git -C "$IR_REMOTE" show "$tip:docs/.doc-index.json" | grep -E '^(<<<<<<<|>>>>>>>)' || true)" "…with no conflict markers"
   assert_contains "$(cat "$out.log")" "PR #5" "one line for the pull request"
   assert_contains "$(grep 'PR #5' "$out.log")" "merged" "…saying it merged"
-  assert_eq "dispatch tests.yml ref=topic" "$(cat "$IR_GH/dispatches.log" 2>/dev/null)" "the test workflow is dispatched on the branch"
+  assert_eq "dispatch tests.yml ref=topic" "$(cat "$IR_GH/dispatches.log" 2>/dev/null)" "the test workflow is dispatched on the branch, with no inputs (none named)"
   body=$(jq -r .body "$IR_GH/posted-5.json" 2>/dev/null || true)
   assert_contains "$body" "<!-- doc-superpowers:index-resolve -->" "one comment, carrying the marker"
   assert_contains "$body" "${tip:0:7}" "…naming the merge commit"
@@ -4572,6 +4572,27 @@ test_index_resolve_one_pull_request() {
   assert_eq "$(git -C "$IR_DIR" rev-parse one)" "$(git -C "$IR_REMOTE" rev-parse refs/heads/one)" "PR #1's branch is not pushed"
 }
 
+test_index_resolve_dispatch_names_the_pull_request() {
+  echo "Test: index-resolve.sh — TEST_PR_INPUT=<name>: the dispatch carries inputs[<name>]=<the pull request's number>, and nothing else of it; without TEST_WORKFLOW nothing is dispatched; an input name that is none: exit 3"
+  _ir_fixture || { assert_true "fixture" false; return 0; }
+  local out rc
+  out="$(harness_mktemp_d ir)/out"
+  _ir_branch one src/a/1/ -
+  _ir_branch two src/a/2/ -
+  _ir_base src/b/new/
+  _ir_pr 7 one false '.title = "a title"'
+  rc=0; _ir_run "$out" TEST_WORKFLOW=tests.yml TEST_PR_INPUT=pr || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  assert_eq "dispatch tests.yml ref=one inputs[pr]=7" "$(cat "$IR_GH/dispatches.log" 2>/dev/null)" "the dispatch names the pull request by its number"
+  rm -f "$IR_GH/pull-7.json" "$IR_GH/dispatches.log"
+  _ir_pr 8 two false
+  rc=0; _ir_run "$out" TEST_WORKFLOW= TEST_PR_INPUT=pr || rc=$?
+  assert_eq "0" "$rc" "an input without a test workflow: exit 0"
+  assert_true "…and nothing is dispatched" test ! -e "$IR_GH/dispatches.log"
+  rc=0; _ir_run "$out" TEST_WORKFLOW=tests.yml 'TEST_PR_INPUT=a b' || rc=$?
+  assert_eq "3" "$rc" "TEST_PR_INPUT='a b': exit 3"
+}
+
 test_index_resolve_one_bad_answer_stops_no_other() {
   echo "Test: index-resolve.sh — gh answers one pull request with something that is not JSON (a 200 all the same): that one fails, the next is still merged, exit 2 (errexit stops no run midway)"
   _ir_fixture || { assert_true "fixture" false; return 0; }
@@ -4612,6 +4633,7 @@ test_index_resolve_refuses_a_dropped_entry_and_workflow_files
 test_index_resolve_refused_push
 test_index_resolve_updates_its_own_comment
 test_index_resolve_one_pull_request
+test_index_resolve_dispatch_names_the_pull_request
 test_index_resolve_one_bad_answer_stops_no_other
 test_index_resolve_listing_fails
 

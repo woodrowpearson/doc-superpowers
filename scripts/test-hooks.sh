@@ -3284,6 +3284,57 @@ test_ci_resolve_test_workflow_choice() {
   teardown
 }
 
+test_ci_resolve_test_pr_input_choice() {
+  # --resolve-test-pr-input=<name>: the workflow_dispatch input of the test
+  # workflow that takes the pull request's number. Opt-in, because GitHub
+  # refuses an input the workflow does not declare (422).
+  echo "test: --resolve-test-pr-input — rendered into TEST_PR_INPUT, recorded, reproduced by a plain install, cleared by an empty value; an invalid value exits 2 and writes nothing; without a test workflow it is recorded, changes nothing, and the install says so"
+  local before bad
+  setup
+  inst install --ci --workflows=doc-index-resolve --resolve-test-workflow=tests.yml --resolve-test-pr-input=pr
+  assert_eq "0" "$IRC" "--resolve-test-pr-input=pr exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'TEST_PR_INPUT: "pr"' "rendered into TEST_PR_INPUT"
+  assert_eq "pr" "$(jq -r '.tiers.ci.resolve_test_pr_input' .claude/doc-superpowers/installed.json)" "recorded as .tiers.ci.resolve_test_pr_input"
+  assert_contains "$IOUT" "pr input pr" "the install's choices line names it"
+  inst install --ci
+  assert_eq "0" "$IRC" "a plain install --ci exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'TEST_PR_INPUT: "pr"' "…and keeps the recorded choice"
+  inst install --ci --resolve-test-pr-input pull_request-number
+  assert_eq "0" "$IRC" "--resolve-test-pr-input pull_request-number (a separate value) exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'TEST_PR_INPUT: "pull_request-number"' "a new value replaces it"
+  inst status --ci
+  assert_contains "$IOUT" "pr input pull_request-number" "status --ci shows the recorded choice"
+  inst status --ci --json
+  assert_eq "pull_request-number" "$(jq -r .tiers.ci.choices.resolve_test_pr_input <<<"$IOUT" 2>/dev/null || true)" "…and status --json, under choices"
+  before=$(_tree_state)
+  for bad in 'a b' 'pr.x' '$(x)' 'pr]' 'inputs[pr]' 'x"' 'a/b' '-pr'; do
+    inst install --ci "--resolve-test-pr-input=$bad"
+    assert_eq "2" "$IRC" "'$bad' is not an input name: exit 2"
+  done
+  assert_contains "$IOUT" "--resolve-test-pr-input" "…the error names the option"
+  assert_eq "$before" "$(_tree_state)" "…and nothing is written"
+  inst install --resolve-test-pr-input=pr
+  assert_eq "2" "$IRC" "without --ci: exit 2 (it applies to the CI tier)"
+  printf '%s\n' "$(jq '.tiers.ci.resolve_test_pr_input = "a b"' .claude/doc-superpowers/installed.json)" > .claude/doc-superpowers/installed.json
+  before=$(_tree_state)
+  inst install --ci
+  assert_eq "1" "$IRC" "an invalid recorded value: install --ci exits 1"
+  assert_contains "$IOUT" "pass --resolve-test-pr-input" "…and names the flag that fixes it"
+  assert_eq "$before" "$(_tree_state)" "…writing nothing"
+  # Without a test workflow nothing is dispatched: the input is recorded,
+  # changes nothing, and the install says so.
+  inst install --ci --resolve-test-workflow= --resolve-test-pr-input=pr
+  assert_eq "0" "$IRC" "an input without a test workflow: exit 0"
+  assert_contains "$IOUT" "--resolve-test-pr-input pr has no effect without --resolve-test-workflow" "…and the install says it changes nothing"
+  assert_eq "pr" "$(jq -r '.tiers.ci.resolve_test_pr_input' .claude/doc-superpowers/installed.json)" "…recorded for when a test workflow is named"
+  inst install --ci --resolve-test-pr-input=
+  assert_eq "0" "$IRC" "--resolve-test-pr-input= (empty) exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'TEST_PR_INPUT: ""' "…and clears TEST_PR_INPUT"
+  assert_eq "null" "$(jq -r '.tiers.ci.resolve_test_pr_input' .claude/doc-superpowers/installed.json)" "…and the record"
+  assert_not_contains "$IOUT" "has no effect" "…and no note once it is cleared"
+  teardown
+}
+
 test_install_help_lists_index_resolve_as_shell_optin() {
   echo "test: install.sh help — doc-index-resolve under 'shell, opt-in by name'; --workflows=all's help says it never installs it; --resolve-test-workflow is described"
   local out optin claude
@@ -3294,6 +3345,7 @@ test_install_help_lists_index_resolve_as_shell_optin() {
   assert_not_contains "$claude" "doc-index-resolve" "…not under Claude-powered"
   assert_contains "$out" "never doc-index-resolve" "--workflows=all's help names it"
   assert_contains "$out" "--resolve-test-workflow" "the option is described"
+  assert_contains "$out" "--resolve-test-pr-input" "…and --resolve-test-pr-input"
 }
 
 test_ci_index_resolve_vendors_the_driver() {
@@ -4345,6 +4397,7 @@ test_ci_workflows_all_skips_publish_without_ledger
 test_install_help_groups_publish_as_shell_optin
 test_ci_index_resolve_is_opt_in_by_name
 test_ci_resolve_test_workflow_choice
+test_ci_resolve_test_pr_input_choice
 test_install_help_lists_index_resolve_as_shell_optin
 test_install_ci_helpers_false_still_wires_steps
 test_install_ci_version_comes_from_doc_tools

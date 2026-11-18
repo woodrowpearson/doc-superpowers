@@ -65,6 +65,7 @@ jobs:
           BASE_BRANCH: __BASE_BRANCH__
           PR: ${{ inputs.pr }}
           TEST_WORKFLOW: "__RESOLVE_TEST_WORKFLOW__"
+          TEST_PR_INPUT: "__RESOLVE_TEST_PR_INPUT__"
           DOC_SUPERPOWERS_GIT_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/doc-superpowers-steps/index-resolve.sh

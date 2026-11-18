@@ -27,6 +27,8 @@
 #       "marketplace_url": "https://…",  ← only when --marketplace-url named it
 #       "resolve_test_workflow": "tests.yml",  ← only when --resolve-test-workflow
 #                                           named one (doc-index-resolve dispatches it)
+#       "resolve_test_pr_input": "pr",     ← only when --resolve-test-pr-input named
+#                                           one (that dispatch's input for the number)
 #       "workflows": {                  ← the workflow set
 #         "doc-freshness-pr":       {"state": "installed", "installed_at": "…"},
 #         "doc-freshness-schedule": {"state": "uninstalled", "intentional": true}
@@ -65,6 +67,7 @@ STATE_CRON=""
 STATE_STRICT=""
 STATE_MARKET=""   # recorded --marketplace-url ("" = none: the plugin's own repository)
 STATE_RTW=""      # recorded --resolve-test-workflow ("" = none: nothing is dispatched)
+STATE_RPI=""      # recorded --resolve-test-pr-input ("" = none: the dispatch sends no inputs)
 STATE_WF=""       # one line per workflow: name US state US intentional US installed_at
 
 # One jq pass: validate the shape, then emit the choices line and one line
@@ -85,7 +88,8 @@ _STATE_READ_JQ='
          ($ci.base_branch // "" | s), ($ci.cron // "" | s),
          (if $ci == null or ($ci | has("ci_strict") | not) then "" else ($ci.ci_strict | s) end),
          ($ci.marketplace_url // "" | s),
-         ($ci.resolve_test_workflow // "" | s)
+         ($ci.resolve_test_workflow // "" | s),
+         ($ci.resolve_test_pr_input // "" | s)
        ] | join("\u001f")),
       (($ci.workflows // {}) | to_entries[]
        | [ (.key | s), (.value.state // "" | s), (.value.intentional // false | s), (.value.installed_at // "" | s) ]
@@ -96,7 +100,7 @@ _STATE_READ_JQ='
 # it exists but cannot be used; the caller must then write nothing.
 state_load() {
   STATE_PRESENT=0 STATE_RECOVERY=0 STATE_DIRTY=0 STATE_ERROR="" STATE_HAS_CI=0
-  STATE_BASE="" STATE_CRON="" STATE_STRICT="" STATE_MARKET="" STATE_RTW="" STATE_WF=""
+  STATE_BASE="" STATE_CRON="" STATE_STRICT="" STATE_MARKET="" STATE_RTW="" STATE_RPI="" STATE_WF=""
   if [ ! -e "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ]; then
     if [ -e "$STATE_CORRUPT" ]; then
       # shellcheck disable=SC2034  # read by install.sh, which sources this file
@@ -116,7 +120,7 @@ state_load() {
   fi
   STATE_PRESENT=1
   first="${out%%$'\n'*}"
-  IFS="$_SEP" read -r STATE_HAS_CI STATE_BASE STATE_CRON STATE_STRICT STATE_MARKET STATE_RTW <<<"$first"
+  IFS="$_SEP" read -r STATE_HAS_CI STATE_BASE STATE_CRON STATE_STRICT STATE_MARKET STATE_RTW STATE_RPI <<<"$first"
   case "$out" in
     *$'\n'*) STATE_WF="${out#*$'\n'}" ;;
   esac
@@ -206,12 +210,13 @@ state_mark_uninstalled() {
 }
 
 # state_set_choices <base_branch> <cron> <true|false> <marketplace_url | ""> <resolve_test_workflow | "">
+#   <resolve_test_pr_input | "">
 state_set_choices() {
   if [ "$STATE_HAS_CI" != 1 ] || [ "$1" != "$STATE_BASE" ] || [ "$2" != "$STATE_CRON" ] || [ "$3" != "$STATE_STRICT" ] \
-    || [ "$4" != "$STATE_MARKET" ] || [ "$5" != "$STATE_RTW" ]; then
+    || [ "$4" != "$STATE_MARKET" ] || [ "$5" != "$STATE_RTW" ] || [ "$6" != "$STATE_RPI" ]; then
     STATE_DIRTY=1
   fi
-  STATE_HAS_CI=1 STATE_BASE="$1" STATE_CRON="$2" STATE_STRICT="$3" STATE_MARKET="$4" STATE_RTW="$5"
+  STATE_HAS_CI=1 STATE_BASE="$1" STATE_CRON="$2" STATE_STRICT="$3" STATE_MARKET="$4" STATE_RTW="$5" STATE_RPI="$6"
 }
 
 # shellcheck disable=SC2016  # jq program
@@ -224,6 +229,7 @@ _STATE_WRITE_JQ='
       | (if $s != "" then .ci_strict = ($s == "true") else . end)
       | (if $m != "" then .marketplace_url = $m else del(.marketplace_url) end)
       | (if $rtw != "" then .resolve_test_workflow = $rtw else del(.resolve_test_workflow) end)
+      | (if $rpi != "" then .resolve_test_pr_input = $rpi else del(.resolve_test_pr_input) end)
       | .workflows = (reduce ($wf | split("\n")[] | select(length > 0) | split("\u001f")) as $r ({};
           .[$r[0]] = (if $r[1] == "installed"
                       then {state: "installed"} + (if ($r[3] // "") != "" then {installed_at: $r[3]} else {} end)
@@ -238,11 +244,11 @@ state_flush() {
   [ "$STATE_PRESENT" = 1 ] || src=/dev/null
   if [ "$STATE_PRESENT" = 1 ]; then
     new=$(jq --arg schema "$STATE_SCHEMA" --arg b "$STATE_BASE" --arg c "$STATE_CRON" --arg s "$STATE_STRICT" \
-      --arg m "$STATE_MARKET" --arg rtw "$STATE_RTW" --arg wf "$STATE_WF" "$_STATE_WRITE_JQ" "$src") || die "cannot update $STATE_FILE"
+      --arg m "$STATE_MARKET" --arg rtw "$STATE_RTW" --arg rpi "$STATE_RPI" --arg wf "$STATE_WF" "$_STATE_WRITE_JQ" "$src") || die "cannot update $STATE_FILE"
     [ "$new" != "$(cat "$STATE_FILE")" ] || return 0
   else
     new=$(jq -n --arg schema "$STATE_SCHEMA" --arg b "$STATE_BASE" --arg c "$STATE_CRON" --arg s "$STATE_STRICT" \
-      --arg m "$STATE_MARKET" --arg rtw "$STATE_RTW" --arg wf "$STATE_WF" "{} | $_STATE_WRITE_JQ") || die "cannot build $STATE_FILE"
+      --arg m "$STATE_MARKET" --arg rtw "$STATE_RTW" --arg rpi "$STATE_RPI" --arg wf "$STATE_WF" "{} | $_STATE_WRITE_JQ") || die "cannot build $STATE_FILE"
   fi
   tmp_beside "$STATE_FILE"
   printf '%s\n' "$new" > "$_TMP"

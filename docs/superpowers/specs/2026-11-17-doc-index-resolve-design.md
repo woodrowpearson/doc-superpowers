@@ -69,7 +69,11 @@ git-token block, reading `DOC_SUPERPOWERS_GIT_TOKEN`; no token is kept on disk.
 
 **R6. Checks on the merge.** A push with the workflow token starts no workflow. When the recorded
 choice `resolve_test_workflow` names a workflow file, the step dispatches it on the pull request's
-branch (`POST /actions/workflows/<file>/dispatches`). When the choice is empty, nothing is
+branch (`POST /actions/workflows/<file>/dispatches`). When the recorded choice
+`resolve_test_pr_input` names an input, the dispatch also sends `inputs[<name>]=<number>`, so the
+run can stand in for that pull request's run. Only the number is sent, never the pull request's
+text. The input is opt-in because GitHub refuses (422) one the workflow does not declare; without a
+test workflow it has no effect. When the choice is empty, nothing is
 dispatched and the comment asks the author to push a commit (`git commit --allow-empty` works)
 or to close and reopen the pull request. A re-run does not help: it checks the commit its run
 first checked, not the merge. A dispatch starts that one workflow only, so the pull request's other
@@ -105,6 +109,8 @@ it beside itself. `check-self-install.sh` holds it as a byte copy like the other
   `__VERSION__` and one new placeholder, `__RESOLVE_TEST_WORKFLOW__`.
 - **Choice:** `--resolve-test-workflow=<file>` on `install --ci`, recorded in `installed.json` as
   `.tiers.ci.resolve_test_workflow`, with the usual precedence (flag, recorded, default empty).
+  `--resolve-test-pr-input=<name>` the same, as `.tiers.ci.resolve_test_pr_input`, rendered through
+  `__RESOLVE_TEST_PR_INPUT__` into the step's `TEST_PR_INPUT`.
 - **Step:** `scripts/hooks/ci/doc-superpowers-steps/index-resolve.sh`, bash 3.2 and jq 1.6, using
   `gh api` with `GH_TOKEN` for the GitHub calls. It reads `BASE_BRANCH`, `PR`, `TEST_WORKFLOW` and
   `GITHUB_REPOSITORY` from its environment.

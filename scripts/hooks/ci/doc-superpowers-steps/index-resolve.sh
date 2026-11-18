@@ -42,6 +42,9 @@
 #   PR                 one pull request number (empty: every open one)
 #   TEST_WORKFLOW      a workflow file name to dispatch on a merged branch
 #                      (empty: none)
+#   TEST_PR_INPUT      that workflow's workflow_dispatch input for the pull
+#                      request's number, sent as inputs[<name>]=<number>
+#                      (empty: the dispatch sends no inputs)
 #   GH_TOKEN           for gh api
 #   DOC_SUPERPOWERS_GIT_TOKEN  for the fetches and pushes (the git-token block)
 #   GIT_USER_NAME / GIT_USER_EMAIL  the merge commit's author and committer
@@ -89,6 +92,7 @@ BASE_BRANCH="${BASE_BRANCH:-}"
 REPO="${GITHUB_REPOSITORY:-}"
 PR="${PR:-}"
 TEST_WORKFLOW="${TEST_WORKFLOW:-}"
+TEST_PR_INPUT="${TEST_PR_INPUT:-}"
 RETRY="${RESOLVE_RETRY_SECONDS:-10}"
 GIT_USER_NAME="${GIT_USER_NAME:-github-actions[bot]}"
 GIT_USER_EMAIL="${GIT_USER_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}"
@@ -116,6 +120,9 @@ case "$PR" in
 esac
 if [ -n "$TEST_WORKFLOW" ] && ! [[ "$TEST_WORKFLOW" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]]; then
   usage "TEST_WORKFLOW '$TEST_WORKFLOW' is not a workflow file name (install --ci --resolve-test-workflow=<file>)"
+fi
+if [ -n "$TEST_PR_INPUT" ] && ! [[ "$TEST_PR_INPUT" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]]; then
+  usage "TEST_PR_INPUT '$TEST_PR_INPUT' is not an input name (install --ci --resolve-test-pr-input=<name>)"
 fi
 case "$RETRY" in
   "" | *[!0-9]*) usage "RESOLVE_RETRY_SECONDS '$RETRY' is not a number of seconds" ;;
@@ -311,6 +318,7 @@ index_at() {
 
 resolve_one() {
   local n="$1" ref="$2" sha mergeable head out rc tree conflicts dropped bring commit tip mb checks
+  local -a inputs
   # The mergeable state, asked once more while GitHub is still computing it.
   if ! gh api "repos/$REPO/pulls/$n" > "$T/pr.json"; then
     fail "$n" "$ref" "cannot read it (gh api failed, above)"
@@ -435,7 +443,10 @@ resolve_one() {
 
   checks=none
   if [ -n "$TEST_WORKFLOW" ]; then
-    if gh api -X POST "repos/$REPO/actions/workflows/$TEST_WORKFLOW/dispatches" -f "ref=$ref" >/dev/null; then
+    # Only the number goes in an input, never the pull request's text.
+    inputs=()
+    [ -z "$TEST_PR_INPUT" ] || inputs=(-f "inputs[$TEST_PR_INPUT]=$n")
+    if gh api -X POST "repos/$REPO/actions/workflows/$TEST_WORKFLOW/dispatches" -f "ref=$ref" ${inputs[@]+"${inputs[@]}"} >/dev/null; then
       checks=started
     else
       checks=not-started
