@@ -84,6 +84,28 @@ dropped-entry checks run on the final tree before `commit-tree`.
    in full, each with its exit code.
 5. Commit.
 
+### Task 2b: the index merge driver keeps the record that describes the merged files
+
+**Rule (design R7).** Both sides may change an entry's verification record (`content_hash`, `code_oids`, `code_commit`, `last_verified`) to different values. The record still comes whole from one side, but the driver no longer just takes the newer side. It takes the side whose `content_hash` and every `code_oids` key equal their own three-way merge: base, ours and theirs, with a key's value taken from the side that changed it. When both sides match, or neither does, the newer side wins, as today. Neither side matching means the doc or its code changed on both sides, so the doc reads stale, which is honest.
+
+**Why.** A pull request edited a doc or its code and re-recorded it. Main then re-recorded the same entry later, for its own reasons. The newer record, main's, won and described main's doc and code, not the merged files. So the merge left the pull request's own docs stale.
+
+**Files:**
+- Modify: `scripts/merge-doc-index.sh` (`merge_fields`, and its header comment's record rule)
+- Test: `scripts/test-doc-tools.sh` (the merge-driver section)
+
+**Steps:**
+1. Write the failing tests, synthetic, in the driver's existing fixture style:
+   - (a) The head changes a ref's content and re-records; the base re-records later with that ref unchanged. The merged entry is the head's record, and `check-freshness` on the merged tree reads it current.
+   - (b) The same, with the head changing the doc's text (`content_hash`) instead.
+   - (c) Both sides change the same ref differently. The newer side's record wins, as today.
+   - (d) Only the base re-records, and the head does not change the record. The base's record wins (pick3), unchanged.
+   - (e) Both records match the three-way merge. The newer side wins.
+2. Run them: red, with the exit code.
+3. Change `merge_fields`.
+4. Run them: green. Then `bash scripts/test-doc-tools.sh`, `bash scripts/test-doc-pr-release.sh` and `bash scripts/test-hooks.sh` in full, each with its exit code.
+5. Commit.
+
 ### Task 3: the step's documents
 
 **Files:**

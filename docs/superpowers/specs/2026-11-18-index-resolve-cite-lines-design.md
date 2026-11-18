@@ -2,7 +2,7 @@
 
 **Status:** approved 2026-11-18 by the consumer project's coordinator · **Scope:** the
 `doc-index-resolve` step (`scripts/hooks/ci/doc-superpowers-steps/`), one new step script, the
-tests and the step's docs · **Release:** part of 3.15.0, no separate bump.
+index merge driver's record rule (R7), the tests and the step's docs · **Release:** part of 3.15.0, no separate bump.
 
 ## What this decides
 
@@ -57,6 +57,15 @@ not stamp a new verification. On the final tree, `check-freshness` reads each re
 **R6. What the pull request sees.** The merge commit's message and the comment name the docs whose
 cites were recomputed and the number of cites. A skip under R1–R5 names the doc and the block's line
 in the head's version.
+
+**R7. The index merge driver keeps the record that describes the merged files.** When both sides
+changed an entry's verification record (`content_hash`, `code_oids`, `code_commit`,
+`last_verified`) to different values, the record still comes whole from one side: the side whose
+`content_hash` and every `code_oids` key equal their own three-way merge. When both sides or neither
+match, the newer side wins, as before. Neither matching means the doc or its code changed on both
+sides, so the doc reads stale. Found in a replay: a pull request had edited a doc or its code and
+re-recorded it, and the base branch re-recorded the same entry later. The newer, base-side record
+won and left the pull request's own docs stale.
 
 ## The design
 
