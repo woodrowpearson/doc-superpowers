@@ -4512,7 +4512,7 @@ HOOK
 }
 
 test_index_resolve_updates_its_own_comment() {
-  echo "Test: index-resolve.sh — a pull request with the resolver's comment (a Bot's, marked) gets it updated, not a second one; a marked comment by a person is not the resolver's"
+  echo "Test: index-resolve.sh — a pull request with the resolver's comment (github-actions[bot]'s, marked) gets it updated, not a second one; a marked comment by a person or by another bot is not the resolver's; RESOLVE_BOT_LOGIN names another login"
   _ir_fixture || { assert_true "fixture" false; return 0; }
   local out rc
   out="$(harness_mktemp_d ir)/out"
@@ -4531,6 +4531,17 @@ test_index_resolve_updates_its_own_comment() {
   assert_contains "$(jq -r .body "$IR_GH/patched-12.json" 2>/dev/null)" "README.md" "…with the new text"
   assert_true "a person's marked comment is left alone" test ! -e "$IR_GH/patched-21.json"
   assert_true "…and the resolver posts its own" test -f "$IR_GH/posted-2.json"
+  # Another bot's marked comment is not the resolver's: only the login
+  # github-actions[bot] (RESOLVE_BOT_LOGIN overrides it) is.
+  rm -f "$IR_GH"/posted-*.json "$IR_GH"/patched-*.json
+  printf '%s\n' '[{"id": 13, "user": {"login": "other-app[bot]", "type": "Bot"}, "body": "<!-- doc-superpowers:index-resolve -->\nnot ours"}]' > "$IR_GH/comments-1.json"
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "another bot's marked comment: exit 0"
+  assert_true "…another bot's marked comment is left alone" test ! -e "$IR_GH/patched-13.json"
+  assert_true "…and the resolver posts its own" test -f "$IR_GH/posted-1.json"
+  rm -f "$IR_GH"/posted-*.json
+  rc=0; _ir_run "$out" 'RESOLVE_BOT_LOGIN=other-app[bot]' || rc=$?
+  assert_true "RESOLVE_BOT_LOGIN names the resolver's login: that comment is updated" test -f "$IR_GH/patched-13.json"
   : > "$IR_GH/fail-comment"
   rm -f "$IR_GH/posted-2.json"
   rc=0; _ir_run "$out" || rc=$?

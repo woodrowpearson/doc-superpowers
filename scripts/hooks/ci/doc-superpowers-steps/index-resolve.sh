@@ -32,8 +32,8 @@
 # next push (or a close and reopen), which the comment asks for when nothing
 # was dispatched. A re-run would check the original commit, not the merge.
 # Each merged or skipped pull request gets one comment marked
-# <!-- doc-superpowers:index-resolve -->, the resolver's own (author type Bot)
-# updated in place.
+# <!-- doc-superpowers:index-resolve -->, the resolver's own (author login
+# github-actions[bot]) updated in place.
 #
 # Env:
 #   BASE_BRANCH        the base branch (required)
@@ -47,6 +47,8 @@
 #                      (default: github-actions[bot])
 #   RESOLVE_RETRY_SECONDS  the wait before asking GitHub again for a mergeable
 #                      state it is still computing (default 10)
+#   RESOLVE_BOT_LOGIN  the login whose marked comment is the resolver's
+#                      (default github-actions[bot], the job token's)
 #   GITHUB_STEP_SUMMARY  the run's summary (optional)
 #
 # Needs bash 3.2+, jq 1.6+, gh and git 2.40+ (merge-tree --write-tree,
@@ -80,6 +82,8 @@ fi
 MARKER='<!-- doc-superpowers:index-resolve -->'
 INDEX=docs/.doc-index.json
 LABEL=no-index-resolve
+# The resolver's own comments are this login's, as in doc-freshness-pr.yml.
+BOT_LOGIN="${RESOLVE_BOT_LOGIN:-github-actions[bot]}"
 BASE_BRANCH="${BASE_BRANCH:-}"
 REPO="${GITHUB_REPOSITORY:-}"
 PR="${PR:-}"
@@ -183,15 +187,16 @@ say() {
 # tick <text>: <text> with each backtick made a quote, for a Markdown code span.
 tick() { printf '%s' "$1" | tr '`' "'"; }
 
-# upsert_comment <n> <body file>: update the resolver's comment on <n> (a Bot's,
-# marked), or post one. 1 when it cannot be written.
+# upsert_comment <n> <body file>: update the resolver's comment on <n> (marked,
+# and BOT_LOGIN's), or post one. 1 when it cannot be written.
 upsert_comment() {
   local id
   if ! gh api --paginate "repos/$REPO/issues/$1/comments?per_page=100" > "$T/comments.json"; then
     return 1
   fi
   id=$(jq -rs --arg m "$MARKER" \
-    '(add // []) | map(select((.user.type // "") == "Bot" and ((.body // "") | contains($m)))) | .[0].id // empty' \
+    --arg bot "$BOT_LOGIN" \
+    '(add // []) | map(select((.user.login // "") == $bot and ((.body // "") | contains($m)))) | .[0].id // empty' \
     "$T/comments.json") || return 1
   if [ -n "$id" ]; then
     jq -n --rawfile b "$2" '{body: $b}' | gh api -X PATCH "repos/$REPO/issues/comments/$id" --input - >/dev/null

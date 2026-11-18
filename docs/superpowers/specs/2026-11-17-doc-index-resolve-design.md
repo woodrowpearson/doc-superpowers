@@ -73,9 +73,10 @@ successful push still posts the comment, which says the checks could not be star
 the same push.
 
 **R7. The comment.** Each pull request gets at most one comment from the resolver, marked with
-`<!-- doc-superpowers:index-resolve -->`. The step updates its own comment (author type `Bot`)
-rather than adding another. It comments on a merge, on a skip and on a refused push (R5). It does not
-comment on a pull request it left out or did not touch, or on any other failure.
+`<!-- doc-superpowers:index-resolve -->`. The step updates its own comment (author login
+`github-actions[bot]`, as `doc-freshness-pr` matches it) rather than adding another. It comments on
+a merge, on a skip and on a refused push (R5). It does not comment on a pull request it left out or
+did not touch, or on any other failure.
 
 **R8. Outcomes and exit codes.** Each considered pull request ends `merged`, `skipped` or
 `failed`. The step prints one line per pull request and exits 0 when none failed, 2 when any
