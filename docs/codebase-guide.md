@@ -628,9 +628,11 @@ The design is `docs/superpowers/specs/2026-11-17-local-diagram-rendering-design.
 ```
 doc-tools.sh diagram list|render [--config <file>] [<doc>...]  (or doc-superpowers tools diagram …)
   → git, jq, the work tree's top level (else exit 2); the docs named, or every docs/**/*.md
-  → _dg_scan: one awk pass per doc (_DG_AWK): a mermaid fence right after <details> and
+  → _dg_scan: one awk pass per doc (_DG_AWK): a mermaid fence right after <details> (attributes
+    allowed) and
     <summary>Mermaid source</summary>, outside any other fence (fences as CommonMark reads them: a
-    backtick line with a backtick in its info string opens none); the image link above the slot
+    backtick line with a backtick in its info string opens none, nor a line indented 4+ spaces; a
+    fence never closed is listed unterminated, and render fails it); the image link above the slot
     → _dg_png resolves it from the doc's directory (null: none, a URL, outside the repository);
     ELK from the front matter, an init directive or flowchart-elk
   list → the blocks as a JSON array {doc, line, png, elk}

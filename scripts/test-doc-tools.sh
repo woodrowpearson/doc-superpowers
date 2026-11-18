@@ -8908,6 +8908,43 @@ test_diagram_list_reads_fences_as_commonmark_does() {
   teardown
 }
 
+# Blocks list must never skip silently: a slot whose mermaid fence is never
+# closed is listed, flagged unterminated (render fails it, naming it), and a
+# <details> tag with attributes opens a slot as a bare one does.
+test_diagram_list_skips_no_block_silently() {
+  echo "test: diagram list: a mermaid fence never closed is listed as unterminated and render fails it, naming doc and line; <details open> opens a slot"
+  setup
+  local out rc
+  _dg_doc docs/a.md diagrams/a.png 'flowchart LR' '  A --> B'
+  { printf '![D](diagrams/open.png)\n\n<details open>\n<summary>Mermaid source</summary>\n\n```mermaid\nflowchart LR\n  C --> D\n```\n\n</details>\n'
+    printf '\n![D](diagrams/tab.png)\n\n<details\tclass="x">\n<summary>Mermaid source</summary>\n\n```mermaid\nflowchart LR\n  C --> D\n```\n\n</details>\n'
+    printf '\n![D](diagrams/no.png)\n\n<detailsx>\n<summary>Mermaid source</summary>\n\n```mermaid\nflowchart LR\n  C --> D\n```\n\n</detailsx>\n'
+  } >> docs/a.md
+  printf '# U\n\n![D](diagrams/u.png)\n\n<details>\n<summary>Mermaid source</summary>\n\n```mermaid\nflowchart LR\n  A --> B\n' > docs/u.md
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/a.md docs/u.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "diagram list exits 0"
+  assert_eq "docs/diagrams/a.png docs/diagrams/open.png docs/diagrams/tab.png docs/diagrams/u.png" \
+    "$(jq -r '[.[].png] | join(" ")' <<<"$out" 2>/dev/null)" "<details open> and <details<tab>class> open a slot; <detailsx> does not; the unclosed block is listed"
+  assert_eq '{"doc":"docs/u.md","line":8,"png":"docs/diagrams/u.png","elk":false,"unterminated":true}' \
+    "$(jq -c '.[3]' <<<"$out" 2>/dev/null)" "the block whose fence is never closed is flagged unterminated"
+  assert_eq "null" "$(jq -c '.[0].unterminated' <<<"$out" 2>/dev/null)" "…and a closed one carries no flag"
+
+  _dg_stubs
+  mkdir -p docs/diagrams
+  printf 'old u' > docs/diagrams/u.png
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/a.md docs/u.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "render: an unterminated block exits 1"
+  assert_contains "$out" "FAILED docs/u.md:8" "…naming its doc and line"
+  assert_contains "$out" "never closed" "…and what is wrong"
+  assert_eq "old u" "$(cat docs/diagrams/u.png)" "…its old PNG kept"
+  assert_contains "$out" "rendered docs/diagrams/open.png" "…while the other blocks render"
+  assert_contains "$out" "3 rendered, 1 failed" "…and the summary counts it"
+  _dg_stubs_off
+  teardown
+}
+
 test_diagram_list_finds_elk_nested_in_front_matter() {
   echo "test: diagram list: layout: elk indented under config: in the front matter, beside elk and flowchart settings, asks for ELK"
   setup
@@ -10009,6 +10046,7 @@ run_tests() {
   test_diagram_packages_are_pinned
   test_diagram_list_finds_blocks_and_targets
   test_diagram_list_reads_fences_as_commonmark_does
+  test_diagram_list_skips_no_block_silently
   test_diagram_list_finds_elk_nested_in_front_matter
   test_diagram_usage_errors_exit_3
   test_diagram_render_installs_once_into_the_cache

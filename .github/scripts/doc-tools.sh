@@ -3113,11 +3113,15 @@ diagram list|cmd_diagram_list|none|
   [<doc>...]
   Print, as JSON, each Mermaid source block in the docs: an array of
   {doc, line, png, elk}. A block is a mermaid fence in a
-  <details><summary>Mermaid source</summary> slot; line is its fence's
-  line; png is the image link directly above the slot, resolved from the
-  doc's directory (null when there is none, or it is a URL or leaves the
-  repository); elk is true when its front matter or init directive sets
-  layout: elk. Default: every Markdown file under docs/. Exit 0 listed, 2
+  <details><summary>Mermaid source</summary> slot (<details> may carry
+  attributes, as <details open>); line is its fence's line; png is the
+  image link directly above the slot, resolved from the doc's directory
+  (null when there is none, or it is a URL or leaves the repository);
+  elk is true when its front matter or init directive sets layout: elk.
+  A block whose fence is never closed is listed with "unterminated":
+  true, and render fails it. Fences follow CommonMark: one indented four
+  spaces or more is an indented code block, not a fence, so its block is
+  not found. Default: every Markdown file under docs/. Exit 0 listed, 2
   could not run (no git, jq or work tree), 3 usage (a doc that is not a
   file).
 diagram render|cmd_diagram_render|none|config=
@@ -3149,7 +3153,7 @@ diagram render|cmd_diagram_render|none|config=
   The browser: DOC_SUPERPOWERS_CHROME, else a system Chrome or Chromium,
   else a chrome-headless-shell that install-browser put in the cache.
   Exit 0 rendered, 1 a diagram failed (invalid source, a request to an
-  outside URL, no PNG link), 2 the renderer could not run (no Node, no
+  outside URL, no PNG link, a fence never closed), 2 the renderer could not run (no Node, no
   browser, the packages not installable, a vendored copy without
   scripts/diagram/), 3 usage.
 diagram install-browser|cmd_diagram_install_browser|none|
@@ -3821,16 +3825,19 @@ _dg_docs() {
 }
 
 # awk: every Mermaid source block of the files named, one record per block:
-#   doc  fence-line  link  elk(0|1)  first-source-line  last-source-line
+#   doc  fence-line  link  elk(0|1)  first-source-line  last-source-line  unterminated(0|1)
 # separated by 0x1f, never a tab: IFS whitespace would merge the empty link
 # of a block with no image into the next field. A block is a mermaid fence that opens right after
-# <details> and <summary>Mermaid source</summary> (blank lines between them
-# allowed); link is the image link on the last non-blank line above
+# <details> (bare or with attributes: <details open>) and
+# <summary>Mermaid source</summary> (blank lines between them allowed); a
+# block whose fence is never closed runs to the end of the file and is
+# flagged unterminated; link is the image link on the last non-blank line above
 # <details>, or "". Lines inside any other fence are never read as slot
 # lines, so a slot shown as an example in a doc is not a block. Fences follow
 # CommonMark: up to three spaces of indent; a backtick opener's info string
 # holds no backtick; a closing fence repeats the opener's character at least
-# as many times, with only spaces or tabs after it. ELK: a
+# as many times, with only spaces or tabs after it; a line indented four
+# spaces or more is never a fence (it is an indented code block). ELK: a
 # front-matter line "layout: elk…", an init directive naming layout elk, or a
 # flowchart-elk diagram.
 # shellcheck disable=SC2016  # awk program
@@ -3863,7 +3870,7 @@ FNR == 1 { state = 0; infence = 0; blk = 0; prev = "" }
   sub(/\r$/, "", line)
   if (infence) {
     if (closes(line)) {
-      if (blk) printf "%s\037%d\037%s\037%d\037%d\037%d\n", FILENAME, bline, link, elk, bline + 1, FNR - 1
+      if (blk) printf "%s\037%d\037%s\037%d\037%d\037%d\0370\n", FILENAME, bline, link, elk, bline + 1, FNR - 1
       infence = 0; blk = 0
       next
     }
@@ -3900,7 +3907,7 @@ FNR == 1 { state = 0; infence = 0; blk = 0; prev = "" }
     next
   }
   if (line ~ /^[ \t]*$/) next
-  if (line ~ /^[ \t]*<details>/) {
+  if (line ~ /^[ \t]*<details[ \t>]/) {
     link = image_link(prev)
     state = 1
     if (line ~ /<summary>[ \t]*Mermaid source[ \t]*<\/summary>/) state = 2
@@ -3912,6 +3919,9 @@ FNR == 1 { state = 0; infence = 0; blk = 0; prev = "" }
   }
   state = 0
   prev = line
+}
+END {
+  if (infence && blk) printf "%s\037%d\037%s\037%d\037%d\037%d\0371\n", FILENAME, bline, link, elk, bline + 1, FNR
 }'
 
 # _dg_png <doc> <link>: the repository-relative PNG an image link in <doc>
@@ -3951,18 +3961,18 @@ _dg_png() {
 
 # _dg_scan <out-file>: the blocks of _DG_DOCS, one record per block, with
 # the link resolved to a PNG path (0x1f-separated, as _DG_AWK's):
-#   doc  fence-line  png  elk(0|1)  first-source-line  last-source-line
+#   doc  fence-line  png  elk(0|1)  first-source-line  last-source-line  unterminated(0|1)
 _dg_scan() {
-  local out="$1" doc line link elk from to
+  local out="$1" doc line link elk from to unt
   : > "$out"
   [ ${#_DG_DOCS[@]} -gt 0 ] || return 0
   # One awk per doc keeps the order the docs were named in (awk reads its
   # files in order too, but a doc named twice is already dropped).
   for doc in "${_DG_DOCS[@]}"; do
     awk "$_DG_AWK" "$doc"
-  done | while IFS=$'\x1f' read -r doc line link elk from to; do
+  done | while IFS=$'\x1f' read -r doc line link elk from to unt; do
     _dg_png "$doc" "$link"
-    printf '%s\037%s\037%s\037%s\037%s\037%s\n' "$doc" "$line" "$_DG_PNG" "$elk" "$from" "$to"
+    printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\n' "$doc" "$line" "$_DG_PNG" "$elk" "$from" "$to" "$unt"
   done > "$out"
 }
 
@@ -3971,7 +3981,8 @@ _dg_scan() {
 _DG_JQ_LIST='
   split("\n") | map(select(length > 0) | split("\u001f")
     | {doc: .[0], line: (.[1] | tonumber),
-       png: (if .[2] == "" then null else .[2] end), elk: (.[3] == "1")})'
+       png: (if .[2] == "" then null else .[2] end), elk: (.[3] == "1")}
+      + (if .[6] == "1" then {unterminated: true} else {} end))'
 
 cmd_diagram_list() {
   _dg_require_repo
@@ -4145,10 +4156,15 @@ cmd_diagram_render() {
   _dg_browser
 
   # The jobs: every block with a PNG. A block without one fails here.
-  local doc line png elk from to id=0 failed=0 rendered=0 src out
+  local doc line png elk from to unt id=0 failed=0 rendered=0 src out
   local j_doc=() j_line=() j_png=() j_out=()
   : > "$_SCRATCH/jobs.ndjson"
-  while IFS=$'\x1f' read -r doc line png elk from to; do
+  while IFS=$'\x1f' read -r doc line png elk from to unt; do
+    if [ "$unt" = 1 ]; then
+      echo "diagram: FAILED $doc:$line: its mermaid fence is never closed (the block runs to the end of the doc)" >&2
+      failed=$((failed + 1))
+      continue
+    fi
     if [ -z "$png" ]; then
       echo "diagram: FAILED $doc:$line: no image link to a PNG in this repository directly above its <details> slot" >&2
       failed=$((failed + 1))
