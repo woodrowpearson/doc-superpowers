@@ -4126,21 +4126,21 @@ cmd_diagram_render() {
       0|1) ;;
       *) _dg_cannot "the renderer could not run (exit $rc; see above): no PNG was changed" ;;
     esac
-    # One line per result: id, ok, the error, the blocked URLs.
+    # One line per result: id, ok, ELK used, the error, the blocked URLs.
     jq -r 'select(type == "object" and (.id | type) == "number")
-      | [(.id | tostring), (if .ok == true then "1" else "0" end),
-         ((.error // "") | gsub("[\t\n]"; " ")), ((.blocked // []) | join(" "))] | join("\t")' \
+      | [(.id | tostring), (if .ok == true then "1" else "0" end), (if .elk == true then "1" else "0" end),
+         ((.error // "") | gsub("[\t\n\u001f]"; " ")), ((.blocked // []) | join(" "))] | join("\u001f")' \
       "$_SCRATCH/results" > "$_SCRATCH/results.tsv" 2>/dev/null \
       || _dg_cannot "the renderer printed results that are not JSON: no PNG was changed"
-    local i=0 r_id r_ok r_err r_blocked found
+    local i=0 r_id r_ok r_elk r_err r_blocked found
     while [ "$i" -lt "$id" ]; do
-      found=0 r_ok=0 r_err="" r_blocked=""
-      while IFS=$'\t' read -r r_id r_ok r_err r_blocked; do
+      found=0 r_ok=0 r_elk=0 r_err="" r_blocked=""
+      while IFS=$'\x1f' read -r r_id r_ok r_elk r_err r_blocked; do
         if [ "$r_id" = "$i" ]; then found=1; break; fi
       done < "$_SCRATCH/results.tsv"
       if [ "$found" = 1 ] && [ "$r_ok" = 1 ] && _dg_is_png "${j_out[$i]}"; then
         mv -f "${j_out[$i]}" "${j_png[$i]}" || _dg_cannot "cannot move the render onto ${j_png[$i]}"
-        echo "rendered ${j_png[$i]} (${j_doc[$i]}:${j_line[$i]})"
+        echo "rendered ${j_png[$i]} (${j_doc[$i]}:${j_line[$i]}$([ "$r_elk" = 1 ] && echo ', ELK'))"
         rendered=$((rendered + 1))
       else
         rm -f "${j_out[$i]}"

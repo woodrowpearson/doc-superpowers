@@ -9231,6 +9231,117 @@ test_diagram_install_browser() {
   teardown
 }
 
+# _dg_real_browser: a browser the real-render test can use, into
+# _DG_REAL_BROWSER — DOC_SUPERPOWERS_CHROME, or one at the usual system paths.
+_dg_real_browser() {
+  local c
+  _DG_REAL_BROWSER=""
+  for c in "${DOC_SUPERPOWERS_CHROME:-}" \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+    "/Applications/Chromium.app/Contents/MacOS/Chromium" \
+    /usr/bin/google-chrome-stable /usr/bin/google-chrome /opt/google/chrome/chrome \
+    /usr/bin/chromium /usr/bin/chromium-browser; do
+    if [ -n "$c" ] && [ -f "$c" ] && [ -x "$c" ]; then
+      _DG_REAL_BROWSER="$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# _dg_png_facts <png>: "<width> <r>,<g>,<b>" — the image's width and its
+# top-left pixel. That pixel is the raw bytes of the first scanline whatever
+# its filter (every predictor of the first pixel of row 0 is 0).
+_dg_png_facts() {
+  node -e '
+    const fs = require("fs"), zlib = require("zlib");
+    const b = fs.readFileSync(process.argv[1]);
+    const w = b.readUInt32BE(16), ct = b[25];
+    let p = 8, idat = [];
+    while (p < b.length) {
+      const n = b.readUInt32BE(p), t = b.toString("latin1", p + 4, p + 8);
+      if (t === "IDAT") idat.push(b.subarray(p + 8, p + 8 + n));
+      p += 12 + n;
+    }
+    const raw = zlib.inflateSync(Buffer.concat(idat));
+    console.log(w + " " + [raw[1], raw[2], raw[3]].join(",") + (ct === 6 ? "," + raw[4] : ""));
+  ' "$1"
+}
+
+test_diagram_render_for_real() {
+  echo "test: diagram render, for real: a default and an ELK diagram render at width 1248, scale 2, on white; a diagram that requests an outside URL fails, naming it, and keeps its old PNG"
+  local v
+  v=$(node --version 2>/dev/null || true)
+  v="${v#v}"
+  case "${v%%.*}" in
+    ''|*[!0123456789]*) record_skip "diagram real render: no node on PATH"; return 0 ;;
+  esac
+  if [ "${v%%.*}" -lt 18 ]; then record_skip "diagram real render: node $v is older than 18"; return 0; fi
+  if ! command -v npm >/dev/null 2>&1; then record_skip "diagram real render: no npm on PATH"; return 0; fi
+  if ! _dg_real_browser; then record_skip "diagram real render: no Chrome or Chromium (set DOC_SUPERPOWERS_CHROME)"; return 0; fi
+  setup
+  # One install per suite run (npm ci of the lock); DOC_SP_TEST_DIAGRAM_CACHE
+  # reuses one across runs.
+  export XDG_CACHE_HOME="${DOC_SP_TEST_DIAGRAM_CACHE:-$_HARNESS_TMP/diagram-cache}"
+  local out rc long="" i
+  i=1
+  while [ "$i" -lt 30 ]; do long="$long N$i[Step $i] -->"; i=$((i + 1)); done
+  _dg_doc docs/a.md diagrams/a.png 'flowchart LR' '  A[Start here] --> B{Pick} -->|yes| C[Done]'
+  _dg_doc docs/wide.md diagrams/wide.png 'flowchart LR' "  $long N30[End]"
+  _dg_doc docs/b.md diagrams/b.png '---' 'config:' '  layout: elk' '---' 'flowchart LR' '  A[Start] --> B[Middle] --> C[End]' '  A --> C'
+  _dg_doc docs/b2.md diagrams/b2.png 'flowchart LR' '  A[Start] --> B[Middle] --> C[End]' '  A --> C'
+  _dg_doc docs/x.md diagrams/x.png 'flowchart LR' '  A@{ img: "https://example.invalid/logo.png", label: "Logo", pos: "t", h: 60, constraint: "on" }' '  A --> B'
+  _dg_doc docs/y.md diagrams/y.png 'flowchart LR' "  A[\"<img src='https://example.invalid/inline.png' width='20'/> hi\"] --> B"
+  mkdir -p docs/diagrams
+  printf 'old x' > docs/diagrams/x.png
+  printf 'old y' > docs/diagrams/y.png
+  rc=0
+  out=$(DOC_SUPERPOWERS_CHROME="$_DG_REAL_BROWSER" "$DOC_TOOLS" diagram render docs/a.md docs/wide.md docs/b.md docs/b2.md 2>&1) || rc=$?
+  if [ "$rc" = 2 ]; then
+    case "$out" in
+      *"npm ci failed"*)
+        record_skip "diagram real render: the packages could not be installed (no registry?): $(printf '%s' "$out" | tail -n 1)"
+        unset XDG_CACHE_HOME
+        teardown
+        return 0 ;;
+    esac
+  fi
+  assert_eq "0" "$rc" "four diagrams render: exit 0 ($(printf '%s' "$out" | tail -n 3 | tr '\n' ' '))"
+  assert_contains "$out" "rendered docs/diagrams/b.png (docs/b.md:10, ELK)" "the ELK block renders with ELK registered"
+  assert_not_contains "$out" "rendered docs/diagrams/b2.png (docs/b2.md:10, ELK)" "…and the same graph without layout: elk does not"
+  assert_true "…and the two images differ" test -f docs/diagrams/b.png -a -f docs/diagrams/b2.png
+  if [ -f docs/diagrams/b.png ] && [ -f docs/diagrams/b2.png ]; then
+    assert_true "the ELK image is not the default layout's" sh -c '! cmp -s docs/diagrams/b.png docs/diagrams/b2.png'
+  fi
+  local facts
+  facts=$(_dg_png_facts docs/diagrams/wide.png 2>/dev/null || true)
+  assert_eq "2464" "${facts%% *}" "a diagram wider than the page fills it: 1248 less the 8px margins, at scale 2 (2464 px)"
+  # shellcheck disable=SC2016  # expands in the inner sh
+  assert_true "…on a white background (top-left pixel ${facts#* })" \
+    sh -c 'case "$1" in 255,255,255|255,255,255,255) exit 0 ;; esac; exit 1' _ "${facts#* }"
+  facts=$(_dg_png_facts docs/diagrams/a.png 2>/dev/null || true)
+  local w="${facts%% *}"
+  case "$w" in ''|*[!0123456789]*) w=1 ;; esac
+  assert_true "a small diagram keeps its own width, at scale 2 ($w px: even, below 2464)" \
+    test "$w" -gt 1 -a "$w" -lt 2464 -a $((w % 2)) -eq 0
+
+  rc=0
+  out=$(DOC_SUPERPOWERS_CHROME="$_DG_REAL_BROWSER" "$DOC_TOOLS" diagram render docs/x.md docs/y.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "diagrams that request outside URLs exit 1"
+  assert_contains "$out" "https://example.invalid/logo.png" "…naming the image URL of a node"
+  assert_contains "$out" "https://example.invalid/inline.png" "…and of an <img> in a label, which rendered but asked the network"
+  assert_eq "old x|old y" "$(cat docs/diagrams/x.png)|$(cat docs/diagrams/y.png)" "…and both old PNGs are kept"
+
+  # browser.mjs path: no chrome-headless-shell in an empty cache.
+  local mods
+  mods=$(find "$XDG_CACHE_HOME/doc-superpowers/diagram" -mindepth 2 -maxdepth 2 -name node_modules | head -n 1)
+  rc=0
+  node "$SCRIPT_DIR/diagram/browser.mjs" path "$mods" "$TEST_DIR/no-browsers" >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "browser.mjs path: an empty cache has no chrome-headless-shell (exit 1)"
+  unset XDG_CACHE_HOME
+  teardown
+}
+
 run_tests() {
   echo "=== doc-tools.sh test suite ==="
   echo ""
@@ -9552,6 +9663,7 @@ run_tests() {
   test_diagram_render_finds_a_browser
   test_diagram_render_replaces_a_png_only_on_success
   test_diagram_install_browser
+  test_diagram_render_for_real
 
   print_summary
 }

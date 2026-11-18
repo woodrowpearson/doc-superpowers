@@ -1,0 +1,180 @@
+// render.mjs: doc-superpowers' local Mermaid renderer, run by
+// `doc-tools.sh diagram render` (scripts/doc-tools.sh, "Diagrams").
+//
+//   node render.mjs --browser <chrome> --modules <node_modules> --jobs <jobs.json>
+//
+// <jobs.json> is an array of {id, doc, line, png, elk, source, out}. For each
+// job this opens a page in one headless browser, renders `source` with the
+// Mermaid in <node_modules> (with the ELK layouts registered when `elk` is
+// true), and screenshots the SVG to `out`: width 1248, device scale 2, white
+// background. It prints one JSON line per job on stdout:
+//   {"id": 0, "ok": true, "elk": false}
+//   {"id": 1, "ok": false, "error": "...", "blocked": ["https://..."]}
+// The doc-tools.sh side moves `out` onto the PNG only for an ok job.
+//
+// Nothing leaves the machine: every request a page makes to anything but a
+// file:, data: or about: URL is aborted, and a job whose page made one fails
+// and names it. Mermaid and the ELK plugin load from <node_modules> as file:
+// URLs (--allow-file-access-from-files lets a file: page import file: ES
+// modules); no CDN and no renderer service is used.
+//
+// Exit 0: every job rendered. 1: a job failed. 2: could not run (bad
+// arguments, an unreadable job file, missing packages, a browser that will
+// not start).
+
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const WIDTH = 1248;
+const SCALE = 2;
+const ALLOWED = /^(file|data|about):/i;
+
+function fail(message) {
+  process.stderr.write(`render.mjs: ${message}\n`);
+  process.exit(2);
+}
+
+function parseArgs(argv) {
+  const args = {};
+  for (let i = 0; i < argv.length; i += 2) {
+    const key = argv[i];
+    const value = argv[i + 1];
+    if (!['--browser', '--modules', '--jobs'].includes(key) || value === undefined) {
+      fail(`usage: node render.mjs --browser <chrome> --modules <node_modules> --jobs <jobs.json> (got ${JSON.stringify(key)})`);
+    }
+    args[key.slice(2)] = value;
+  }
+  for (const k of ['browser', 'modules', 'jobs']) if (!args[k]) fail(`--${k} is required`);
+  return args;
+}
+
+const args = parseArgs(process.argv.slice(2));
+const modules = path.resolve(args.modules);
+
+let jobs;
+try {
+  jobs = JSON.parse(fs.readFileSync(args.jobs, 'utf8'));
+} catch (e) {
+  fail(`cannot read the job file ${args.jobs}: ${e.message}`);
+}
+if (!Array.isArray(jobs)) fail('the job file is not a JSON array');
+
+const mermaidFile = path.join(modules, 'mermaid', 'dist', 'mermaid.esm.min.mjs');
+const elkFile = path.join(modules, '@mermaid-js', 'layout-elk', 'dist', 'mermaid-layout-elk.esm.min.mjs');
+for (const f of [mermaidFile, elkFile]) if (!fs.existsSync(f)) fail(`the pinned packages are not installed: ${f} is missing`);
+
+let puppeteer;
+try {
+  puppeteer = createRequire(path.join(modules, 'noop.js'))('puppeteer-core');
+} catch (e) {
+  fail(`cannot load puppeteer-core from ${modules}: ${e.message}`);
+}
+
+// The page every job renders in: an empty white body. It lives in a private
+// temporary directory, so its file: URL names nothing of the repository.
+const pageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-superpowers-diagram-'));
+const pageFile = path.join(pageDir, 'page.html');
+fs.writeFileSync(pageFile,
+  '<!doctype html><html><head><meta charset="utf-8">' +
+  '<style>html,body{background:#ffffff;margin:0}body{margin:8px}</style>' +
+  '</head><body><div id="container"></div></body></html>\n');
+
+let browser;
+try {
+  browser = await puppeteer.launch({
+    executablePath: args.browser,
+    headless: true,
+    args: [
+      '--allow-file-access-from-files',
+      '--disable-background-networking',
+      '--disable-component-update',
+      '--disable-domain-reliability',
+      '--disable-sync',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--hide-scrollbars',
+    ],
+  });
+} catch (e) {
+  fs.rmSync(pageDir, { recursive: true, force: true });
+  fail(`could not launch the browser ${args.browser}: ${e.message}`);
+}
+
+async function renderJob(job) {
+  const blocked = [];
+  const page = await browser.newPage();
+  try {
+    await page.setRequestInterception(true);
+    page.on('request', (request) => {
+      const url = request.url();
+      if (ALLOWED.test(url)) {
+        request.continue().catch(() => {});
+      } else {
+        if (!blocked.includes(url)) blocked.push(url);
+        request.abort('blockedbyclient').catch(() => {});
+      }
+    });
+    await page.setViewport({ width: WIDTH, height: 800, deviceScaleFactor: SCALE });
+    await page.goto(pathToFileURL(pageFile).href, { waitUntil: 'load' });
+    const result = await page.evaluate(async (mermaidUrl, elkUrl, source, elk) => {
+      const { default: mermaid } = await import(mermaidUrl);
+      if (elk) {
+        const { default: layouts } = await import(elkUrl);
+        mermaid.registerLayoutLoaders(layouts);
+      }
+      // c4.wrap false: the setting every hand render before this renderer used.
+      mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', c4: { wrap: false } });
+      try {
+        const { svg } = await mermaid.render('diagram', source);
+        const container = document.getElementById('container');
+        container.innerHTML = svg;
+        // Images a label may hold: wait until each has loaded or failed.
+        await Promise.all([...container.querySelectorAll('img')].map((img) =>
+          img.complete ? null : new Promise((resolve) => { img.onload = resolve; img.onerror = resolve; })));
+        await document.fonts.ready;
+        const box = container.querySelector('svg').getBoundingClientRect();
+        return { ok: true, x: box.left, y: box.top, width: box.width, height: box.height };
+      } catch (e) {
+        return { ok: false, error: String((e && e.message) || e) };
+      }
+    }, pathToFileURL(mermaidFile).href, pathToFileURL(elkFile).href, job.source, Boolean(job.elk));
+    if (!result.ok) return { id: job.id, ok: false, error: result.error, blocked };
+    if (!(result.width > 0 && result.height > 0)) {
+      return { id: job.id, ok: false, error: 'the diagram rendered empty', blocked };
+    }
+    const clip = {
+      x: Math.floor(result.x),
+      y: Math.floor(result.y),
+      width: Math.ceil(result.width),
+      height: Math.ceil(result.height),
+    };
+    // A viewport tall enough to hold the whole diagram: a clip below the
+    // viewport would be cut.
+    await page.setViewport({ width: WIDTH, height: Math.max(800, clip.y + clip.height + 8), deviceScaleFactor: SCALE });
+    await page.screenshot({ path: job.out, type: 'png', clip, omitBackground: false });
+    if (blocked.length > 0) {
+      return { id: job.id, ok: false, error: 'the page requested an outside URL, which was refused', blocked };
+    }
+    return { id: job.id, ok: true, elk: Boolean(job.elk) };
+  } catch (e) {
+    return { id: job.id, ok: false, error: String((e && e.message) || e), blocked };
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
+let failed = 0;
+try {
+  for (const job of jobs) {
+    const result = await renderJob(job);
+    if (!result.ok) failed += 1;
+    process.stdout.write(JSON.stringify(result) + '\n');
+  }
+} finally {
+  await browser.close().catch(() => {});
+  fs.rmSync(pageDir, { recursive: true, force: true });
+}
+process.exit(failed > 0 ? 1 : 0);
