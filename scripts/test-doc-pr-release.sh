@@ -4089,4 +4089,454 @@ test_ledger_publish_step() {
 test_ledger_publish_template
 test_ledger_publish_step
 
+# ============================================================================
+# doc-index-resolve.yml's step (design 2026-11-17, R3–R8)
+# ============================================================================
+echo
+echo "=== doc-index-resolve ==="
+
+IR_STEP=.github/scripts/doc-superpowers-steps/index-resolve.sh
+
+# _ir_gh_shim <dir>: a `gh` that answers `gh api` from fixture files in <dir>
+# and logs each call (calls.log: one line of arguments):
+#   pulls.json            the open pull requests (the listing)
+#   pull-<n>.json         GET pulls/<n>; pull-<n>.<k>.json answers the k-th GET
+#   comments-<n>.json     GET issues/<n>/comments (default [])
+#   fail-list, fail-dispatch, fail-comment   that call exits 1
+# A POST of a comment saves its body to posted-<n>.json, a PATCH to
+# patched-<id>.json; a dispatch logs dispatch <file> <ref> to dispatches.log.
+_ir_gh_shim() {
+  local d="$1"
+  mkdir -p "$d/bin"
+  cat > "$d/bin/gh" <<SHIM
+#!/usr/bin/env bash
+F="$d"
+SHIM
+  cat >> "$d/bin/gh" <<'SHIM'
+printf '%s\n' "$*" >> "$F/calls.log"
+[ "$1" = api ] || { echo "gh shim: only gh api" >&2; exit 2; }
+shift
+method=GET
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method="$2"; shift 2 ;;
+    --paginate) shift ;;
+    --input) shift 2 ;;
+    -f) args+=("$2"); shift 2 ;;
+    *) path="$1"; shift ;;
+  esac
+done
+case "$method $path" in
+  "GET repos/"*"/pulls?"*)
+    [ ! -e "$F/fail-list" ] || exit 1
+    cat "$F/pulls.json" ;;
+  "GET repos/"*"/pulls/"*)
+    n="${path##*/}"
+    k=$(( $(cat "$F/get-$n.count" 2>/dev/null || echo 0) + 1 ))
+    echo "$k" > "$F/get-$n.count"
+    if [ -f "$F/pull-$n.$k.json" ]; then cat "$F/pull-$n.$k.json"; else cat "$F/pull-$n.json"; fi ;;
+  "GET repos/"*"/issues/"*"/comments"*)
+    n="${path#*/issues/}"; n="${n%%/*}"
+    if [ -f "$F/comments-$n.json" ]; then cat "$F/comments-$n.json"; else echo '[]'; fi ;;
+  "POST repos/"*"/issues/"*"/comments")
+    [ ! -e "$F/fail-comment" ] || exit 1
+    n="${path#*/issues/}"; n="${n%%/*}"
+    cat > "$F/posted-$n.json"; echo '{}' ;;
+  "PATCH repos/"*"/issues/comments/"*)
+    [ ! -e "$F/fail-comment" ] || exit 1
+    cat > "$F/patched-${path##*/}.json"; echo '{}' ;;
+  "POST repos/"*"/actions/workflows/"*"/dispatches")
+    [ ! -e "$F/fail-dispatch" ] || exit 1
+    w="${path%/dispatches}"; w="${w##*/}"
+    echo "dispatch $w ${args[*]}" >> "$F/dispatches.log" ;;
+  *) echo "gh shim: unexpected $method $path" >&2; exit 2 ;;
+esac
+SHIM
+  chmod +x "$d/bin/gh"
+}
+
+# _ir_index <a.md refs> <b.md refs> <stamp>: a doc index on one line (so any
+# two edits of it conflict as text), with three entries.
+_ir_index() {
+  jq -cn --arg a "$1" --arg b "$2" --arg t "$3" '{schema_version: 2, generated_at: $t, docs: {
+    "docs/a.md": {doc_type: "spec", code_refs: [$a], last_verified: null},
+    "docs/b.md": {doc_type: "spec", code_refs: [$b], last_verified: null},
+    "docs/c.md": {doc_type: "spec", code_refs: ["src/c/"], last_verified: null}}}'
+}
+
+# _ir_fixture: a checkout with doc-index-resolve installed (IR_DIR), its bare
+# origin (IR_REMOTE) holding main, and a gh shim (IR_GH). main holds the index
+# and README.md.
+_ir_fixture() {
+  IR_DIR=$(installed_repo --ci --workflows=doc-index-resolve) || return 1
+  IR_REMOTE="$(harness_mktemp_d ir-remote)/origin.git"
+  IR_GH=$(harness_mktemp_d ir-gh)
+  _ir_gh_shim "$IR_GH"
+  git init -q --bare "$IR_REMOTE"
+  (
+    cd "$IR_DIR"
+    mkdir -p docs
+    _ir_index src/a/ src/b/ t0 > docs/.doc-index.json
+    printf 'line one\n' > README.md
+    git add -A && git commit -qm "base"
+    git remote add origin "$IR_REMOTE"
+    git push -q origin main
+  )
+}
+
+# _ir_branch <name> <a.md refs | -> <b.md refs | -> [<README line>]: a branch
+# off main's current commit with the index edited (- keeps an entry) and,
+# given a line, README.md's first line; pushed to origin.
+_ir_branch() {
+  (
+    cd "$IR_DIR"
+    git checkout -q -b "$1" main
+    local a b
+    a=$(git show main:docs/.doc-index.json | jq -r '.docs["docs/a.md"].code_refs[0]')
+    b=$(git show main:docs/.doc-index.json | jq -r '.docs["docs/b.md"].code_refs[0]')
+    [ "$2" = - ] || a="$2"
+    [ "$3" = - ] || b="$3"
+    if [ "$2" != - ] || [ "$3" != - ]; then
+      _ir_index "$a" "$b" "t-$1" > docs/.doc-index.json
+    fi
+    [ -z "${4:-}" ] || printf '%s\n' "$4" > README.md
+    printf '%s\n' "$1" > "branch-$1.txt"
+    git add -A
+    git commit -qm "$1"
+    git push -q origin "$1"
+    git checkout -q main
+  )
+}
+
+# _ir_base <b.md refs> [<README line>]: a new commit on main (the base moved),
+# pushed to origin.
+_ir_base() {
+  (
+    cd "$IR_DIR"
+    local a
+    a=$(jq -r '.docs["docs/a.md"].code_refs[0]' docs/.doc-index.json)
+    _ir_index "$a" "$1" t-base > docs/.doc-index.json
+    [ -z "${2:-}" ] || printf '%s\n' "$2" > README.md
+    git commit -qam "base moves"
+    git push -q origin main
+  )
+}
+
+# _ir_pr <n> <branch> [<mergeable: true|false|null>] [<jq edit>]: pull-<n>.json
+# for the branch's tip on origin, and the listing (pulls.json) rebuilt from
+# every pull-<n>.json.
+_ir_pr() {
+  local sha
+  sha=$(git -C "$IR_REMOTE" rev-parse -q --verify "refs/heads/$2" || echo 0000000000000000000000000000000000000000)
+  jq -n --argjson n "$1" --arg ref "$2" --arg sha "$sha" --argjson m "${3:-false}" \
+    '{number: $n, state: "open", mergeable: $m, base: {ref: "main"}, labels: [],
+      head: {ref: $ref, sha: $sha, repo: {full_name: "o/r"}}} | '"${4:-.}" > "$IR_GH/pull-$1.json"
+  # One page per pull request: the step reads every page (--paginate).
+  local f
+  : > "$IR_GH/pulls.json"
+  for f in "$IR_GH"/pull-*.json; do
+    case "${f##*/}" in
+      pull-*.*.json) continue ;;
+    esac
+    jq -c '[del(.mergeable)]' "$f" >> "$IR_GH/pulls.json"
+  done
+}
+
+# _ir_run <out> [VAR=value…]: the step, as the workflow runs it.
+_ir_run() {
+  local out="$1"
+  shift
+  run_installed "$IR_DIR" "$out" PATH="$IR_GH/bin:$BASH_PATH" GH_TOKEN=x GITHUB_REPOSITORY=o/r BASE_BRANCH=main \
+    RESOLVE_RETRY_SECONDS=0 GITHUB_STEP_SUMMARY="$out.summary" "$@" -- "$IR_STEP"
+}
+
+test_index_resolve_usage_errors() {
+  echo "Test: index-resolve.sh — a missing base branch or repository, a pull request number that is not one, or a test workflow that is no file name: exit 3, nothing listed"
+  _ir_fixture || { assert_true "fixture" false; return 0; }
+  local out rc
+  out="$(harness_mktemp_d ir)/out"
+  rc=0; _ir_run "$out" BASE_BRANCH= || rc=$?
+  assert_eq "3" "$rc" "no BASE_BRANCH: exit 3"
+  rc=0; _ir_run "$out" GITHUB_REPOSITORY=nope || rc=$?
+  assert_eq "3" "$rc" "a GITHUB_REPOSITORY that is not owner/name: exit 3"
+  rc=0; _ir_run "$out" PR=12x || rc=$?
+  assert_eq "3" "$rc" "PR=12x: exit 3"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error:: line"
+  rc=0; _ir_run "$out" TEST_WORKFLOW=../x.yml || rc=$?
+  assert_eq "3" "$rc" "TEST_WORKFLOW=../x.yml: exit 3"
+  assert_true "nothing was listed" test ! -e "$IR_GH/calls.log"
+}
+
+test_index_resolve_merges_an_index_only_conflict() {
+  echo "Test: index-resolve.sh — a pull request whose only conflict is the doc index: merged with the driver (first parent the head), pushed with a lease, the test workflow dispatched on the branch, one marked comment"
+  _ir_fixture || { assert_true "fixture" false; return 0; }
+  local out rc head tip merged body
+  out="$(harness_mktemp_d ir)/out"
+  _ir_branch topic src/a/new/ -
+  _ir_base src/b/new/
+  head=$(git -C "$IR_REMOTE" rev-parse refs/heads/topic)
+  _ir_pr 5 topic false
+  rc=0; _ir_run "$out" TEST_WORKFLOW=tests.yml || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  tip=$(git -C "$IR_REMOTE" rev-parse refs/heads/topic)
+  assert_eq "$head" "$(git -C "$IR_REMOTE" rev-parse "$tip^1")" "the merge's first parent is the head that was read (a fast-forward)"
+  assert_eq "$(git -C "$IR_REMOTE" rev-parse refs/heads/main)" "$(git -C "$IR_REMOTE" rev-parse "$tip^2")" "…its second parent the base"
+  merged=$(git -C "$IR_REMOTE" show "$tip:docs/.doc-index.json")
+  assert_eq "src/a/new/|src/b/new/|src/c/" "$(jq -r '[.docs[].code_refs[0]] | join("|")' <<<"$merged")" "the index is merged entry by entry: both sides' edits are in it"
+  assert_eq "" "$(git -C "$IR_REMOTE" show "$tip:docs/.doc-index.json" | grep -E '^(<<<<<<<|>>>>>>>)' || true)" "…with no conflict markers"
+  assert_contains "$(cat "$out.log")" "PR #5" "one line for the pull request"
+  assert_contains "$(grep 'PR #5' "$out.log")" "merged" "…saying it merged"
+  assert_eq "dispatch tests.yml ref=topic" "$(cat "$IR_GH/dispatches.log" 2>/dev/null)" "the test workflow is dispatched on the branch"
+  body=$(jq -r .body "$IR_GH/posted-5.json" 2>/dev/null || true)
+  assert_contains "$body" "<!-- doc-superpowers:index-resolve -->" "one comment, carrying the marker"
+  assert_contains "$body" "${tip:0:7}" "…naming the merge commit"
+  assert_contains "$body" "tests.yml" "…and the checks it started"
+  assert_contains "$body" "git pull" "…and the author's next step"
+  assert_contains "$(cat "$out.summary" 2>/dev/null)" "#5" "the run's summary lists it"
+  assert_eq "" "$(git -C "$IR_DIR" status --porcelain)" "the checkout is left clean (no merge in progress)"
+  assert_eq "" "$(git -C "$IR_DIR" config --get merge.doc-index.driver || true)" "…and its config names no driver (a temporary one was used)"
+  # GitHub now reports it as mergeable: not touched.
+  _ir_pr 5 topic true
+  rc=0; _ir_run "$out" TEST_WORKFLOW=tests.yml || rc=$?
+  assert_eq "0" "$rc" "a mergeable pull request: exit 0"
+  assert_contains "$(grep 'PR #5' "$out.log")" "not touched" "…not touched"
+  assert_eq "$tip" "$(git -C "$IR_REMOTE" rev-parse refs/heads/topic)" "…and its branch is not pushed"
+}
+
+test_index_resolve_checks_without_a_test_workflow() {
+  echo "Test: index-resolve.sh — no test workflow recorded: nothing dispatched, the comment asks the author to re-run the checks; a dispatch that fails: the comment says the checks could not be started"
+  _ir_fixture || { assert_true "fixture" false; return 0; }
+  local out rc body
+  out="$(harness_mktemp_d ir)/out"
+  _ir_branch one src/a/1/ -
+  _ir_branch two src/a/2/ -
+  _ir_base src/b/new/
+  _ir_pr 1 one false
+  rc=0; _ir_run "$out" TEST_WORKFLOW= || rc=$?
+  assert_eq "0" "$rc" "exit 0"
+  assert_true "nothing dispatched" test ! -e "$IR_GH/dispatches.log"
+  body=$(jq -r .body "$IR_GH/posted-1.json" 2>/dev/null || true)
+  assert_contains "$body" "re-run the checks" "the comment asks the author to re-run the checks"
+  rm -f "$IR_GH/pull-1.json"
+  _ir_pr 2 two false
+  : > "$IR_GH/fail-dispatch"
+  rc=0; _ir_run "$out" TEST_WORKFLOW=tests.yml || rc=$?
+  assert_eq "0" "$rc" "a failed dispatch after a push: exit 0 (the merge landed)"
+  body=$(jq -r .body "$IR_GH/posted-2.json" 2>/dev/null || true)
+  assert_contains "$body" "could not be started" "…and the comment says the checks could not be started"
+  assert_contains "$(cat "$out.log")" "::warning::" "…with a warning in the run log"
+}
+
+test_index_resolve_left_out_and_not_touched() {
+  echo "Test: index-resolve.sh — a fork, another base, the no-index-resolve label, a head that is the base, a mergeable one, one whose state stays unknown: no merge, no comment, each listed; unknown then conflicting: considered"
+  _ir_fixture || { assert_true "fixture" false; return 0; }
+  local out rc l
+  out="$(harness_mktemp_d ir)/out"
+  _ir_branch fork src/a/f/ -
+  _ir_branch other src/a/o/ -
+  _ir_branch labelled src/a/l/ -
+  _ir_branch clean - -
+  _ir_branch unknown src/a/u/ -
+  _ir_branch late src/a/late/ -
+  _ir_base src/b/new/
+  _ir_pr 1 fork false '.head.repo.full_name = "someone/r"'
+  _ir_pr 2 other false '.base.ref = "develop"'
+  _ir_pr 3 labelled false '.labels = [{name: "docs"}, {name: "no-index-resolve"}]'
+  _ir_pr 4 main false
+  _ir_pr 5 clean true
+  _ir_pr 6 unknown null
+  _ir_pr 7 late false
+  cp "$IR_GH/pull-7.json" "$IR_GH/pull-7.2.json"
+  jq '.mergeable = null' "$IR_GH/pull-7.2.json" > "$IR_GH/pull-7.1.json"
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  l=$(cat "$out.log")
+  assert_contains "$(grep 'PR #1 ' <<<"$l")" "left out" "the fork: left out"
+  assert_contains "$(grep 'PR #1 ' <<<"$l")" "fork" "…as a fork"
+  assert_contains "$(grep 'PR #2 ' <<<"$l")" "another base" "another base: left out"
+  assert_contains "$(grep 'PR #3 ' <<<"$l")" "no-index-resolve" "the label: left out"
+  assert_contains "$(grep 'PR #4 ' <<<"$l")" "base" "a head that is the base: left out"
+  assert_contains "$(grep 'PR #5 ' <<<"$l")" "not touched" "mergeable: not touched"
+  assert_contains "$(grep 'PR #6 ' <<<"$l")" "unknown" "still unknown after the retry: left out"
+  assert_eq "2" "$(cat "$IR_GH/get-6.count")" "…asked twice (one retry)"
+  assert_contains "$(grep 'PR #7 ' <<<"$l")" "merged" "unknown, then conflicting: considered, and merged"
+  for n in 1 2 3 4 5 6; do
+    assert_true "PR #$n: no comment" test ! -e "$IR_GH/posted-$n.json"
+  done
+  assert_eq "$(git -C "$IR_DIR" rev-parse fork)" "$(git -C "$IR_REMOTE" rev-parse refs/heads/fork)" "the fork's branch is not pushed"
+  assert_contains "$(cat "$out.summary")" "#1" "the run's summary lists the left-out ones"
+  assert_contains "$(cat "$out.summary")" "#6" "…the unknown one too"
+}
+
+test_index_resolve_skips_what_the_driver_cannot_fix() {
+  echo "Test: index-resolve.sh — another file conflicts, the driver cannot settle an entry, an entry would be dropped, the merge brings a workflow file, the head moved: skipped, nothing pushed, one comment naming the reason and the local fix"
+  _ir_fixture || { assert_true "fixture" false; return 0; }
+  local out rc l n body
+  out="$(harness_mktemp_d ir)/out"
+  _ir_branch readme src/a/r/ - "line from the branch"
+  _ir_branch driver - src/b/branch/
+  _ir_branch moved src/a/m/ -
+  _ir_base src/b/new/ "line from the base"
+  _ir_pr 1 readme false
+  _ir_pr 2 driver false
+  _ir_pr 3 moved false '.head.sha = "0123456789abcdef0123456789abcdef01234567"'
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "skips are no failure: exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  l=$(cat "$out.log")
+  for n in 1 2 3; do
+    assert_contains "$(grep "PR #$n " <<<"$l")" "skipped" "PR #$n: skipped"
+    assert_true "PR #$n: one comment" test -f "$IR_GH/posted-$n.json"
+    body=$(jq -r .body "$IR_GH/posted-$n.json" 2>/dev/null || true)
+    assert_contains "$body" "<!-- doc-superpowers:index-resolve -->" "PR #$n: the comment carries the marker"
+    assert_contains "$body" "git merge origin/main" "PR #$n: …and the local command"
+    assert_contains "$body" "install --git" "PR #$n: …in a clone with the driver registered"
+  done
+  assert_contains "$(jq -r .body "$IR_GH/posted-1.json")" "README.md" "another file conflicts: the comment names it"
+  assert_contains "$(jq -r .body "$IR_GH/posted-2.json")" "merge driver" "the driver's conflict: the comment says so"
+  assert_contains "$(jq -r .body "$IR_GH/posted-3.json")" "moved" "the head moved: the comment says so"
+  for b in readme driver moved; do
+    assert_eq "$(git -C "$IR_DIR" rev-parse "$b")" "$(git -C "$IR_REMOTE" rev-parse "refs/heads/$b")" "$b: nothing pushed"
+  done
+  assert_eq "" "$(git -C "$IR_DIR" status --porcelain)" "the checkout is left clean"
+}
+
+test_index_resolve_refuses_a_dropped_entry_and_workflow_files() {
+  echo "Test: index-resolve.sh — a merged index missing an entry both sides keep, or a merge that brings a file under .github/workflows/: skipped, nothing pushed"
+  _ir_fixture || { assert_true "fixture" false; return 0; }
+  local out rc drv
+  out="$(harness_mktemp_d ir)/out"
+  _ir_branch drop src/a/d/ -
+  _ir_base src/b/new/
+  # A driver that "merges" by dropping docs/c.md, which all three sides hold.
+  drv="$IR_DIR/.github/scripts/doc-superpowers-steps/merge-doc-index.sh"
+  cp "$drv" "$IR_GH/real-driver.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'jq -c '\''del(.docs["docs/c.md"])'\'' "$2" > "$2.x" && mv "$2.x" "$2"' > "$drv"
+  _ir_pr 1 drop false
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  assert_contains "$(grep 'PR #1 ' "$out.log")" "skipped" "a dropped entry: skipped"
+  assert_contains "$(jq -r .body "$IR_GH/posted-1.json" 2>/dev/null)" "docs/c.md" "…the comment names the entry"
+  assert_eq "$(git -C "$IR_DIR" rev-parse drop)" "$(git -C "$IR_REMOTE" rev-parse refs/heads/drop)" "…nothing pushed"
+  cp "$IR_GH/real-driver.sh" "$drv"
+  # The base adds a workflow file: the job token cannot push it.
+  (
+    cd "$IR_DIR"
+    mkdir -p .github/workflows
+    printf 'name: x\n' > .github/workflows/new.yml
+    git add .github/workflows/new.yml && git commit -qm "a workflow" && git push -q origin main
+  )
+  rm -f "$IR_GH/posted-1.json"
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0"
+  assert_contains "$(grep 'PR #1 ' "$out.log")" "skipped" "a workflow file in the merge: skipped"
+  assert_contains "$(jq -r .body "$IR_GH/posted-1.json" 2>/dev/null)" ".github/workflows/" "…the comment says why"
+  assert_eq "$(git -C "$IR_DIR" rev-parse drop)" "$(git -C "$IR_REMOTE" rev-parse refs/heads/drop)" "…nothing pushed"
+}
+
+test_index_resolve_refused_push() {
+  echo "Test: index-resolve.sh — a push the remote refuses: a branch that moved meanwhile is skipped (comment), one that did not move is failed (no comment, exit 2); a failure stops no other pull request"
+  _ir_fixture || { assert_true "fixture" false; return 0; }
+  local out rc
+  out="$(harness_mktemp_d ir)/out"
+  _ir_branch refuse src/a/x/ -
+  _ir_branch move src/a/y/ -
+  _ir_branch fine src/a/z/ -
+  _ir_base src/b/new/
+  git -C "$IR_REMOTE" rev-parse refs/heads/main > "$IR_REMOTE/moved-to"
+  cat > "$IR_REMOTE/hooks/pre-receive" <<'HOOK'
+#!/bin/sh
+while read -r old new ref; do
+  case "$ref" in
+    refs/heads/refuse) echo "refused by the test hook" >&2; exit 1 ;;
+    refs/heads/move)
+      env -u GIT_QUARANTINE_PATH -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \
+        git update-ref refs/heads/move "$(cat moved-to)"
+      echo "moved by the test hook" >&2; exit 1 ;;
+  esac
+done
+exit 0
+HOOK
+  chmod +x "$IR_REMOTE/hooks/pre-receive"
+  _ir_pr 1 refuse false
+  _ir_pr 2 move false
+  _ir_pr 3 fine false
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "2" "$rc" "a failed pull request: exit 2"
+  assert_contains "$(grep 'PR #1 ' "$out.log")" "failed" "refused, not moved: failed"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error:: line"
+  assert_true "…and no comment" test ! -e "$IR_GH/posted-1.json"
+  assert_eq "$(cat "$IR_REMOTE/moved-to")" "$(git -C "$IR_REMOTE" rev-parse refs/heads/move)" "precondition: the hook moved the branch and refused the push"
+  assert_contains "$(grep 'PR #2 ' "$out.log")" "skipped" "refused, moved: skipped"
+  assert_contains "$(jq -r .body "$IR_GH/posted-2.json" 2>/dev/null)" "moved" "…its comment says the branch moved"
+  assert_contains "$(grep 'PR #3 ' "$out.log")" "merged" "the next pull request is still merged"
+}
+
+test_index_resolve_updates_its_own_comment() {
+  echo "Test: index-resolve.sh — a pull request with the resolver's comment (a Bot's, marked) gets it updated, not a second one; a marked comment by a person is not the resolver's"
+  _ir_fixture || { assert_true "fixture" false; return 0; }
+  local out rc
+  out="$(harness_mktemp_d ir)/out"
+  _ir_branch mine src/a/1/ - "line from the branch"
+  _ir_branch theirs src/a/2/ - "line from the branch"
+  _ir_base src/b/new/ "line from the base"
+  _ir_pr 1 mine false
+  _ir_pr 2 theirs false
+  printf '%s\n' '[{"id": 11, "user": {"login": "a", "type": "User"}, "body": "hi"}]' \
+    '[{"id": 12, "user": {"login": "github-actions[bot]", "type": "Bot"}, "body": "<!-- doc-superpowers:index-resolve -->\nold"}]' > "$IR_GH/comments-1.json"
+  printf '%s\n' '[{"id": 21, "user": {"login": "a", "type": "User"}, "body": "<!-- doc-superpowers:index-resolve --> quoted"}]' > "$IR_GH/comments-2.json"
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  assert_true "the Bot's marked comment (on the second page) is updated" test -f "$IR_GH/patched-12.json"
+  assert_true "…and no second comment is posted" test ! -e "$IR_GH/posted-1.json"
+  assert_contains "$(jq -r .body "$IR_GH/patched-12.json" 2>/dev/null)" "README.md" "…with the new text"
+  assert_true "a person's marked comment is left alone" test ! -e "$IR_GH/patched-21.json"
+  assert_true "…and the resolver posts its own" test -f "$IR_GH/posted-2.json"
+  : > "$IR_GH/fail-comment"
+  rm -f "$IR_GH/posted-2.json"
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "2" "$rc" "a comment that cannot be written: exit 2 (the author was not told)"
+}
+
+test_index_resolve_one_pull_request() {
+  echo "Test: index-resolve.sh — PR=<n> (workflow_dispatch): only that pull request, read by its number"
+  _ir_fixture || { assert_true "fixture" false; return 0; }
+  local out rc
+  out="$(harness_mktemp_d ir)/out"
+  _ir_branch one src/a/1/ -
+  _ir_branch two src/a/2/ -
+  _ir_base src/b/new/
+  _ir_pr 1 one false
+  _ir_pr 2 two false
+  rc=0; _ir_run "$out" PR=2 || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  assert_contains "$(grep 'PR #2 ' "$out.log")" "merged" "PR #2 is merged"
+  assert_eq "" "$(grep 'PR #1 ' "$out.log" || true)" "PR #1 is not looked at"
+  assert_eq "" "$(grep 'pulls?' "$IR_GH/calls.log" || true)" "…and no listing is read"
+  assert_eq "$(git -C "$IR_DIR" rev-parse one)" "$(git -C "$IR_REMOTE" rev-parse refs/heads/one)" "PR #1's branch is not pushed"
+}
+
+test_index_resolve_listing_fails() {
+  echo "Test: index-resolve.sh — the pull requests cannot be listed: ::error::, exit 2"
+  _ir_fixture || { assert_true "fixture" false; return 0; }
+  local out rc
+  out="$(harness_mktemp_d ir)/out"
+  : > "$IR_GH/fail-list"
+  echo '[]' > "$IR_GH/pulls.json"
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "2" "$rc" "exit 2"
+  assert_contains "$(cat "$out.log")" "::error::" "…with an ::error:: line"
+}
+
+test_index_resolve_usage_errors
+test_index_resolve_merges_an_index_only_conflict
+test_index_resolve_checks_without_a_test_workflow
+test_index_resolve_left_out_and_not_touched
+test_index_resolve_skips_what_the_driver_cannot_fix
+test_index_resolve_refuses_a_dropped_entry_and_workflow_files
+test_index_resolve_refused_push
+test_index_resolve_updates_its_own_comment
+test_index_resolve_one_pull_request
+test_index_resolve_listing_fails
+
 print_summary
