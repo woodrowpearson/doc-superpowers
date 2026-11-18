@@ -1,8 +1,8 @@
 # doc-index-resolve settles cite line-number conflicts — design
 
-**Status:** approved 2026-11-18 by the consumer project's coordinator · **Scope:** the
+**Status:** approved 2026-11-18 · **Scope:** the
 `doc-index-resolve` step (`scripts/hooks/ci/doc-superpowers-steps/`), one new step script, the
-index merge driver's record rule (R7), the tests and the step's docs · **Release:** part of 3.15.0, no separate bump.
+index merge driver's record rule (R7), the tests and the step's docs · **Release:** 3.17.0.
 
 ## What this decides
 
@@ -16,7 +16,7 @@ The step recomputes each such citation against the merged code, re-records those
 
 A merge to the base branch that changes code shifts the line citations in the docs that describe it.
 The next pull request that edited the same docs then conflicts in their text, and the step skips
-it. A consumer project counted, after one merge, 2 to 29 such blocks per open pull request. A hand
+it. A consumer project found many such blocks in its open pull requests after one merge. A hand
 merge in GitHub's editor then lost an unrelated paragraph.
 
 ## Requirements
