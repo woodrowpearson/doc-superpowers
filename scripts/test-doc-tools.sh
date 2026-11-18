@@ -7795,6 +7795,39 @@ test_tests_yml_drift_step_covers_vendored_ledger() {
   teardown
 }
 
+test_self_install_check_holds_the_step_companion() {
+  echo "test: the self-install drift check (scripts/check-self-install.sh) holds the index merge driver vendored beside doc-index-resolve's step: a byte copy of scripts/merge-doc-index.sh, executable, present"
+  setup
+  local root step rt rc out
+  root="$(cd "$SCRIPT_DIR/.." && pwd)"
+  mkdir -p scripts skills/doc-superpowers .claude/doc-superpowers
+  cp -R "$root/scripts/ledger" "$root/scripts/adapters" "$root/scripts/hooks" scripts/
+  cp "$root/scripts/doc-tools.sh" "$root/scripts/merge-doc-index.sh" "$root/scripts/check-self-install.sh" scripts/
+  step="$TEST_DIR/scripts/check-self-install.sh"
+  cp "$root/skills/doc-superpowers/SKILL.md" skills/doc-superpowers/
+  cp "$root/RELEASE-NOTES.md" "$root/.gitattributes" .
+  cp "$root/.claude/doc-superpowers/installed.json" .claude/doc-superpowers/
+  rc=0
+  "$BASH_BIN" scripts/hooks/install.sh install --ci --workflows=doc-index-resolve --resolve-test-workflow=tests.yml >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "precondition: install --ci --workflows=doc-index-resolve in the copy exits 0"
+  assert_true "precondition: the driver is vendored beside the step" test -x .github/scripts/doc-superpowers-steps/merge-doc-index.sh
+  rt=$(harness_mktemp_d drift-rt)
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "the fresh install passes, the recorded test workflow rendered ($(printf '%s' "$out" | grep -m1 '::error' || true))"
+  echo "# drift" >> .github/scripts/doc-superpowers-steps/merge-doc-index.sh
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an edited vendored driver fails it"
+  assert_contains "$out" "::error file=.github/scripts/doc-superpowers-steps/merge-doc-index.sh::differs from scripts/merge-doc-index.sh" "…naming it and its source"
+  rm -f .github/scripts/doc-superpowers-steps/merge-doc-index.sh
+  rc=0
+  out=$(RUNNER_TEMP="$rt" BASH_BIN="$BASH_BIN" "$BASH_BIN" "$step" 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a missing driver fails it"
+  assert_contains "$out" "lacks merge-doc-index.sh" "…naming it"
+  teardown
+}
+
 # --- Final whole-branch review fixes (sweep 05ea982 final review) ---
 #
 # set-doc-type (retype an entry in place: record status depends on doc_type);
@@ -9022,6 +9055,7 @@ run_tests() {
   test_tools_uninstall_ledger_byte_identical_only
   test_vendored_ledger_runs
   test_tests_yml_drift_step_covers_vendored_ledger
+  test_self_install_check_holds_the_step_companion
 
   # --- Final whole-branch review fixes (sweep 05ea982 final review) ---
   test_fw_set_doc_type_retypes_in_place

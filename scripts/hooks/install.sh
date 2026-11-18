@@ -2721,6 +2721,9 @@ needed_helpers() {
 # snapshots commit-changes.sh), read from the plugin's copy. Space-separated
 # names, sorted.
 STEPS_SRC="$SCRIPT_DIR/ci/doc-superpowers-steps"
+# Scripts of scripts/ a step script runs from beside itself, vendored with the
+# step scripts (doc-tools.sh's _TOOLS_STEP_COMPANIONS): the index merge driver.
+STEP_COMPANIONS="merge-doc-index.sh"
 needed_steps() {
   local w f refs ref n need="" queue=""
   for w in $KNOWN_WORKFLOWS; do
@@ -2752,15 +2755,20 @@ needed_steps() {
   [ -z "$need" ] || printf '%s\n' $need | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//'
 }
 
-# unused_steps <needed>: the plugin's step scripts vendored in
-# $VENDOR_DEST/doc-superpowers-steps/ that <needed> (needed_steps) does not
-# name — an older install vendored every one, or install --ci kept an edited
+# unused_steps <needed>: the plugin's step scripts (and step companions)
+# vendored in $VENDOR_DEST/doc-superpowers-steps/ that <needed> (needed_steps)
+# does not name — an older install vendored every one, or install --ci kept an edited
 # copy. Repository-relative paths, space-separated.
 unused_steps() {
-  local f n out=""
+  local f n out="" names=""
   for f in "$STEPS_SRC"/*.sh; do
     [ -f "$f" ] || continue
-    n="${f##*/}"
+    names="${names:+$names }${f##*/}"
+  done
+  for n in $STEP_COMPANIONS; do
+    if [ -f "$SKILL_DIR/scripts/$n" ]; then names="${names:+$names }$n"; fi
+  done
+  for n in $names; do
     in_list "$n" "$1" && continue
     [ -e "$VENDOR_DEST/doc-superpowers-steps/$n" ] || continue
     out="${out:+$out }$VENDOR_DEST/doc-superpowers-steps/$n"

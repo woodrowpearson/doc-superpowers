@@ -3296,6 +3296,42 @@ test_install_help_lists_index_resolve_as_shell_optin() {
   assert_contains "$out" "--resolve-test-workflow" "the option is described"
 }
 
+test_ci_index_resolve_vendors_the_driver() {
+  # The step merges the index with doc-superpowers' own driver, which lives
+  # in scripts/, not among the step scripts: install --ci vendors it beside
+  # the step (a step companion) and removes it with the last workflow whose
+  # step runs it (design R10).
+  echo "test: doc-index-resolve — install --ci vendors scripts/merge-doc-index.sh beside its step (a byte copy, executable); uninstall removes it, and an edited copy is kept"
+  local out rc=0
+  setup
+  inst install --ci --workflows=doc-index-resolve
+  assert_eq "0" "$IRC" "install --ci --workflows=doc-index-resolve exits 0"
+  assert_eq "index-resolve.sh install-jq.sh merge-doc-index.sh" "$(_steps_vendored)" "its step, the jq pin and the driver its step runs, and no other"
+  assert_true "the driver is a byte copy of scripts/merge-doc-index.sh" cmp -s "$SCRIPT_DIR/merge-doc-index.sh" .github/scripts/doc-superpowers-steps/merge-doc-index.sh
+  assert_true "…and executable" test -x .github/scripts/doc-superpowers-steps/merge-doc-index.sh
+  inst status --ci
+  assert_not_contains "$IOUT" "merge-doc-index.sh" "status --ci does not offer the driver for removal while a workflow runs it"
+  inst install --ci --workflows=doc-freshness-pr
+  inst uninstall --ci --workflows=doc-index-resolve
+  assert_eq "0" "$IRC" "uninstall --ci --workflows=doc-index-resolve exits 0"
+  assert_file_not_exists ".github/scripts/doc-superpowers-steps/merge-doc-index.sh" "the driver goes with it"
+  assert_true "doc-freshness-pr's step stays" test -x .github/scripts/doc-superpowers-steps/freshness-check.sh
+  inst install --ci --workflows=doc-index-resolve
+  echo "# edited" >> .github/scripts/doc-superpowers-steps/merge-doc-index.sh
+  inst uninstall --ci --workflows=doc-index-resolve
+  assert_file_exists ".github/scripts/doc-superpowers-steps/merge-doc-index.sh" "an edited driver copy is kept"
+  assert_contains "$IOUT" "merge-doc-index.sh" "…and the uninstall says so"
+  # tools install takes it by name; an unknown name is still refused.
+  rm -f .github/scripts/doc-superpowers-steps/merge-doc-index.sh
+  out=$("$BASH_BIN" "$SCRIPT_DIR/doc-tools.sh" tools install --step merge-doc-index.sh 2>&1) || rc=$?
+  assert_eq "0" "$rc" "tools install --step merge-doc-index.sh exits 0 ($out)"
+  assert_true "…and vendors the driver" cmp -s "$SCRIPT_DIR/merge-doc-index.sh" .github/scripts/doc-superpowers-steps/merge-doc-index.sh
+  rc=0
+  out=$("$BASH_BIN" "$SCRIPT_DIR/doc-tools.sh" tools install --step doc-tools.sh 2>&1) || rc=$?
+  assert_eq "2" "$rc" "tools install --step doc-tools.sh (a script of scripts/ that is no companion) exits 2"
+  teardown
+}
+
 test_install_ci_version_comes_from_doc_tools() {
   # install.sh:22 took the first "## vX.Y.Z" SUBSTRING of RELEASE-NOTES.md,
   # and under pipefail a file without one aborted the installer silently, so
@@ -4756,6 +4792,7 @@ test_i8_retired_status_and_uninstall
 test_i8_no_placeholder_survives_install_all
 test_i8_default_set_ships_its_step_scripts
 test_ci_steps_follow_the_workflows
+test_ci_index_resolve_vendors_the_driver
 test_ci_upgrade_prunes_unused_step_scripts
 test_ci_no_personal_url_in_installed_files
 test_ci_plugin_commit_pin
