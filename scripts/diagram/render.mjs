@@ -28,8 +28,9 @@
 // written there, named after its PNG (a.png -> a.svg).
 //
 // Nothing leaves the machine: every request a page makes to anything but a
-// file:, data: or about: URL is aborted, and a job whose page made one fails
-// and names it. Behind that, the page's Content-Security-Policy names no
+// data: or about: URL, or a file: URL under the page's own directory or the
+// pinned packages' dist directories, is aborted, and a job whose page made
+// one fails and names it. Behind that, the page's Content-Security-Policy names no
 // network source, and Chrome runs with a dead proxy and a resolver that
 // resolves nothing. Mermaid and the ELK plugin load from <node_modules> as file:
 // URLs (--allow-file-access-from-files lets a file: page import file: ES
@@ -40,14 +41,15 @@
 // not start).
 
 import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 const WIDTH = 1248;
 const SCALE = 2;
-const ALLOWED = /^(file|data|about):/i;
+const ALLOWED = /^(data|about):/i;
+const FILE = /^file:/i;
 
 function fail(message) {
   process.stderr.write(`render.mjs: ${message}\n`);
@@ -161,6 +163,24 @@ const mermaidFile = path.join(modules, 'mermaid', 'dist', 'mermaid.esm.min.mjs')
 const elkFile = path.join(modules, '@mermaid-js', 'layout-elk', 'dist', 'mermaid-layout-elk.esm.min.mjs');
 for (const f of [mermaidFile, elkFile]) if (!fs.existsSync(f)) fail(`the pinned packages are not installed: ${f} is missing`);
 
+// The only directories a file: request may read: the page's own (made
+// below) and the dist directories of the pinned mermaid and layout-elk.
+// Anything else on the disk (an <img> in a label, a url() in themeCSS) is
+// refused, so no local file is drawn into a committed PNG.
+const fileRoots = [path.dirname(mermaidFile), path.dirname(elkFile)].map((d) => fs.realpathSync(d));
+
+// fileAllowed(url): true when the file: URL names an existing file under
+// one of fileRoots, symbolic links resolved.
+function fileAllowed(url) {
+  let real;
+  try {
+    real = fs.realpathSync(fileURLToPath(url));
+  } catch {
+    return false;
+  }
+  return fileRoots.some((root) => real.startsWith(root + path.sep));
+}
+
 let puppeteer;
 try {
   puppeteer = createRequire(path.join(modules, 'noop.js'))('puppeteer-core');
@@ -176,6 +196,7 @@ try {
 const CSP_META = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src file: 'unsafe-eval' 'unsafe-inline'; style-src 'unsafe-inline' file:; img-src data: file:; font-src data: file:; connect-src 'none'">`;
 const pageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-superpowers-diagram-'));
 const pageFile = path.join(pageDir, 'page.html');
+fileRoots.push(fs.realpathSync(pageDir));
 fs.writeFileSync(pageFile,
   '<!doctype html><html><head><meta charset="utf-8">' +
   CSP_META +
@@ -216,7 +237,7 @@ async function renderJob(job) {
     await page.setRequestInterception(true);
     page.on('request', (request) => {
       const url = request.url();
-      if (ALLOWED.test(url)) {
+      if (ALLOWED.test(url) || (FILE.test(url) && fileAllowed(url))) {
         request.continue().catch(() => {});
       } else {
         if (!blocked.includes(url)) blocked.push(url);
@@ -276,7 +297,7 @@ async function renderJob(job) {
       fs.writeFileSync(path.join(svgDir, path.basename(String(job.png), '.png') + '.svg'), result.svg);
     }
     if (blocked.length > 0) {
-      return { id: job.id, ok: false, error: 'the page requested an outside URL, which was refused', blocked };
+      return { id: job.id, ok: false, error: 'the page requested an outside URL or a local file, which was refused', blocked };
     }
     return { id: job.id, ok: true, elk: Boolean(job.elk) };
   } catch (e) {

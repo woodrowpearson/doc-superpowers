@@ -9496,6 +9496,31 @@ test_diagram_render_for_real() {
   teardown
 }
 
+test_diagram_render_refuses_local_files_for_real() {
+  echo "test: diagram render, for real: a file: request outside the page's directory and the pinned packages (an <img> of a local PNG in a label, a url() in themeCSS) is refused, named, and fails its block, which keeps its old PNG"
+  _dg_real_ready "diagram local-file real render" || return 0
+  unset DOC_SUPERPOWERS_DIAGRAM_CONFIG
+  setup
+  local out rc private
+  private="$TEST_DIR/private.png"
+  cp "$SCRIPT_DIR/../docs/workflows/diagrams/workflow-init.png" "$private"
+  _dg_doc docs/i.md diagrams/i.png 'flowchart LR' "  A[\"<img src='$private' width='20'/> hi\"] --> B"
+  _dg_doc docs/c.md diagrams/c.png 'flowchart LR' '  A --> B'
+  printf '{"themeCSS": ".node rect { fill: url(\\"%s\\"); }"}\n' "$private" > look.json
+  mkdir -p docs/diagrams
+  printf 'old i' > docs/diagrams/i.png
+  printf 'old c' > docs/diagrams/c.png
+  _dg_real_render out rc "diagram local-file real render" docs/i.md || { teardown; return 0; }
+  assert_eq "1" "$rc" "an <img> of a local file outside the page fails its block: exit 1"
+  assert_contains "$out" "file://${private// /%20}" "…naming the file: URL it refused"
+  assert_eq "old i" "$(cat docs/diagrams/i.png)" "…and its old PNG is kept"
+  _dg_real_render out rc "diagram local-file real render" --config look.json docs/c.md || { teardown; return 0; }
+  assert_eq "1" "$rc" "a themeCSS url() of a local file fails the block: exit 1"
+  assert_contains "$out" "file://${private// /%20}" "…naming the file: URL it refused"
+  assert_eq "old c" "$(cat docs/diagrams/c.png)" "…and its old PNG is kept"
+  teardown
+}
+
 # A graph whose edges bend under the default layout, and whose nodes ELK
 # places differently by strategy.
 _DG_BENT='flowchart LR
@@ -9993,6 +10018,7 @@ run_tests() {
   test_diagram_render_names_one_config_file
   test_diagram_install_browser
   test_diagram_render_for_real
+  test_diagram_render_refuses_local_files_for_real
   test_diagram_render_config_for_real
   test_diagram_render_config_allowlist_for_real
   test_diagram_render_nested_front_matter_for_real

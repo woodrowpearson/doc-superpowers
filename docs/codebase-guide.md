@@ -643,8 +643,9 @@ doc-tools.sh diagram list|render [--config <file>] [<doc>...]  (or doc-superpowe
     → _dg_browser: DOC_SUPERPOWERS_CHROME, system Chrome/Chromium, browser.mjs path (exit 2,
       naming install-browser)
     → a job per block with a PNG (one without fails), then node render.mjs --browser --modules --jobs
-      [--config] (one page per job; every request but file:, data:, about: aborted and failing its
-      job; the config's allowlisted keys (CONFIG_KEYS; any other, and __proto__/constructor/
+      [--config] (one page per job; every request but data:, about: and file: under the page's
+      directory or the pinned mermaid / layout-elk dist aborted and failing its job; a CSP with
+      no network source, a dead proxy and a resolver that resolves nothing behind that; the config's allowlisted keys (CONFIG_KEYS; any other, and __proto__/constructor/
       prototype at any depth, dropped with one warning line) deep-merged into
       mermaid.initialize, securityLevel forced to strict and
       Mermaid's default secure keys kept, so a block's front matter overrides the file but never the level)

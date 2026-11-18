@@ -3124,7 +3124,9 @@ diagram render|cmd_diagram_render|none|config=
   [--config <file>] [<doc>...]
   Render each block diagram list finds to its PNG, on this machine: Node
   18 or later runs scripts/diagram/render.mjs in a headless Chrome page
-  that aborts every request but file:, data: and about:. Width 1248,
+  that aborts every request but data:, about: and file: under its own
+  directory and the pinned packages (a block that asks for anything else
+  fails, naming it). Width 1248,
   device scale 2, white background; ELK is registered for the blocks that
   ask for it. The look comes from one Mermaid config file, a JSON object
   merged into the renderer's mermaid.initialize: --config <file>, else
@@ -3774,8 +3776,9 @@ _writing_run() {
 # pinned renderer (scripts/diagram/) into a cache once per lockfile, finds a
 # browser, and moves each PNG into place only when its render succeeded. The
 # renderer (render.mjs) loads Mermaid from that cache into a headless Chrome
-# page and aborts every request but file:, data: and about:, so no diagram
-# source leaves the machine. Exit codes: 0 rendered or listed, 1 a diagram
+# page and aborts every request but data:, about: and file: under the page's
+# directory and the pinned packages, so no diagram source leaves the machine
+# and no other local file is drawn into a PNG. Exit codes: 0 rendered or listed, 1 a diagram
 # failed, 2 the renderer could not run, 3 usage (_USAGE_RC, set in _main).
 
 # _dg_cannot <message>: the renderer could not run (exit 2).
