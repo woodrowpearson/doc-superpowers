@@ -4425,7 +4425,9 @@ test_index_resolve_skips_what_the_driver_cannot_fix() {
     body=$(jq -r .body "$IR_GH/posted-$n.json" 2>/dev/null || true)
     assert_contains "$body" "<!-- doc-superpowers:index-resolve -->" "PR #$n: the comment carries the marker"
     assert_contains "$body" "git merge origin/main" "PR #$n: …and the local command"
-    assert_contains "$body" "install --git" "PR #$n: …in a clone with the driver registered"
+    assert_contains "$body" "/doc-superpowers hooks install --git" "PR #$n: …in a clone with the driver registered, by the skill's command"
+    assert_contains "$body" "doc-superpowers hooks install --git\` in a terminal" "PR #$n: …or the terminal's"
+    assert_not_contains "$body" "scripts/hooks/install.sh" "PR #$n: …never a path a consumer lacks"
   done
   assert_contains "$(jq -r .body "$IR_GH/posted-1.json")" "README.md" "another file conflicts: the comment names it"
   assert_contains "$(jq -r .body "$IR_GH/posted-2.json")" "merge driver" "the driver's conflict: the comment says so"

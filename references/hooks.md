@@ -256,7 +256,7 @@ pull request against it (or the one `workflow_dispatch` names):
   author's next push; without a dispatch, the comment asks for one (an empty commit works) or a
   close and reopen.
 - **Skipped**, with a comment naming the reason and the local fix (`git merge origin/<base>` in a
-  clone with the driver registered: `install --git`): any other case, and a branch that moved.
+  clone with the driver registered: `/doc-superpowers hooks install --git`): any other case, and a branch that moved.
 - **Failed**: a push refused while the branch did not move, or a call that cannot run. The refused
   push is a protected branch: a branch protection rule or ruleset (signed commits, linear history,
   restricted updates) forbids the workflow token's push. Every later run would be refused the same

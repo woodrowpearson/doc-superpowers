@@ -212,7 +212,7 @@ local_fix() {
     echo "$MARKER"
     echo "**$1** $2 Nothing was pushed."
     echo ""
-    echo "To merge it yourself, in a clone with doc-superpowers' index merge driver registered (\`scripts/hooks/install.sh install --git\`):"
+    echo "To merge it yourself, in a clone with doc-superpowers' index merge driver registered (\`/doc-superpowers hooks install --git\`, or \`doc-superpowers hooks install --git\` in a terminal):"
     echo ""
     echo "    git fetch origin"
     echo "    git merge origin/$BASE_BRANCH"

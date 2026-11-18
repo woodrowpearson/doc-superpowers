@@ -51,7 +51,9 @@ to the vendored driver, and accepts the merge only when all of these hold:
 4. The merge brings no file under `.github/workflows/`. The workflow token cannot push one.
 
 Anything else is a skip, with a comment naming the reason and the local command that resolves it
-(`git merge origin/<base>` in a clone with the driver registered, `install.sh install --git`).
+(`git merge origin/<base>` in a clone with the driver registered). It names the command a consumer
+has, as the other templates' messages do: `/doc-superpowers hooks install --git`, or
+`doc-superpowers hooks install --git` in a terminal.
 
 **R5. The push.** The merge commit's first parent is the head that was read, so the push is a
 fast-forward. The step pushes with `--force-with-lease=refs/heads/<branch>:<head>`, so a branch
