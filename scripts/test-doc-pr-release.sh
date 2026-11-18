@@ -4720,6 +4720,42 @@ test_index_resolve_recomputes_cite_lines() {
   assert_eq "1" "$(git -C "$IR_DIR" worktree list | wc -l | tr -d ' ')" "…and no worktree is left"
 }
 
+test_index_resolve_recomputes_cite_lines_without_an_index_conflict() {
+  echo "Test: index-resolve.sh — only a doc conflicts, in cite numbers, and the index does not: merged with the recomputed lines and the re-record; the comment and message say only the docs conflicted"
+  _ir_cite_fixture || { assert_true "fixture" false; return 0; }
+  local out rc tip body fresh
+  out="$(harness_mktemp_d ir)/out"
+  # main's record is made against the files topic will hold: topic then
+  # leaves the index as it is, fresh, and only main writes it.
+  (
+    cd "$IR_DIR"
+    printf '%s\n' "$IR_HEAD_CODE" > src/app/server.py
+    _ir_doc 8-10 15 > docs/a.md
+    _ir_dt update-index docs/a.md
+    _ir_stamp 2026-11-05T00:00:00Z
+    git checkout -q -- src/app/server.py docs/a.md
+    git commit -qam "a record ahead of its files" && git push -q origin main
+  ) > /dev/null 2>&1
+  _ir_cite_side topic "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" -
+  _ir_cite_side main "$IR_MAIN_CODE" "$(_ir_doc 5-7 14)" 2026-11-10T00:00:00Z
+  assert_eq "" "$(git -C "$IR_DIR" diff main~1 topic -- docs/.doc-index.json)" "the fixture: topic leaves the index as it is"
+  _ir_pr 5 topic false
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  assert_contains "$(grep 'PR #5' "$out.log")" "merged" "PR #5 is merged"
+  tip=$(git -C "$IR_REMOTE" rev-parse refs/heads/topic)
+  assert_eq "$(_ir_doc 8-10 17)" "$(git -C "$IR_REMOTE" show "$tip:docs/a.md")" "docs/a.md cites the merged lines"
+  fresh=$(_ir_dt check-freshness --tree "$tip" 2>/dev/null)
+  assert_eq "current|false" "$(jq -r '.docs["docs/a.md"] | "\(.status)|\(.doc_modified)"' <<<"$fresh")" \
+    "the re-recorded doc reads current on the pushed head"
+  assert_eq "2026-11-10T00:00:00Z" "$(git -C "$IR_REMOTE" show "$tip:docs/.doc-index.json" | jq -r '.docs["docs/a.md"].last_verified')" \
+    "…with the newer side's last_verified"
+  assert_contains "$(git -C "$IR_REMOTE" log -1 --format=%B "$tip")" "Only the cite line numbers in docs/a.md conflicted" "the message names the doc as the only conflict"
+  body=$(jq -r .body "$IR_GH/posted-5.json" 2>/dev/null || true)
+  assert_contains "$body" 'The only conflicts were the cite line numbers in `docs/a.md`' "…and so does the comment"
+  assert_eq "1" "$(git -C "$IR_DIR" worktree list | wc -l | tr -d ' ')" "no worktree is left"
+}
+
 test_index_resolve_skips_docs_it_cannot_recompute() {
   echo "Test: index-resolve.sh — a text conflict in a doc, a conflict in a doc the index does not key, a doc modified since its record: each skipped, one comment naming the doc, nothing pushed"
   _ir_cite_fixture || { assert_true "fixture" false; return 0; }
@@ -4804,6 +4840,7 @@ test_index_resolve_dispatch_names_the_pull_request
 test_index_resolve_one_bad_answer_stops_no_other
 test_index_resolve_listing_fails
 test_index_resolve_recomputes_cite_lines
+test_index_resolve_recomputes_cite_lines_without_an_index_conflict
 test_index_resolve_skips_docs_it_cannot_recompute
 test_index_resolve_cite_lines_with_a_workflow_file
 

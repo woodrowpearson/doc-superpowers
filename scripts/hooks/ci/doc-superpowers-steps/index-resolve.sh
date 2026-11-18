@@ -281,7 +281,8 @@ fail() {
 PUSH_FOR_CHECKS="Before you merge, push a commit (\`git pull\`, then \`git commit --allow-empty -m 'Run the checks'\` and \`git push\`), or close and reopen the pull request."
 
 # merged <n> <branch> <merge commit> <checks: started | not-started | none>
-# [<note>]: the note names the docs whose cites were recomputed (R6).
+# [<note>]: the sentence after the merge commit when docs had their cites
+# recomputed (R6), naming them; the index-only sentence without it.
 merged() {
   local checks
   case "$4" in
@@ -294,7 +295,7 @@ merged() {
     if [ -z "${5:-}" ]; then
       echo "**doc-index-resolve merged \`$(tick "$BASE_BRANCH")\` into this branch** (merge commit $3). The only conflict was the doc index (\`$INDEX\`), which doc-superpowers' index merge driver merged entry by entry."
     else
-      echo "**doc-index-resolve merged \`$(tick "$BASE_BRANCH")\` into this branch** (merge commit $3). The only conflicts were the doc index (\`$INDEX\`), which doc-superpowers' index merge driver merged entry by entry, and the cite line numbers in $5"
+      echo "**doc-index-resolve merged \`$(tick "$BASE_BRANCH")\` into this branch** (merge commit $3). $5"
     fi
     echo ""
     echo "- Checks: $checks"
@@ -466,7 +467,7 @@ cite_merge_in() {
 }
 
 resolve_one() {
-  local n="$1" ref="$2" sha mergeable head out rc tree conflicts dropped bring commit tip mb checks p side at who final msg note
+  local n="$1" ref="$2" sha mergeable head out rc tree conflicts dropped bring commit tip mb checks p side at who final msg note recomputed
   local -a inputs
   # The mergeable state, asked once more while GitHub is still computing it.
   if ! gh api "repos/$REPO/pulls/$n" > "$T/pr.json"; then
@@ -510,8 +511,9 @@ resolve_one() {
     return 0
   fi
 
-  # Without the driver: the index must conflict, and every other conflict
-  # must be a doc whose cite numbers may alone differ (cite_doc, R1).
+  # Without the driver: every conflict besides the index (which may or may
+  # not conflict) must be a doc whose cite numbers may alone differ
+  # (cite_doc, R1).
   rc=0
   out=$(git_plain -c core.quotePath=false merge-tree --write-tree --no-messages "$head" "$BASE_SHA" 2>"$T/err") || rc=$?
   if [ "$rc" -gt 1 ]; then
@@ -534,7 +536,7 @@ resolve_one() {
   : > "$T/others"
   while IFS= read -r p; do
     [ "$p" != "$INDEX" ] || continue
-    if printf '%s\n' "$conflicts" | grep -qxF "$INDEX" && cite_doc "$p"; then
+    if cite_doc "$p"; then
       printf '%s\n' "$p" >> "$T/docs"
     else
       printf '%s\n' "$p" >> "$T/others"
@@ -618,8 +620,14 @@ resolve_one() {
   msg="Only the doc index ($INDEX) conflicted; doc-superpowers' index merge driver merged it (doc-index-resolve)."
   note=""
   if [ -s "$T/docs" ]; then
-    msg="The doc index ($INDEX) and the cite line numbers in $(paste -sd ',' "$T/docs" | sed 's/,/, /g') conflicted. doc-superpowers' index merge driver merged the index; doc-index-resolve recomputed $(plural "$CITE_COUNT" cite) against the merged code and re-recorded those docs' index entries, keeping the newer last_verified."
-    note="$(list_md < "$T/docs"): the resolver recomputed $(plural "$CITE_COUNT" cite) against the merged code and re-recorded those docs' index entries, keeping the newer \`last_verified\` of the two sides."
+    recomputed="recomputed $(plural "$CITE_COUNT" cite) against the merged code and re-recorded those docs' index entries, keeping the newer"
+    if printf '%s\n' "$conflicts" | grep -qxF "$INDEX"; then
+      msg="The doc index ($INDEX) and the cite line numbers in $(paste -sd ',' "$T/docs" | sed 's/,/, /g') conflicted. doc-superpowers' index merge driver merged the index; doc-index-resolve $recomputed last_verified."
+      note="The only conflicts were the doc index (\`$INDEX\`), which doc-superpowers' index merge driver merged entry by entry, and the cite line numbers in $(list_md < "$T/docs"): the resolver $recomputed \`last_verified\` of the two sides."
+    else
+      msg="Only the cite line numbers in $(paste -sd ',' "$T/docs" | sed 's/,/, /g') conflicted; doc-index-resolve $recomputed last_verified."
+      note="The only conflicts were the cite line numbers in $(list_md < "$T/docs"): the resolver $recomputed \`last_verified\` of the two sides."
+    fi
   fi
   commit=$(GIT_AUTHOR_NAME="$GIT_USER_NAME" GIT_AUTHOR_EMAIL="$GIT_USER_EMAIL" \
     GIT_COMMITTER_NAME="$GIT_USER_NAME" GIT_COMMITTER_EMAIL="$GIT_USER_EMAIL" \
