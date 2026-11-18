@@ -22,7 +22,6 @@ Use the tool that does the same job in your client. Only the skill's own referen
 | `TodoWrite` | unverified | `update_plan` (current source registers it only with `[tools.update_plan] enabled = true`) | `todowrite` | `write_todos` |
 | `WebSearch` | web ¹ | `web_search` (when the model supports it) | `websearch` | `google_web_search` |
 | `WebFetch` | web ¹ | none | `webfetch` | `web_fetch` |
-| `mcp__mermaid__generate_mermaid_diagram` | the Mermaid MCP server, if configured | the Mermaid MCP server, if configured | the Mermaid MCP server, if configured | the Mermaid MCP server, if configured |
 
 ¹ Cursor documents its agent tools by what they do, not by an id; use the tool that does that.
 
@@ -42,12 +41,12 @@ Use the tool that does the same job in your client. Only the skill's own referen
 | doc-search MCP server (`--search`; `setup` writes each entry; what was verified: `references/search.md` → *Other clients*) | `.mcp.json`, by the installer | `.cursor/mcp.json`; unverified | `.codex/config.toml`; loaded, trusted project | `opencode.json`; loaded and started | `.gemini/settings.json`; loaded and started, from the top |
 | doc-search readiness gate (`--search-gate`: `SessionStart`, `UserPromptSubmit`, `PreToolUse`; `references/hooks.md` → *doc-search gate set*) | `.claude/settings.json`, by the installer | unverified: Cursor runs Claude Code hooks from `.claude/settings.json` when *Include Third-Party Plugins, Skills, and Other Configs* is on; whether these events fire there was not checked | `.codex/hooks.json`, by the installer (`SessionStart` with `--client codex`: its `mcp:` line reads Codex's registration); runs in a trusted project once each hook is approved in `/hooks`; parsed: verified offline (codex-cli 0.163.0), firing in a session and which tools reach `PreToolUse`: unverified | no | no |
 | Web search / fetch | yes | yes | search only, model-dependent | yes | yes |
-| Diagram PNGs (`diagram`) | with a Mermaid MCP server | with a Mermaid MCP server | with a Mermaid MCP server | with a Mermaid MCP server | with a Mermaid MCP server |
+| Diagram PNGs (`diagram`) | yes | yes | yes | yes | yes |
 
 - **Git hooks** are run by git, whatever client made the commit. **CI workflows** run on GitHub Actions; the AI workflows run Claude Code there with the repository's Anthropic secret, whatever client you use locally.
 - **Claude hooks** are Claude Code's `PreToolUse` / `PostToolUse` / `Stop` hooks (the `--claude` tier) and its `SessionStart` / `PostToolUse` hooks (the work ledger's `--ledger-claude` set). Cursor maps the first three events to its own; whether it maps `SessionStart`, and whether it reads `.claude/settings.local.json`, is not documented, so install either set under Cursor only after checking that the hooks fire. The work ledger's git legs (`--ledger`) are git hooks and run under any client. doc-search's gate (`--search-gate`) is the one hook set written for Codex too, in `.codex/hooks.json`.
 - **Without subagents** — or when a client runs them one at a time — do each scope's work inline, in turn (gather, analyze, report or execute), then merge the results. Slower; same result.
-- **Without a Mermaid MCP server** the `diagram` action writes the Mermaid source in place of the PNG.
+- **Diagram PNGs** render locally in any client with a shell: `doc-tools.sh diagram render` (Node 18+, a local Chrome). The first render for a lockfile installs the pinned npm packages into the cache, so it needs the network once; `diagram install-browser` downloads Chrome only when asked. Never an MCP tool's URL output: it puts the source in an outside link. Without the renderer, `diagram` keeps the source and reports the PNGs not rendered.
 - The skill's core workflows do not depend on web search or fetch.
 
 ## Tool resolution

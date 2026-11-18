@@ -8781,6 +8781,1020 @@ test_writing_verbs_write_no_bytecode() {
   teardown
 }
 
+# --- Diagram verbs (diagram list | render | install-browser) ---
+#
+# The renderer is Node (scripts/diagram/): its packages are pinned by
+# package.json and package-lock.json and installed into a cache outside the
+# repository, never committed. doc-tools.sh finds the blocks, the cache and a
+# browser, and moves each PNG in only when its render succeeded.
+
+_DG_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+test_diagram_packages_are_pinned() {
+  echo "test: diagram: package.json and its lock pin mermaid 11.17.2, layout-elk 0.2.3 and puppeteer-core 24.43.1 exactly, Node 18 or later; no node_modules is tracked"
+  local pkg="$SCRIPT_DIR/diagram/package.json" lock="$SCRIPT_DIR/diagram/package-lock.json" name want tracked
+  assert_file_exists "$pkg" "scripts/diagram/package.json exists"
+  assert_file_exists "$lock" "scripts/diagram/package-lock.json exists"
+  [ -f "$pkg" ] && [ -f "$lock" ] || return 0
+  for name in mermaid@11.17.2 @mermaid-js/layout-elk@0.2.3 puppeteer-core@24.43.1; do
+    want="${name##*@}"
+    name="${name%@*}"
+    assert_eq "$want" "$(jq -r --arg n "$name" '.dependencies[$n]' "$pkg")" "package.json pins $name to exactly $want"
+    assert_eq "$want" "$(jq -r --arg n "$name" '.packages[""].dependencies[$n]' "$lock")" "the lock's root pins $name to exactly $want"
+    assert_eq "$want" "$(jq -r --arg n "node_modules/$name" '.packages[$n].version' "$lock")" "the lock installs $name $want"
+  done
+  assert_eq "2.13.2" "$(jq -r '.packages["node_modules/@puppeteer/browsers"].version' "$lock")" "the lock installs @puppeteer/browsers 2.13.2 (install-browser uses it)"
+  assert_eq ">=18" "$(jq -r '.engines.node' "$pkg")" "package.json names Node 18 or later"
+  assert_eq "3" "$(jq -r '.lockfileVersion' "$lock")" "the lock is lockfileVersion 3 (npm 7 or later reads it)"
+  assert_eq "0" "$(jq '[.dependencies | to_entries[] | select(.value | test("^[0-9]+\\.[0-9]+\\.[0-9]+$") | not)] | length' "$pkg")" "every dependency is an exact version, never a range"
+  if git -C "$_DG_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    tracked=$(git -C "$_DG_ROOT" ls-files -- 'scripts/diagram' | grep -c 'node_modules' || true)
+    assert_eq "0" "$tracked" "git tracks no node_modules under scripts/diagram/"
+    assert_true "git ignores scripts/diagram/node_modules/" git -C "$_DG_ROOT" check-ignore -q scripts/diagram/node_modules/x
+  else
+    record_skip "diagram packages: the plugin is not a git checkout, so what git tracks cannot be checked"
+  fi
+}
+
+# _dg_doc <path> <image-link|-> <mermaid source…>: a doc holding one block in
+# the slot the skill writes — the image link, then <details>, the summary
+# line and the mermaid fence. "-" writes no image link.
+_dg_doc() {
+  local path="$1" link="$2"
+  shift 2
+  mkdir -p "$(dirname "$path")"
+  {
+    printf '# %s\n\nSome prose.\n\n' "$(basename "$path" .md)"
+    if [ "$link" != - ]; then printf '![Diagram](%s)\n\n' "$link"; fi
+    printf '<details>\n<summary>Mermaid source</summary>\n\n```mermaid\n'
+    printf '%s\n' "$@"
+    printf '```\n\n</details>\n'
+  } >> "$path"
+}
+
+test_diagram_list_finds_blocks_and_targets() {
+  echo "test: diagram list prints each Mermaid source block under docs/ as JSON: the doc, the fence's line, the PNG of the image link above it, and whether it asks for ELK"
+  setup
+  local out rc
+  _dg_doc docs/architecture/overview.md diagrams/c4-context.png 'flowchart LR' '  A --> B'
+  _dg_doc docs/architecture/overview.md ./diagrams/../diagrams/second.png 'sequenceDiagram' '  A->>B: hi'
+  _dg_doc docs/workflows/flow.md diagrams/flow.png '---' 'config:' '  layout: elk' '---' 'flowchart LR' '  A --> B'
+  _dg_doc docs/workflows/init.md diagrams/init.png '%%{init: {"layout": "elk"}}%%' 'flowchart TD' '  A --> B'
+  _dg_doc docs/workflows/none.md - 'flowchart LR' '  A --> B'
+  # Not blocks: the slot shown inside another fence, and a bare mermaid fence.
+  mkdir -p docs/plans
+  printf '# Plan\n\n````markdown\n![X](diagrams/x.png)\n\n<details>\n<summary>Mermaid source</summary>\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\n</details>\n````\n' > docs/plans/example.md
+  printf '# Bare\n\n```mermaid\nflowchart LR\n  A --> B\n```\n' > docs/guides.md
+  rc=0
+  out=$("$DOC_TOOLS" diagram list 2>&1) || rc=$?
+  assert_eq "0" "$rc" "diagram list exits 0"
+  assert_eq "5" "$(jq 'length' <<<"$out" 2>/dev/null)" "five blocks: the fenced example and the bare fence are not blocks"
+  assert_eq '{"doc":"docs/architecture/overview.md","line":10,"png":"docs/architecture/diagrams/c4-context.png","elk":false}' \
+    "$(jq -c '.[0]' <<<"$out" 2>/dev/null)" "the first block: doc, the mermaid fence's line, the PNG beside the doc"
+  assert_eq '{"doc":"docs/architecture/overview.md","line":25,"png":"docs/architecture/diagrams/second.png","elk":false}' \
+    "$(jq -c '.[1]' <<<"$out" 2>/dev/null)" "a second block in the same doc; ./ and .. in the link are resolved"
+  assert_eq 'docs/workflows/flow.md|docs/workflows/diagrams/flow.png|true' \
+    "$(jq -r '.[2] | "\(.doc)|\(.png)|\(.elk)"' <<<"$out" 2>/dev/null)" "layout: elk in the front matter asks for ELK"
+  assert_eq 'docs/workflows/init.md|true' \
+    "$(jq -r '.[3] | "\(.doc)|\(.elk)"' <<<"$out" 2>/dev/null)" "an init directive with layout elk asks for ELK"
+  assert_eq 'docs/workflows/none.md|null' \
+    "$(jq -r '.[4] | "\(.doc)|\(.png)"' <<<"$out" 2>/dev/null)" "a block with no image link above it has no PNG (null)"
+
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/workflows/flow.md docs/architecture/overview.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "diagram list <doc>… exits 0"
+  assert_eq 'docs/workflows/flow.md docs/architecture/overview.md docs/architecture/overview.md' \
+    "$(jq -r '[.[].doc] | join(" ")' <<<"$out" 2>/dev/null)" "…and lists the named docs only, in the order named"
+
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/guides.md 2>&1) || rc=$?
+  assert_eq "0|[]" "$rc|$(jq -c . <<<"$out" 2>/dev/null)" "a named doc with no block lists nothing, exit 0"
+
+  # A link that leaves the repository, or names another site, has no PNG.
+  _dg_doc docs/out.md ../../elsewhere.png 'flowchart LR' '  A --> B'
+  _dg_doc docs/out.md 'https://example.com/x.png' 'flowchart LR' '  A --> B'
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/out.md 2>&1) || rc=$?
+  assert_eq "0|null null" "$rc|$(jq -r '[.[].png | tostring] | join(" ")' <<<"$out" 2>/dev/null)" "a link outside the repository or to a URL has no PNG"
+  teardown
+}
+
+# CommonMark's fence rules: a backtick fence's info string holds no backtick,
+# so a line whose backticks open and close on it is inline code, not a fence.
+# A tilde fence's info string may hold anything, so "~~~foo~~~" opens one.
+test_diagram_list_reads_fences_as_commonmark_does() {
+  echo "test: diagram list: a line of inline code in backticks opens no fence, so the slot after it is found; a tilde line with text after it opens one"
+  setup
+  local out rc
+  mkdir -p docs
+  printf '# Inline\n\n```foo``` is inline code, not a fence.\n\n' > docs/inline.md
+  _dg_doc docs/inline.md diagrams/inline.png 'flowchart LR' '  A --> B'
+  printf '# Backtick later\n\n```js and `x` later\n\n' > docs/inline2.md
+  _dg_doc docs/inline2.md diagrams/inline2.png 'flowchart LR' '  A --> B'
+  # A tilde fence with a tilde in its info string: the slot inside it is an
+  # example, not a block; the one after its closing fence is a block.
+  printf '# Tilde\n\n~~~foo~~~\n' > docs/tilde.md
+  _dg_doc docs/tilde.md diagrams/inside.png 'flowchart LR' '  A --> B'
+  printf '~~~\n\n' >> docs/tilde.md
+  _dg_doc docs/tilde.md diagrams/after.png 'flowchart LR' '  A --> B'
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/inline.md docs/inline2.md docs/tilde.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "diagram list exits 0"
+  out=$(jq -c '.[]' <<<"$out" 2>&1)
+  assert_contains "$out" '"png":"docs/diagrams/inline.png"' "a slot after a line of inline code (\`\`\`foo\`\`\`) is found"
+  assert_contains "$out" '"png":"docs/diagrams/inline2.png"' "…and after a line whose would-be info string holds a backtick further on"
+  assert_not_contains "$out" '"png":"docs/diagrams/inside.png"' "a slot inside a ~~~foo~~~ fence is not a block"
+  assert_contains "$out" '"png":"docs/diagrams/after.png"' "…and the slot after that fence closes is one"
+  teardown
+}
+
+# Blocks list must never skip silently: a slot whose mermaid fence is never
+# closed is listed, flagged unterminated (render fails it, naming it), and a
+# <details> tag with attributes opens a slot as a bare one does.
+test_diagram_list_skips_no_block_silently() {
+  echo "test: diagram list: a mermaid fence never closed is listed as unterminated and render fails it, naming doc and line; <details open> opens a slot"
+  setup
+  local out rc
+  _dg_doc docs/a.md diagrams/a.png 'flowchart LR' '  A --> B'
+  { printf '![D](diagrams/open.png)\n\n<details open>\n<summary>Mermaid source</summary>\n\n```mermaid\nflowchart LR\n  C --> D\n```\n\n</details>\n'
+    printf '\n![D](diagrams/tab.png)\n\n<details\tclass="x">\n<summary>Mermaid source</summary>\n\n```mermaid\nflowchart LR\n  C --> D\n```\n\n</details>\n'
+    printf '\n![D](diagrams/no.png)\n\n<detailsx>\n<summary>Mermaid source</summary>\n\n```mermaid\nflowchart LR\n  C --> D\n```\n\n</detailsx>\n'
+  } >> docs/a.md
+  printf '# U\n\n![D](diagrams/u.png)\n\n<details>\n<summary>Mermaid source</summary>\n\n```mermaid\nflowchart LR\n  A --> B\n' > docs/u.md
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/a.md docs/u.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "diagram list exits 0"
+  assert_eq "docs/diagrams/a.png docs/diagrams/open.png docs/diagrams/tab.png docs/diagrams/u.png" \
+    "$(jq -r '[.[].png] | join(" ")' <<<"$out" 2>/dev/null)" "<details open> and <details<tab>class> open a slot; <detailsx> does not; the unclosed block is listed"
+  assert_eq '{"doc":"docs/u.md","line":8,"png":"docs/diagrams/u.png","elk":false,"unterminated":true}' \
+    "$(jq -c '.[3]' <<<"$out" 2>/dev/null)" "the block whose fence is never closed is flagged unterminated"
+  assert_eq "null" "$(jq -c '.[0].unterminated' <<<"$out" 2>/dev/null)" "…and a closed one carries no flag"
+
+  _dg_stubs
+  mkdir -p docs/diagrams
+  printf 'old u' > docs/diagrams/u.png
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/a.md docs/u.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "render: an unterminated block exits 1"
+  assert_contains "$out" "FAILED docs/u.md:8" "…naming its doc and line"
+  assert_contains "$out" "never closed" "…and what is wrong"
+  assert_eq "old u" "$(cat docs/diagrams/u.png)" "…its old PNG kept"
+  assert_contains "$out" "rendered docs/diagrams/open.png" "…while the other blocks render"
+  assert_contains "$out" "3 rendered, 1 failed" "…and the summary counts it"
+  _dg_stubs_off
+  teardown
+}
+
+# The image link is the slot's only when nothing but blank lines stands
+# between it and <details>: a fence between them (opened and closed) ends it.
+test_diagram_list_takes_no_link_across_a_fence() {
+  echo "test: diagram list: an image link above another fence is not the PNG of a slot below that fence"
+  setup
+  local out rc
+  printf '# F\n\n![X](diagrams/x.png)\n\n```sh\necho hi\n```\n\n<details>\n<summary>Mermaid source</summary>\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\n</details>\n' > docs/f.md
+  printf '# G\n\n![Y](diagrams/y.png)\n```sh\n```\n<details>\n<summary>Mermaid source</summary>\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\n</details>\n' > docs/g.md
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/f.md docs/g.md 2>&1) || rc=$?
+  assert_eq "0|null null" "$rc|$(jq -r '[.[].png | tostring] | join(" ")' <<<"$out" 2>/dev/null)" \
+    "a fence between the image link and <details> leaves the slot with no PNG"
+  teardown
+}
+
+test_diagram_list_finds_elk_nested_in_front_matter() {
+  echo "test: diagram list: layout: elk indented under config: in the front matter, beside elk and flowchart settings, asks for ELK"
+  setup
+  local out rc
+  _dg_doc docs/nested.md diagrams/nested.png '---' 'config:' '  layout: elk' '  elk:' \
+    '    nodePlacementStrategy: BRANDES_KOEPF' '  flowchart:' '    curve: linear' '---' \
+    'flowchart LR' '  A --> B'
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/nested.md 2>&1) || rc=$?
+  assert_eq '0|[{"doc":"docs/nested.md","line":10,"png":"docs/diagrams/nested.png","elk":true}]' \
+    "$rc|$(jq -c . <<<"$out" 2>/dev/null)" "the block asks for ELK"
+  teardown
+}
+
+test_diagram_usage_errors_exit_3() {
+  echo "test: diagram: usage errors exit 3; --help lists list, render and install-browser; outside a repository exits 2"
+  setup
+  local out rc v
+  rc=0
+  out=$("$DOC_TOOLS" diagram 2>&1) || rc=$?
+  assert_eq "3" "$rc" "a bare 'diagram' exits 3"
+  rc=0
+  out=$("$DOC_TOOLS" diagram draw 2>&1) || rc=$?
+  assert_eq "3" "$rc" "an unknown diagram verb exits 3"
+  assert_contains "$out" "unknown subcommand 'diagram draw'" "…naming it"
+  rc=0
+  out=$("$DOC_TOOLS" diagram list --bogus 2>&1) || rc=$?
+  assert_eq "3" "$rc" "an unknown option exits 3"
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/no-such.md 2>&1) || rc=$?
+  assert_eq "3" "$rc" "a doc that does not exist exits 3"
+  assert_contains "$out" "docs/no-such.md" "…naming it"
+  rc=0
+  out=$("$DOC_TOOLS" diagram render docs/no-such.md 2>&1) || rc=$?
+  assert_eq "3" "$rc" "render: a doc that does not exist exits 3"
+  rc=0
+  out=$("$DOC_TOOLS" diagram install-browser docs/x.md 2>&1) || rc=$?
+  assert_eq "3" "$rc" "install-browser takes no argument: exit 3"
+  rc=0
+  out=$("$DOC_TOOLS" diagram --help 2>&1) || rc=$?
+  assert_eq "0" "$rc" "diagram --help exits 0"
+  for v in list render install-browser; do
+    assert_contains "$out" "Usage: doc-tools.sh diagram $v" "diagram --help lists '$v'"
+  done
+  rc=0
+  out=$("$DOC_TOOLS" --help 2>&1) || rc=$?
+  assert_contains "$out" "diagram render" "doc-tools.sh --help lists the diagram verbs"
+  local nogit
+  nogit=$(harness_mktemp_d diagram-nogit)
+  rc=0
+  out=$(cd "$nogit" && GIT_CEILING_DIRECTORIES="$SUITE_TMP" "$DOC_TOOLS" diagram list 2>&1) || rc=$?
+  assert_eq "2" "$rc" "outside a git work tree: exit 2 (could not run)"
+  teardown
+}
+
+# _dg_stubs: a copy of the plugin tree the diagram verbs need (doc-tools.sh,
+# and diagram/ with the real package files and placeholder .mjs files), a
+# runner for it ($DG_RUN), a stub node and npm first on PATH, a stub Chrome
+# ($DG_CHROME) and an empty cache (XDG_CACHE_HOME). The stubs log to
+# $STUB_LOG. The stub node's renderer copies its job file (and its --config
+# file, when given) into $STUB_LOG, writes a PNG for every job, fails a
+# job whose source holds BAD (with a partial file) or OUTSIDE (naming a
+# blocked URL), writes a non-PNG for NOTPNG, and with STUB_RENDER=cannot
+# exits 2. DOC_TOOLS_DIAGRAM_SYSTEM_BROWSERS (the system-browser list, a test
+# seam) is set empty, so this host's own Chrome is never found.
+_dg_stubs() {
+  local root
+  root=$(harness_mktemp_d diagram-stubs)
+  DG_TREE="$root/tree"
+  mkdir -p "$DG_TREE/diagram" "$root/bin" "$root/log" "$root/cache"
+  cp "$SCRIPT_DIR/doc-tools.sh" "$DG_TREE/"
+  cp "$SCRIPT_DIR/diagram/package.json" "$SCRIPT_DIR/diagram/package-lock.json" "$DG_TREE/diagram/"
+  printf '// placeholder: the stub node never runs it\n' > "$DG_TREE/diagram/render.mjs"
+  printf '// placeholder: the stub node never runs it\n' > "$DG_TREE/diagram/browser.mjs"
+  DG_RUN="$root/run"
+  # The interpreter by its full path: some tests run with a PATH that has no bash.
+  DG_BASH=$(command -v "$BASH_BIN")
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$DG_BASH" "$DG_TREE/doc-tools.sh" > "$DG_RUN"
+  chmod +x "$DG_RUN"
+  DG_CHROME="$root/chrome"
+  printf '#!/bin/sh\nexit 0\n' > "$DG_CHROME"
+  chmod +x "$DG_CHROME"
+  cat > "$root/bin/node" <<'STUB'
+#!/bin/sh
+case "$1" in
+  --version) echo "${STUB_NODE_VERSION:-v20.19.2}"; exit 0 ;;
+esac
+script=$(basename "$1")
+shift
+printf '%s %s\n' "$script" "$*" >> "$STUB_LOG/node"
+case "$script" in
+  browser.mjs)
+    case "$1" in
+      path)
+        if [ -n "${STUB_CACHED_BROWSER:-}" ]; then echo "$STUB_CACHED_BROWSER"; exit 0; fi
+        exit 1 ;;
+      install)
+        if [ "${STUB_INSTALL_RC:-0}" != 0 ]; then echo "browser.mjs: download failed" >&2; exit 2; fi
+        echo "$3/chrome-headless-shell/stub"
+        exit 0 ;;
+    esac ;;
+  render.mjs)
+    jobs="" cfg=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --jobs) jobs="$2"; shift 2 ;;
+        --config) cfg="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    cp "$jobs" "$STUB_LOG/jobs.json"
+    rm -f "$STUB_LOG/config.json"
+    if [ -n "$cfg" ]; then cp "$cfg" "$STUB_LOG/config.json"; fi
+    if [ "${STUB_RENDER:-ok}" = cannot ]; then echo "render.mjs: could not launch the browser" >&2; exit 2; fi
+    rc=0
+    n=$(jq length "$jobs")
+    i=0
+    while [ "$i" -lt "$n" ]; do
+      id=$(jq -r ".[$i].id" "$jobs")
+      out=$(jq -r ".[$i].out" "$jobs")
+      src=$(jq -r ".[$i].source" "$jobs")
+      case "$src" in
+        *BAD*) printf 'partial' > "$out"; printf '{"id":%s,"ok":false,"error":"Parse error on line 2"}\n' "$id"; rc=1 ;;
+        *OUTSIDE*) printf '{"id":%s,"ok":false,"error":"the page requested an outside URL","blocked":["https://example.com/x.png"]}\n' "$id"; rc=1 ;;
+        *NOTPNG*) printf 'not a png' > "$out"; printf '{"id":%s,"ok":true}\n' "$id" ;;
+        *) printf '\211PNG\r\n\032\nnew %s' "$id" > "$out"; printf '{"id":%s,"ok":true}\n' "$id" ;;
+      esac
+      i=$((i + 1))
+    done
+    exit "$rc" ;;
+esac
+exit 3
+STUB
+  cat > "$root/bin/npm" <<'STUB'
+#!/bin/sh
+printf '%s|%s\n' "$PWD" "$*" >> "$STUB_LOG/npm"
+if [ "${STUB_NPM_RC:-0}" != 0 ]; then echo "npm ERR! network unreachable" >&2; exit 1; fi
+mkdir -p node_modules && : > node_modules/.package-lock.json
+STUB
+  chmod +x "$root/bin/node" "$root/bin/npm"
+  export STUB_LOG="$root/log" XDG_CACHE_HOME="$root/cache" DOC_TOOLS_DIAGRAM_SYSTEM_BROWSERS=""
+  unset DOC_SUPERPOWERS_DIAGRAM_CONFIG
+  DG_BIN="$root/bin"
+  DG_LOCKHASH=$(hash_file "$SCRIPT_DIR/diagram/package-lock.json")
+  DG_CACHE="$root/cache/doc-superpowers/diagram"
+}
+
+_dg_stubs_off() {
+  unset STUB_LOG XDG_CACHE_HOME DOC_TOOLS_DIAGRAM_SYSTEM_BROWSERS DOC_SUPERPOWERS_CHROME \
+    DOC_SUPERPOWERS_DIAGRAM_CONFIG STUB_RENDER STUB_NPM_RC STUB_CACHED_BROWSER STUB_INSTALL_RC STUB_NODE_VERSION
+}
+
+# Three docs with blocks and their old PNGs, committed.
+_dg_fixture() {
+  _dg_doc docs/a.md diagrams/a.png 'flowchart LR' '  A --> B'
+  _dg_doc docs/b.md diagrams/b.png '---' 'config:' '  layout: elk' '---' 'flowchart LR' '  A --> B'
+  mkdir -p docs/diagrams
+  printf 'old a' > docs/diagrams/a.png
+  printf 'old b' > docs/diagrams/b.png
+  git add -A && git commit -qm "diagrams"
+}
+
+test_diagram_render_installs_once_into_the_cache() {
+  echo "test: diagram render installs the lock once into \${XDG_CACHE_HOME:-\$HOME/.cache}/doc-superpowers/diagram/<lock sha256> with npm ci --ignore-scripts; a failed install exits 2 and leaves no cache directory"
+  setup
+  _dg_stubs
+  _dg_fixture
+  local out rc
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "0" "$rc" "render exits 0"
+  assert_eq "1" "$(grep -c . "$STUB_LOG/npm" 2>/dev/null || echo 0)" "npm ran once"
+  assert_contains "$(cat "$STUB_LOG/npm" 2>/dev/null)" "|ci --ignore-scripts" "…as npm ci --ignore-scripts"
+  assert_true "…into <cache>/doc-superpowers/diagram/<sha256 of the lock>" test -f "$DG_CACHE/$DG_LOCKHASH/node_modules/.package-lock.json"
+  assert_true "…with the package files beside node_modules" test -f "$DG_CACHE/$DG_LOCKHASH/package-lock.json"
+  assert_contains "$(cat "$STUB_LOG/node" 2>/dev/null)" "--modules $DG_CACHE/$DG_LOCKHASH/node_modules" "the renderer is handed that node_modules"
+  assert_contains "$out" "installing" "the install says so on stderr"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "0|1" "$rc|$(grep -c . "$STUB_LOG/npm")" "a second render installs nothing"
+
+  # $HOME/.cache when XDG_CACHE_HOME is unset.
+  rc=0
+  out=$(env -u XDG_CACHE_HOME PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "0" "$rc" "render with XDG_CACHE_HOME unset exits 0"
+  assert_true "…and installs into \$HOME/.cache/doc-superpowers/diagram/<sha256>" test -f "$HOME/.cache/doc-superpowers/diagram/$DG_LOCKHASH/node_modules/.package-lock.json"
+
+  # A failed install: exit 2, no cache directory, no half-made one left.
+  export XDG_CACHE_HOME="$TEST_DIR/cache2"
+  : > "$STUB_LOG/npm"
+  printf 'old a' > docs/diagrams/a.png
+  printf 'old b' > docs/diagrams/b.png
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" STUB_NPM_RC=1 DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "2" "$rc" "a failed npm ci exits 2"
+  assert_contains "$out" "npm ERR! network unreachable" "…showing npm's error"
+  assert_true "…and leaves no cache directory for the lock" test ! -e "$XDG_CACHE_HOME/doc-superpowers/diagram/$DG_LOCKHASH"
+  assert_eq "" "$(find "$XDG_CACHE_HOME/doc-superpowers/diagram" -mindepth 1 -maxdepth 1 2>/dev/null)" "…and no install directory half made"
+  assert_eq "old a|old b" "$(cat docs/diagrams/a.png)|$(cat docs/diagrams/b.png)" "…and the old PNGs as they were"
+  _dg_stubs_off
+  teardown
+}
+
+test_diagram_render_needs_node_18() {
+  echo "test: diagram render without Node 18 or later, without npm, or from a copy without scripts/diagram/ exits 2; with no blocks it exits 0 needing nothing"
+  setup
+  _dg_stubs
+  _dg_fixture
+  local out rc nonode
+  nonode=$(harness_mktemp_d diagram-nonode)
+  ln -s "$(command -v jq)" "$nonode/jq"
+  ln -s "$(command -v git)" "$nonode/git"
+  for t in sha256sum shasum awk sed find sort head od tr dirname basename mkdir mktemp cp mv rm cat env perl; do
+    if command -v "$t" >/dev/null 2>&1; then ln -s "$(command -v "$t")" "$nonode/$t"; fi
+  done
+  rc=0
+  out=$(PATH="$nonode" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "2" "$rc" "no node on PATH: exit 2"
+  assert_contains "$out" "Node 18 or later" "…naming what it needs"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" STUB_NODE_VERSION=v16.20.2 DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "2" "$rc" "Node 16: exit 2"
+  assert_contains "$out" "16.20.2" "…naming the version found"
+  assert_eq "old a|old b" "$(cat docs/diagrams/a.png)|$(cat docs/diagrams/b.png)" "…and the old PNGs as they were"
+
+  # A copy of doc-tools.sh without diagram/ beside it (a vendored copy).
+  local vend
+  vend=$(harness_mktemp_d diagram-vendored)
+  cp "$SCRIPT_DIR/doc-tools.sh" "$vend/"
+  printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$BASH_BIN" "$vend/doc-tools.sh" > "$vend/run"
+  chmod +x "$vend/run"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$vend/run" diagram render 2>&1) || rc=$?
+  assert_eq "2" "$rc" "a copy without scripts/diagram/ beside it exits 2"
+  assert_contains "$out" "scripts/diagram/" "…naming what is missing"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" "$vend/run" diagram list docs/a.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "…but it can still list"
+
+  # No blocks: nothing to render, nothing needed.
+  rc=0
+  out=$(PATH="$nonode" "$DG_RUN" diagram render docs/architecture.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "a doc with no block: exit 0 without Node"
+  assert_contains "$out" "no Mermaid source blocks" "…saying so"
+  _dg_stubs_off
+  teardown
+}
+
+test_diagram_render_finds_a_browser() {
+  echo "test: diagram render's browser: DOC_SUPERPOWERS_CHROME, then a system Chrome or Chromium, then the cache's chrome-headless-shell; none exits 2 naming install-browser"
+  setup
+  _dg_stubs
+  _dg_fixture
+  local out rc sys
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "0" "$rc" "DOC_SUPERPOWERS_CHROME: exit 0"
+  assert_contains "$(tail -n 1 "$STUB_LOG/node")" "--browser $DG_CHROME " "…and the renderer runs that browser"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$TEST_DIR/no-such-chrome" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "2" "$rc" "DOC_SUPERPOWERS_CHROME naming no executable: exit 2"
+  assert_contains "$out" "no-such-chrome" "…naming it"
+
+  sys=$(harness_mktemp_d diagram-sys)
+  printf '#!/bin/sh\nexit 0\n' > "$sys/Google Chrome"
+  chmod +x "$sys/Google Chrome"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_TOOLS_DIAGRAM_SYSTEM_BROWSERS="$TEST_DIR/none:$sys/Google Chrome" STUB_CACHED_BROWSER="$TEST_DIR/cached" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "0" "$rc" "a system browser: exit 0"
+  assert_contains "$(tail -n 1 "$STUB_LOG/node")" "--browser $sys/Google Chrome " "…the first system path that exists, before the cache"
+
+  printf '#!/bin/sh\nexit 0\n' > "$TEST_DIR/home/cached-shell"
+  chmod +x "$TEST_DIR/home/cached-shell"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" STUB_CACHED_BROWSER="$TEST_DIR/home/cached-shell" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "0" "$rc" "no system browser, one in the cache: exit 0"
+  assert_contains "$(cat "$STUB_LOG/node")" "browser.mjs path $DG_CACHE/$DG_LOCKHASH/node_modules $DG_CACHE/browsers" "…asking browser.mjs for the cache's chrome-headless-shell"
+  assert_contains "$(tail -n 1 "$STUB_LOG/node")" "--browser $TEST_DIR/home/cached-shell " "…and rendering with it"
+
+  printf 'old a' > docs/diagrams/a.png
+  printf 'old b' > docs/diagrams/b.png
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "2" "$rc" "no browser anywhere: exit 2"
+  assert_contains "$out" "doc-tools.sh diagram install-browser" "…naming install-browser"
+  assert_contains "$out" "DOC_SUPERPOWERS_CHROME" "…and the variable"
+  assert_eq "old a|old b" "$(cat docs/diagrams/a.png)|$(cat docs/diagrams/b.png)" "…and the old PNGs as they were"
+  _dg_stubs_off
+  teardown
+}
+
+test_diagram_render_replaces_a_png_only_on_success() {
+  echo "test: diagram render moves each new PNG in only when its render succeeded: a failed, blocked, non-PNG or PNG-less block exits 1 and keeps the old PNG; a renderer that cannot run exits 2"
+  setup
+  _dg_stubs
+  _dg_fixture
+  local out rc
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "every block renders: exit 0"
+  assert_contains "$(cat docs/diagrams/a.png)" "new " "a.png is the new render"
+  assert_contains "$(cat docs/diagrams/b.png)" "new " "b.png is the new render"
+  assert_contains "$out" "rendered docs/diagrams/a.png" "stdout names each PNG rendered"
+  assert_eq "flowchart LR
+  A --> B" "$(jq -r '.[0].source' "$STUB_LOG/jobs.json")" "the job holds the block's source, without its fences"
+  assert_eq "false|true" "$(jq -r '[.[].elk | tostring] | join("|")' "$STUB_LOG/jobs.json")" "…and its ELK flag"
+  assert_eq "" "$(find docs -name '.*.render.*')" "no temporary file is left beside the PNGs"
+
+  printf 'old a' > docs/diagrams/a.png
+  printf 'old b' > docs/diagrams/b.png
+  : > docs/a.md
+  _dg_doc docs/a.md diagrams/a.png 'flowchart LR' '  A --> BAD'
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an invalid source exits 1"
+  assert_eq "old a" "$(cat docs/diagrams/a.png)" "…its old PNG kept, not the partial file"
+  assert_contains "$(cat docs/diagrams/b.png)" "new " "…and the other block still rendered"
+  assert_contains "$out" "docs/a.md:10" "…the failure names the doc and the line"
+  assert_contains "$out" "Parse error on line 2" "…and the renderer's error"
+  assert_eq "" "$(find docs -name '.*.render.*')" "…and no temporary file is left"
+
+  : > docs/a.md
+  _dg_doc docs/a.md diagrams/a.png 'flowchart LR' '  A --> OUTSIDE'
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/a.md 2>&1) || rc=$?
+  assert_eq "1|old a" "$rc|$(cat docs/diagrams/a.png)" "a request to an outside URL exits 1 and keeps the old PNG"
+  assert_contains "$out" "https://example.com/x.png" "…naming the URL"
+
+  : > docs/a.md
+  _dg_doc docs/a.md diagrams/a.png 'flowchart LR' '  A --> NOTPNG'
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/a.md 2>&1) || rc=$?
+  assert_eq "1|old a" "$rc|$(cat docs/diagrams/a.png)" "a render that wrote no PNG exits 1 and keeps the old PNG"
+
+  _dg_doc docs/c.md - 'flowchart LR' '  A --> B'
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/c.md docs/b.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a block with no image link above it exits 1"
+  assert_contains "$out" "docs/c.md:8" "…naming it"
+  assert_contains "$out" "image link" "…and what it lacks"
+
+  printf 'old b' > docs/diagrams/b.png
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" STUB_RENDER=cannot DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/b.md 2>&1) || rc=$?
+  assert_eq "2" "$rc" "a renderer that cannot run exits 2"
+  assert_contains "$out" "could not launch the browser" "…its error shown"
+  assert_eq "old b" "$(cat docs/diagrams/b.png)" "…and the old PNG kept"
+
+  # A PNG whose directory does not exist yet.
+  _dg_doc docs/new/d.md diagrams/d.png 'flowchart LR' '  A --> B'
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/new/d.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "a PNG in a directory not made yet: exit 0"
+  assert_true "…the directory and the PNG made" test -f docs/new/diagrams/d.png
+  _dg_stubs_off
+  teardown
+}
+
+test_diagram_render_keeps_pngs_inside_the_work_tree() {
+  echo "test: diagram: a PNG path through a symbolic link out of the repository, or into .git, has no PNG (list null, render fails it and writes nothing there); a failed block makes no directory"
+  setup
+  _dg_stubs
+  local out rc outside
+  outside=$(harness_mktemp_d diagram-outside)
+  ln -s "$outside" docs/out
+  _dg_doc docs/l.md out/l.png 'flowchart LR' '  A --> B'
+  _dg_doc docs/g.md ../.git/g.png 'flowchart LR' '  A --> B'
+  _dg_doc docs/h.md diagrams/.git/h.png 'flowchart LR' '  A --> B'
+  _dg_doc docs/k.md .GIT/k.png 'flowchart LR' '  A --> B'
+  _dg_doc docs/ok.md diagrams/ok.png 'flowchart LR' '  A --> B'
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/l.md docs/g.md docs/h.md docs/k.md docs/ok.md 2>&1) || rc=$?
+  assert_eq "0|null null null null docs/diagrams/ok.png" "$rc|$(jq -r '[.[].png | tostring] | join(" ")' <<<"$out" 2>/dev/null)" \
+    "list: a link through a symbolic link out of the repository, or with a .git component, has no PNG"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/l.md docs/g.md docs/h.md docs/k.md docs/ok.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "render: those blocks fail, exit 1"
+  assert_contains "$out" "1 rendered, 4 failed" "…four failed, the plain one rendered"
+  assert_eq "" "$(ls -A "$outside")" "…nothing is written through the link"
+  assert_true "…nor into .git" test ! -e .git/g.png -a ! -e docs/diagrams/.git -a ! -e docs/.GIT
+
+  # A block that fails makes no directory for its PNG.
+  _dg_doc docs/new3/f.md diagrams/f.png 'flowchart LR' '  A --> BAD'
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/new3/f.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a failing block in a doc whose diagrams/ does not exist: exit 1"
+  assert_true "…and no diagrams/ directory is left behind" test ! -e docs/new3/diagrams
+  _dg_stubs_off
+  teardown
+}
+
+test_diagram_render_names_one_config_file() {
+  echo "test: diagram render hands the renderer one Mermaid config file: --config, else DOC_SUPERPOWERS_DIAGRAM_CONFIG, else docs/diagrams/config.json if it exists, else none; an explicit path that is missing or not a JSON object exits 3, naming it"
+  setup
+  _dg_stubs
+  local out rc
+  _dg_fixture
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/a.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "no config anywhere: exit 0"
+  assert_file_not_exists "$STUB_LOG/config.json" "…and the renderer gets no --config"
+
+  printf '{"theme": "base", "themeVariables": {"primaryColor": "#ff0000"}}\n' > docs/diagrams/config.json
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/a.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "docs/diagrams/config.json exists: exit 0"
+  assert_eq '{"theme":"base","themeVariables":{"primaryColor":"#ff0000"}}' \
+    "$(jq -c . "$STUB_LOG/config.json" 2>/dev/null)" "…and the renderer gets that file"
+  assert_contains "$out" "Mermaid config: docs/diagrams/config.json" "…named on stdout"
+
+  printf '{"theme": "forest"}\n' > env.json
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_DIAGRAM_CONFIG=env.json DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/a.md 2>&1) || rc=$?
+  assert_eq '0|{"theme":"forest"}' "$rc|$(jq -c . "$STUB_LOG/config.json" 2>/dev/null)" "DOC_SUPERPOWERS_DIAGRAM_CONFIG wins over the default path"
+
+  printf '{"theme": "dark"}\n' > flag.json
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_DIAGRAM_CONFIG=env.json DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render --config flag.json docs/a.md 2>&1) || rc=$?
+  assert_eq '0|{"theme":"dark"}' "$rc|$(jq -c . "$STUB_LOG/config.json" 2>/dev/null)" "--config wins over the variable"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/a.md --config=flag.json 2>&1) || rc=$?
+  assert_eq '0|{"theme":"dark"}' "$rc|$(jq -c . "$STUB_LOG/config.json" 2>/dev/null)" "…written --config=<path>, after the docs too"
+
+  printf 'old a' > docs/diagrams/a.png
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render --config no-such.json docs/a.md 2>&1) || rc=$?
+  assert_eq "3" "$rc" "--config naming no file: exit 3"
+  assert_contains "$out" "no-such.json" "…naming the path"
+  assert_eq "old a" "$(cat docs/diagrams/a.png)" "…and no PNG is changed"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_DIAGRAM_CONFIG=gone.json DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/a.md 2>&1) || rc=$?
+  assert_eq "3" "$rc" "DOC_SUPERPOWERS_DIAGRAM_CONFIG naming no file: exit 3"
+  assert_contains "$out" "gone.json" "…naming the path"
+  printf '{"theme": ' > broken.json
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render --config broken.json docs/a.md 2>&1) || rc=$?
+  assert_eq "3" "$rc" "a config that is not JSON: exit 3"
+  assert_contains "$out" "broken.json" "…naming the path"
+  printf '["theme"]\n' > list.json
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render --config list.json docs/a.md 2>&1) || rc=$?
+  assert_eq "3" "$rc" "a config that is JSON but not an object: exit 3"
+  assert_contains "$out" "list.json" "…naming the path"
+  printf '{"theme": ' > docs/diagrams/config.json
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/a.md 2>&1) || rc=$?
+  assert_eq "3" "$rc" "the default file, present but not JSON: exit 3"
+  assert_contains "$out" "docs/diagrams/config.json" "…naming it"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render --config flag.json --config env.json docs/a.md 2>&1) || rc=$?
+  assert_eq "3" "$rc" "--config given twice: exit 3"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram list --config flag.json 2>&1) || rc=$?
+  assert_eq "3" "$rc" "diagram list takes no --config: exit 3"
+  _dg_stubs_off
+  teardown
+}
+
+test_diagram_install_browser() {
+  echo "test: diagram install-browser installs the packages if needed, then runs browser.mjs install into <cache>/browsers and prints the path; a failed download exits 2"
+  setup
+  _dg_stubs
+  local out rc
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" "$DG_RUN" diagram install-browser 2>/dev/null) || rc=$?
+  assert_eq "0" "$rc" "install-browser exits 0"
+  assert_eq "$DG_CACHE/browsers/chrome-headless-shell/stub" "$out" "…printing the browser's path"
+  assert_contains "$(cat "$STUB_LOG/node")" "browser.mjs install $DG_CACHE/$DG_LOCKHASH/node_modules $DG_CACHE/browsers" "…from the cache's packages, into <cache>/browsers"
+  assert_eq "1" "$(grep -c . "$STUB_LOG/npm")" "…having installed the packages first"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" STUB_INSTALL_RC=2 "$DG_RUN" diagram install-browser 2>&1) || rc=$?
+  assert_eq "2" "$rc" "a failed download exits 2"
+  assert_contains "$out" "download failed" "…showing why"
+  _dg_stubs_off
+  teardown
+}
+
+# _dg_real_browser: a browser the real-render test can use, into
+# _DG_REAL_BROWSER — DOC_SUPERPOWERS_CHROME, or one at the usual system paths.
+_dg_real_browser() {
+  local c
+  _DG_REAL_BROWSER=""
+  for c in "${DOC_SUPERPOWERS_CHROME:-}" \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+    "/Applications/Chromium.app/Contents/MacOS/Chromium" \
+    /usr/bin/google-chrome-stable /usr/bin/google-chrome /opt/google/chrome/chrome \
+    /usr/bin/chromium /usr/bin/chromium-browser; do
+    if [ -n "$c" ] && [ -f "$c" ] && [ -x "$c" ]; then
+      _DG_REAL_BROWSER="$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# _dg_png_facts <png>: "<width> <r>,<g>,<b>" — the image's width and its
+# top-left pixel. That pixel is the raw bytes of the first scanline whatever
+# its filter (every predictor of the first pixel of row 0 is 0).
+_dg_png_facts() {
+  node -e '
+    const fs = require("fs"), zlib = require("zlib");
+    const b = fs.readFileSync(process.argv[1]);
+    const w = b.readUInt32BE(16), ct = b[25];
+    let p = 8, idat = [];
+    while (p < b.length) {
+      const n = b.readUInt32BE(p), t = b.toString("latin1", p + 4, p + 8);
+      if (t === "IDAT") idat.push(b.subarray(p + 8, p + 8 + n));
+      p += 12 + n;
+    }
+    const raw = zlib.inflateSync(Buffer.concat(idat));
+    console.log(w + " " + [raw[1], raw[2], raw[3]].join(",") + (ct === 6 ? "," + raw[4] : ""));
+  ' "$1"
+}
+
+# _dg_real_ready <label>: Node 18 or later, npm and a browser (into
+# _DG_REAL_BROWSER), or a SKIP line naming what is missing and return 1.
+_dg_real_ready() {
+  local v
+  v=$(node --version 2>/dev/null || true)
+  v="${v#v}"
+  case "${v%%.*}" in
+    ''|*[!0123456789]*) record_skip "$1: no node on PATH"; return 1 ;;
+  esac
+  if [ "${v%%.*}" -lt 18 ]; then record_skip "$1: node $v is older than 18"; return 1; fi
+  if ! command -v npm >/dev/null 2>&1; then record_skip "$1: no npm on PATH"; return 1; fi
+  if ! _dg_real_browser; then record_skip "$1: no Chrome or Chromium (set DOC_SUPERPOWERS_CHROME)"; return 1; fi
+}
+
+# _dg_real_render <out-var> <rc-var> <label> <args…>: diagram render with
+# the real renderer and the shared package cache (one npm ci per suite run;
+# DOC_SP_TEST_DIAGRAM_CACHE reuses one across runs). Returns 1, with a SKIP
+# line, when the packages could not be installed.
+_dg_real_render() {
+  local __out_var="$1" __rc_var="$2" label="$3" __o __r=0
+  shift 3
+  __o=$(XDG_CACHE_HOME="${DOC_SP_TEST_DIAGRAM_CACHE:-$_HARNESS_TMP/diagram-cache}" \
+    DOC_SUPERPOWERS_CHROME="$_DG_REAL_BROWSER" "$DOC_TOOLS" diagram render "$@" 2>&1) || __r=$?
+  printf -v "$__out_var" '%s' "$__o"
+  printf -v "$__rc_var" '%s' "$__r"
+  if [ "$__r" = 2 ]; then
+    case "$__o" in
+      *"npm ci failed"*)
+        record_skip "$label: the packages could not be installed (no registry?): $(printf '%s' "$__o" | tail -n 1)"
+        return 1 ;;
+    esac
+  fi
+  return 0
+}
+
+# _dg_svg_paths <svg>: the d attribute of every flowchart edge, one a line.
+_dg_svg_paths() {
+  grep -oE '<path[^>]*flowchart-link[^>]*>' "$1" | grep -oE ' d="[^"]*"'
+}
+
+test_diagram_render_for_real() {
+  echo "test: diagram render, for real: a default and an ELK diagram render at width 1248, scale 2, on white; a diagram that requests an outside URL fails, naming it, and keeps its old PNG"
+  _dg_real_ready "diagram real render" || return 0
+  unset DOC_SUPERPOWERS_DIAGRAM_CONFIG
+  setup
+  # One install per suite run (npm ci of the lock); DOC_SP_TEST_DIAGRAM_CACHE
+  # reuses one across runs.
+  export XDG_CACHE_HOME="${DOC_SP_TEST_DIAGRAM_CACHE:-$_HARNESS_TMP/diagram-cache}"
+  local out rc long="" i
+  i=1
+  while [ "$i" -lt 30 ]; do long="$long N$i[Step $i] -->"; i=$((i + 1)); done
+  _dg_doc docs/a.md diagrams/a.png 'flowchart LR' '  A[Start here] --> B{Pick} -->|yes| C[Done]'
+  _dg_doc docs/wide.md diagrams/wide.png 'flowchart LR' "  $long N30[End]"
+  _dg_doc docs/b.md diagrams/b.png '---' 'config:' '  layout: elk' '---' 'flowchart LR' '  A[Start] --> B[Middle] --> C[End]' '  A --> C'
+  _dg_doc docs/b2.md diagrams/b2.png 'flowchart LR' '  A[Start] --> B[Middle] --> C[End]' '  A --> C'
+  _dg_doc docs/x.md diagrams/x.png 'flowchart LR' '  A@{ img: "https://example.invalid/logo.png", label: "Logo", pos: "t", h: 60, constraint: "on" }' '  A --> B'
+  _dg_doc docs/y.md diagrams/y.png 'flowchart LR' "  A[\"<img src='https://example.invalid/inline.png' width='20'/> hi\"] --> B"
+  mkdir -p docs/diagrams
+  printf 'old x' > docs/diagrams/x.png
+  printf 'old y' > docs/diagrams/y.png
+  rc=0
+  out=$(DOC_SUPERPOWERS_CHROME="$_DG_REAL_BROWSER" "$DOC_TOOLS" diagram render docs/a.md docs/wide.md docs/b.md docs/b2.md 2>&1) || rc=$?
+  if [ "$rc" = 2 ]; then
+    case "$out" in
+      *"npm ci failed"*)
+        record_skip "diagram real render: the packages could not be installed (no registry?): $(printf '%s' "$out" | tail -n 1)"
+        unset XDG_CACHE_HOME
+        teardown
+        return 0 ;;
+    esac
+  fi
+  assert_eq "0" "$rc" "four diagrams render: exit 0 ($(printf '%s' "$out" | tail -n 3 | tr '\n' ' '))"
+  assert_contains "$out" "rendered docs/diagrams/b.png (docs/b.md:10, ELK)" "the ELK block renders with ELK registered"
+  assert_not_contains "$out" "rendered docs/diagrams/b2.png (docs/b2.md:10, ELK)" "…and the same graph without layout: elk does not"
+  assert_true "…and the two images differ" test -f docs/diagrams/b.png -a -f docs/diagrams/b2.png
+  if [ -f docs/diagrams/b.png ] && [ -f docs/diagrams/b2.png ]; then
+    assert_true "the ELK image is not the default layout's" sh -c '! cmp -s docs/diagrams/b.png docs/diagrams/b2.png'
+  fi
+  local facts
+  facts=$(_dg_png_facts docs/diagrams/wide.png 2>/dev/null || true)
+  assert_eq "2464" "${facts%% *}" "a diagram wider than the page fills it: 1248 less the 8px margins, at scale 2 (2464 px)"
+  # shellcheck disable=SC2016  # expands in the inner sh
+  assert_true "…on a white background (top-left pixel ${facts#* })" \
+    sh -c 'case "$1" in 255,255,255|255,255,255,255) exit 0 ;; esac; exit 1' _ "${facts#* }"
+  facts=$(_dg_png_facts docs/diagrams/a.png 2>/dev/null || true)
+  local w="${facts%% *}"
+  case "$w" in ''|*[!0123456789]*) w=1 ;; esac
+  assert_true "a small diagram keeps its own width, at scale 2 ($w px: even, below 2464)" \
+    test "$w" -gt 1 -a "$w" -lt 2464 -a $((w % 2)) -eq 0
+
+  rc=0
+  out=$(DOC_SUPERPOWERS_CHROME="$_DG_REAL_BROWSER" "$DOC_TOOLS" diagram render docs/x.md docs/y.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "diagrams that request outside URLs exit 1"
+  assert_contains "$out" "https://example.invalid/logo.png" "…naming the image URL of a node"
+  assert_contains "$out" "https://example.invalid/inline.png" "…and of an <img> in a label, which rendered but asked the network"
+  assert_eq "old x|old y" "$(cat docs/diagrams/x.png)|$(cat docs/diagrams/y.png)" "…and both old PNGs are kept"
+
+  # browser.mjs path: no chrome-headless-shell in an empty cache.
+  local mods
+  mods=$(find "$XDG_CACHE_HOME/doc-superpowers/diagram" -mindepth 2 -maxdepth 2 -name node_modules | head -n 1)
+  rc=0
+  node "$SCRIPT_DIR/diagram/browser.mjs" path "$mods" "$TEST_DIR/no-browsers" >/dev/null 2>&1 || rc=$?
+  assert_eq "1" "$rc" "browser.mjs path: an empty cache has no chrome-headless-shell (exit 1)"
+  unset XDG_CACHE_HOME
+  teardown
+}
+
+test_diagram_render_refuses_local_files_for_real() {
+  echo "test: diagram render, for real: a file: request outside the page's directory and the pinned packages (an <img> of a local PNG in a label, a url() in themeCSS) is refused, named, and fails its block, which keeps its old PNG"
+  _dg_real_ready "diagram local-file real render" || return 0
+  unset DOC_SUPERPOWERS_DIAGRAM_CONFIG
+  setup
+  local out rc private
+  private="$TEST_DIR/private.png"
+  cp "$SCRIPT_DIR/../docs/workflows/diagrams/workflow-init.png" "$private"
+  _dg_doc docs/i.md diagrams/i.png 'flowchart LR' "  A[\"<img src='$private' width='20'/> hi\"] --> B"
+  _dg_doc docs/c.md diagrams/c.png 'flowchart LR' '  A --> B'
+  printf '{"themeCSS": ".node rect { fill: url(\\"%s\\"); }"}\n' "$private" > look.json
+  mkdir -p docs/diagrams
+  printf 'old i' > docs/diagrams/i.png
+  printf 'old c' > docs/diagrams/c.png
+  _dg_real_render out rc "diagram local-file real render" docs/i.md || { teardown; return 0; }
+  assert_eq "1" "$rc" "an <img> of a local file outside the page fails its block: exit 1"
+  assert_contains "$out" "file://${private// /%20}" "…naming the file: URL it refused"
+  assert_eq "old i" "$(cat docs/diagrams/i.png)" "…and its old PNG is kept"
+  _dg_real_render out rc "diagram local-file real render" --config look.json docs/c.md || { teardown; return 0; }
+  assert_eq "1" "$rc" "a themeCSS url() of a local file fails the block: exit 1"
+  assert_contains "$out" "file://${private// /%20}" "…naming the file: URL it refused"
+  assert_eq "old c" "$(cat docs/diagrams/c.png)" "…and its old PNG is kept"
+  teardown
+}
+
+test_diagram_render_browser_failure_exits_2_for_real() {
+  echo "test: diagram render, for real: a browser that goes away under the renderer (the DOC_TOOLS_DIAGRAM_CLOSE_BROWSER seam) is 'could not run', exit 2, and no PNG is changed"
+  _dg_real_ready "diagram browser failure real render" || return 0
+  unset DOC_SUPERPOWERS_DIAGRAM_CONFIG
+  setup
+  local out rc
+  _dg_doc docs/a.md diagrams/a.png 'flowchart LR' '  A --> B'
+  mkdir -p docs/diagrams
+  printf 'old a' > docs/diagrams/a.png
+  DOC_TOOLS_DIAGRAM_CLOSE_BROWSER=1 _dg_real_render out rc "diagram browser failure real render" docs/a.md \
+    || { teardown; return 0; }
+  assert_eq "2" "$rc" "the browser gone before the first page: exit 2 ($(printf '%s' "$out" | tail -n 2 | tr '\n' ' '))"
+  assert_contains "$out" "the renderer could not run" "…reported as could not run"
+  assert_eq "old a" "$(cat docs/diagrams/a.png)" "…and the old PNG is kept"
+  teardown
+}
+
+# A graph whose edges bend under the default layout, and whose nodes ELK
+# places differently by strategy.
+_DG_BENT='flowchart LR
+  A --> B & C & D
+  B --> E
+  C --> E
+  D --> F
+  E --> G
+  F --> G
+  A --> G
+  H --> C'
+
+test_diagram_render_config_for_real() {
+  echo "test: diagram render --config, for real: the file reaches mermaid.initialize (theme variables, theme CSS, flowchart settings); a block's front matter overrides it; the security level stays strict whatever the file or the block says"
+  _dg_real_ready "diagram config real render" || return 0
+  unset DOC_SUPERPOWERS_DIAGRAM_CONFIG
+  setup
+  local out rc svg
+  svg="$TEST_DIR/svg"
+  # securityLevel loose would keep a javascript: link in the SVG (strict drops
+  # it); secure: [] would let a block's front matter set securityLevel.
+  printf '%s\n' '{"securityLevel": "loose", "secure": [], "theme": "base",' \
+    ' "themeVariables": {"primaryColor": "#ff0000"},' \
+    ' "themeCSS": ".node rect { stroke-width: 7px; }",' \
+    ' "flowchart": {"curve": "linear"}}' > look.json
+  _dg_doc docs/s.md diagrams/s.png 'flowchart LR' '  A --> B' '  click A href "javascript:void(0)"'
+  _dg_doc docs/v.md diagrams/v.png '---' 'config:' '  securityLevel: loose' '---' 'flowchart LR' '  A --> B' '  click A href "javascript:void(0)"'
+  _dg_doc docs/t.md diagrams/t.png "$_DG_BENT"
+  _dg_doc docs/u.md diagrams/u.png '---' 'config:' '  flowchart:' '    curve: basis' '---' "$_DG_BENT"
+  # The SVGs come from the renderer's test seam, DOC_TOOLS_DIAGRAM_SVG_DIR.
+  DOC_TOOLS_DIAGRAM_SVG_DIR="$svg" _dg_real_render out rc "diagram config real render" \
+    --config look.json docs/s.md docs/v.md docs/t.md docs/u.md || { teardown; return 0; }
+  assert_eq "0" "$rc" "four diagrams render with the config: exit 0 ($(printf '%s' "$out" | tail -n 2 | tr '\n' ' '))"
+  assert_true "the SVGs are kept where the seam names" test -f "$svg/s.svg" -a -f "$svg/v.svg" -a -f "$svg/t.svg" -a -f "$svg/u.svg"
+  assert_contains "$(cat "$svg/s.svg" 2>/dev/null)" "#ff0000" "themeVariables reach the theme"
+  assert_contains "$(cat "$svg/s.svg" 2>/dev/null)" "stroke-width:7px" "themeCSS reaches the SVG's style"
+  assert_not_contains "$(cat "$svg/s.svg" 2>/dev/null)" "javascript:" "a file setting securityLevel loose still renders strict: the javascript: link is dropped"
+  assert_not_contains "$(cat "$svg/v.svg" 2>/dev/null)" "javascript:" "…and so does a block whose front matter says loose, though the file emptied secure"
+  local n
+  n=$(_dg_svg_paths "$svg/t.svg" 2>/dev/null | grep -c C || true)
+  assert_eq "10|0" "$(_dg_svg_paths "$svg/t.svg" 2>/dev/null | wc -l | tr -d ' ')|$n" \
+    "the file's flowchart curve (linear) reaches the layout: ten edges, no cubic C commands"
+  n=$(_dg_svg_paths "$svg/u.svg" 2>/dev/null | grep -c C || true)
+  assert_true "a block's front matter overrides the file: curve basis draws cubic C commands ($n)" test "${n:-0}" -gt 0
+  # Control: without the file the same graph draws curves, so linear came from it.
+  DOC_TOOLS_DIAGRAM_SVG_DIR="$svg/none" _dg_real_render out rc "diagram config real render" docs/t.md \
+    || { teardown; return 0; }
+  n=$(_dg_svg_paths "$svg/none/t.svg" 2>/dev/null | grep -c C || true)
+  assert_true "without the file the same graph draws cubic C commands ($n)" test "${n:-0}" -gt 0
+  teardown
+}
+
+test_diagram_render_config_allowlist_for_real() {
+  echo "test: diagram render --config, for real: only the allowlisted Mermaid keys reach mermaid.initialize; dompurifyConfig, secure, securityLevel, startOnLoad and any __proto__/constructor/prototype key are dropped, each named on one warning line"
+  _dg_real_ready "diagram config allowlist real render" || return 0
+  unset DOC_SUPERPOWERS_DIAGRAM_CONFIG
+  setup
+  local out rc svg
+  svg="$TEST_DIR/svg"
+  # FORBID_TAGS b would strip the <b> of the label if dompurifyConfig reached
+  # Mermaid's sanitiser: its <b> staying shows the key was dropped.
+  printf '%s\n' '{"dompurifyConfig": {"FORBID_TAGS": ["b"]}, "startOnLoad": true, "theme": "base",' \
+    ' "themeVariables": {"primaryColor": "#00ff00", "constructor": {"x": 1}},' \
+    ' "flowchart": {"__proto__": {"curve": "basis"}, "curve": "linear"}, "notAKey": 1}' > look.json
+  _dg_doc docs/s.md diagrams/s.png 'flowchart LR' '  A["<b>bold</b> text"] --> B'
+  DOC_TOOLS_DIAGRAM_SVG_DIR="$svg" _dg_real_render out rc "diagram config allowlist real render" \
+    --config look.json docs/s.md || { teardown; return 0; }
+  assert_eq "0" "$rc" "the diagram renders with the config: exit 0 ($(printf '%s' "$out" | tail -n 2 | tr '\n' ' '))"
+  assert_contains "$(cat "$svg/s.svg" 2>/dev/null)" "<b>bold</b>" "dompurifyConfig never reaches Mermaid: the label keeps its <b>"
+  assert_contains "$(cat "$svg/s.svg" 2>/dev/null)" "#00ff00" "an allowlisted key (themeVariables) still reaches the theme"
+  local warn
+  warn=$(printf '%s\n' "$out" | grep -c 'not accepted' || true)
+  assert_eq "1" "$warn" "one warning line names the dropped keys"
+  local k
+  for k in dompurifyConfig startOnLoad notAKey themeVariables.constructor flowchart.__proto__; do
+    assert_contains "$(printf '%s\n' "$out" | grep 'not accepted')" "$k" "…naming $k"
+  done
+  assert_not_contains "$(printf '%s\n' "$out" | grep 'not accepted')" "primaryColor" "…and no accepted key"
+  teardown
+}
+
+# _dg_svg_nodes <svg>: each flowchart node's id and translate, one a line.
+_dg_svg_nodes() {
+  grep -oE '<g class="node [^>]*>' "$1" | grep -oE 'flowchart-[A-Za-z0-9]+|translate\([^)]*\)' | paste -d' ' - -
+}
+
+test_diagram_render_nested_front_matter_for_real() {
+  echo "test: diagram render, for real: settings nested under config: in a block's front matter reach the layout (ELK's node placement; the flowchart curve under the default layout; under ELK the curve has no effect)"
+  _dg_real_ready "diagram nested front matter real render" || return 0
+  unset DOC_SUPERPOWERS_DIAGRAM_CONFIG
+  setup
+  local out rc svg n
+  svg="$TEST_DIR/svg"
+  # The verbatim block of the list test, then the same front matter over a
+  # graph large enough for the placement strategy to move nodes.
+  _dg_doc docs/v.md diagrams/v.png '---' 'config:' '  layout: elk' '  elk:' \
+    '    nodePlacementStrategy: BRANDES_KOEPF' '  flowchart:' '    curve: linear' '---' \
+    'flowchart LR' '  A --> B'
+  _dg_doc docs/bk.md diagrams/bk.png '---' 'config:' '  layout: elk' '  elk:' \
+    '    nodePlacementStrategy: BRANDES_KOEPF' '  flowchart:' '    curve: linear' '---' "$_DG_BENT"
+  _dg_doc docs/si.md diagrams/si.png '---' 'config:' '  layout: elk' '  elk:' \
+    '    nodePlacementStrategy: SIMPLE' '  flowchart:' '    curve: linear' '---' "$_DG_BENT"
+  _dg_doc docs/eb.md diagrams/eb.png '---' 'config:' '  layout: elk' '  elk:' \
+    '    nodePlacementStrategy: BRANDES_KOEPF' '  flowchart:' '    curve: basis' '---' "$_DG_BENT"
+  _dg_doc docs/dl.md diagrams/dl.png '---' 'config:' '  flowchart:' '    curve: linear' '---' "$_DG_BENT"
+  _dg_doc docs/db.md diagrams/db.png '---' 'config:' '  flowchart:' '    curve: basis' '---' "$_DG_BENT"
+  DOC_TOOLS_DIAGRAM_SVG_DIR="$svg" _dg_real_render out rc "diagram nested front matter real render" \
+    docs/v.md docs/bk.md docs/si.md docs/eb.md docs/dl.md docs/db.md || { teardown; return 0; }
+  assert_eq "0" "$rc" "six diagrams render: exit 0 ($(printf '%s' "$out" | tail -n 2 | tr '\n' ' '))"
+  assert_contains "$out" "docs/diagrams/v.png" "the verbatim block renders to its PNG"
+  assert_contains "$out" "ELK" "…with ELK"
+  assert_eq "8" "$(_dg_svg_nodes "$svg/bk.svg" 2>/dev/null | wc -l | tr -d ' ')" "the BRANDES_KOEPF render places eight nodes"
+  assert_true "nodePlacementStrategy reaches ELK: BRANDES_KOEPF and SIMPLE place the nodes differently" \
+    test "$(_dg_svg_nodes "$svg/bk.svg" 2>/dev/null)" != "$(_dg_svg_nodes "$svg/si.svg" 2>/dev/null)"
+  n=$(_dg_svg_paths "$svg/dl.svg" 2>/dev/null | grep -c C || true)
+  assert_eq "10|0" "$(_dg_svg_paths "$svg/dl.svg" 2>/dev/null | wc -l | tr -d ' ')|$n" \
+    "under the default layout, curve linear reaches the edges: ten edges, no cubic C commands"
+  n=$(_dg_svg_paths "$svg/db.svg" 2>/dev/null | grep -c C || true)
+  assert_true "…and curve basis draws cubic C commands ($n)" test "${n:-0}" -gt 0
+  # Measured with the pinned Mermaid 11.17.2 and layout-elk 0.2.3: ELK routes
+  # its own edges and does not read flowchart.curve. If a new pin changes
+  # this, this assert is the one that says so.
+  assert_eq "$(_dg_svg_paths "$svg/bk.svg" 2>/dev/null)" "$(_dg_svg_paths "$svg/eb.svg" 2>/dev/null)" \
+    "under ELK, curve linear and basis draw the same edges"
+  teardown
+}
+
+# Defence in depth behind the request interception: the page carries a
+# Content-Security-Policy that names no network source, and Chrome starts
+# with a dead proxy and a resolver that resolves nothing. Static: the real
+# render tests show the page still renders under them.
+test_diagram_renderer_closes_the_network_twice() {
+  echo "test: diagram: render.mjs gives its page a CSP with no network source, and starts Chrome with a dead proxy (loopback not bypassed) and a resolver that resolves nothing"
+  local src
+  src=$(cat "$SCRIPT_DIR/diagram/render.mjs")
+  assert_contains "$src" "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src file: 'unsafe-eval' 'unsafe-inline'; style-src 'unsafe-inline' file:; img-src data: file:; font-src data: file:; connect-src 'none'\">" \
+    "the page carries the CSP meta"
+  assert_contains "$src" "'--proxy-server=127.0.0.1:9'" "Chrome starts with a dead proxy"
+  assert_contains "$src" "'--proxy-bypass-list=<-loopback>'" "…that loopback does not bypass"
+  assert_contains "$src" "'--host-resolver-rules=MAP * ~NOTFOUND'" "…and a resolver that resolves no host"
+}
+
+# R8 of the design: no tracked file outside the dated records and the release
+# history names a renderer service or the Mermaid MCP tool, whose URL outputs
+# put the diagram source in a link to an outside service. The needles are
+# built from parts, so this file does not name them itself; the skill names
+# the danger generically ("a renderer service", "an MCP tool's URL outputs").
+test_diagram_no_renderer_service_is_named() {
+  echo "test: diagram: no tracked file outside docs/plans, docs/issues, docs/archive, docs/superpowers and RELEASE-NOTES.md names a Mermaid renderer service or the Mermaid MCP tool"
+  if ! git -C "$_DG_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    record_skip "diagram renderer-service guard: the plugin is not a git checkout"
+    return 0
+  fi
+  local needle hits rc
+  for needle in "mermaid""\\.ink" "kro""ki" "mcp__""mermaid"; do
+    rc=0
+    hits=$(git -C "$_DG_ROOT" grep -n -i -E -e "$needle" -- . \
+      ':(exclude)docs/plans' ':(exclude)docs/issues' ':(exclude)docs/archive' \
+      ':(exclude)docs/superpowers' ':(exclude)RELEASE-NOTES.md' 2>&1) || rc=$?
+    assert_eq "1|" "$rc|$hits" "no tracked file names '${needle//\\/}'"
+  done
+  # The guard itself still finds a planted name.
+  local probe
+  probe=$(harness_mktemp_d diagram-guard-probe)
+  git -C "$probe" init -q
+  printf 'render it at https://%s/svg/x\n' "mermaid"".ink" > "$probe/notes.md"
+  git -C "$probe" add notes.md
+  rc=0
+  git -C "$probe" grep -q -i -E -e "mermaid""\\.ink" -- . ':(exclude)docs/plans' || rc=$?
+  assert_eq "0" "$rc" "control: the same search finds a planted name"
+}
+
 run_tests() {
   echo "=== doc-tools.sh test suite ==="
   echo ""
@@ -9092,6 +10106,30 @@ run_tests() {
   test_writing_execs_the_engine_isolated
   test_writing_skipped_where_the_engine_is_not_beside_doc_tools
   test_writing_verbs_write_no_bytecode
+
+  # --- Diagram verbs ---
+  test_diagram_packages_are_pinned
+  test_diagram_list_finds_blocks_and_targets
+  test_diagram_list_reads_fences_as_commonmark_does
+  test_diagram_list_skips_no_block_silently
+  test_diagram_list_takes_no_link_across_a_fence
+  test_diagram_list_finds_elk_nested_in_front_matter
+  test_diagram_usage_errors_exit_3
+  test_diagram_render_installs_once_into_the_cache
+  test_diagram_render_needs_node_18
+  test_diagram_render_finds_a_browser
+  test_diagram_render_replaces_a_png_only_on_success
+  test_diagram_render_keeps_pngs_inside_the_work_tree
+  test_diagram_render_names_one_config_file
+  test_diagram_install_browser
+  test_diagram_render_for_real
+  test_diagram_render_refuses_local_files_for_real
+  test_diagram_render_browser_failure_exits_2_for_real
+  test_diagram_render_config_for_real
+  test_diagram_render_config_allowlist_for_real
+  test_diagram_render_nested_front_matter_for_real
+  test_diagram_renderer_closes_the_network_twice
+  test_diagram_no_renderer_service_is_named
 
   print_summary
 }

@@ -14,7 +14,7 @@ The main skill definition is `skills/doc-superpowers/SKILL.md`. Activate it when
 | `audit` | Full documentation health check |
 | `review-pr` | PR-scoped doc review |
 | `update` | Execute doc updates from audit |
-| `diagram` | Regenerate diagrams |
+| `diagram` | Regenerate diagrams, rendered on this machine with `doc-tools.sh diagram render` |
 | `sync` | Sync doc index with filesystem |
 | `setup` | Set this repository up in one pass: fixed safe defaults, every write shown first |
 | `help` | One-screen help: every feature and command, or one topic |

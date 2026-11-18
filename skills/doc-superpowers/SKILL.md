@@ -506,9 +506,9 @@ Update is the **write counterpart** to audit's analysis (audit edits no doc; its
 
 ### `diagram` — Regenerate Architecture Diagrams
 
-1. Find docs containing Mermaid code blocks:
+1. List the Mermaid source blocks, each with its doc, line and PNG (a block flagged `"unterminated": true` has a fence never closed; fix it first):
    ```bash
-   grep -rlF '```mermaid' docs/
+   "$DOC_TOOLS" diagram list
    ```
 2. Verify diagram accuracy against current code.
 3. Load agentic inventory from discovery phase.
@@ -518,10 +518,12 @@ Update is the **write counterpart** to audit's analysis (audit edits no doc; its
    - Does it have a multi-actor sequence diagram? (required if sub-agent dispatch)
    - Does it have a state diagram? (internals depth only, if state tracking detected)
 5. Flag missing diagrams as P2 Incomplete.
-6. Use `mcp__mermaid__generate_mermaid_diagram` (if available) to regenerate PNGs to co-located `diagrams/` dirs, and keep each diagram's source in the doc, in the `<details><summary>Mermaid source</summary>` block under its PNG — step 1 finds a doc only by that source:
+6. Keep each diagram's source in the doc, in the `<details><summary>Mermaid source</summary>` block under its PNG — step 1 finds a doc only by that source — and point the image link directly above the block at a PNG in a co-located `diagrams/` dir:
    - `docs/architecture/diagrams/` for architecture diagrams
    - `docs/workflows/diagrams/` for workflow diagrams
-7. If mermaid MCP unavailable, output updated Mermaid source inline, in the same slot.
+
+   Then render on this machine: `"$DOC_TOOLS" diagram render` (or name the docs you changed). It renders every block to the PNG its image link names, in a local headless Chrome, with a renderer this plugin pins. The first `diagram render` for a lockfile installs the pinned npm packages into the cache (`${XDG_CACHE_HOME:-$HOME/.cache}/doc-superpowers/diagram`), so it needs the network once; later renders need none. `diagram install-browser` downloads Chrome only when asked, for a host without one. The look comes from one Mermaid config file the repository tracks, a JSON object: `--config <file>`, else `DOC_SUPERPOWERS_DIAGRAM_CONFIG`, else `docs/diagrams/config.json` when it exists. Only the look, layout and diagram-type keys are taken from it (`theme`, `themeVariables`, `themeCSS`, `fontFamily`, `fontSize`, `look`, `layout`, `elk`, the diagram types' own sections such as `flowchart` or `sequence`, `wrap`, `maxTextSize`, `maxEdges`, `darkMode`, `htmlLabels`, `deterministicIds`, `deterministicIDSeed`; `doc-tools.sh diagram render --help` lists them all); any other key, such as `dompurifyConfig` or `securityLevel`, is dropped with a warning naming it, and `securityLevel` stays `strict`. A block's own front matter overrides the file. Render only this way. Never use a renderer service, and never an MCP tool's URL outputs: they put the diagram source in a link to an outside service, and a doc's diagrams describe a system its project may keep private.
+7. Read the exit code. 0: every PNG rendered. 1: a block failed (invalid source, a request to an outside URL, no image link above it); fix that source and render again. 2: the renderer could not run (no Node 18 or later, no browser, the packages not installable); keep the updated source in its slot, report the PNGs left unrendered and the line the verb printed (`diagram install-browser` installs a browser where none exists, only when the user asks). 3: a usage error, such as a config file that is missing, not JSON or not an object.
 8. Flag diagrams where code has diverged.
 
 ### `sync` — Sync Doc Index with Filesystem
@@ -643,7 +645,7 @@ Agent reports without specific evidence (exact doc text vs exact code text) are 
 | `docs/.doc-index.json` does not exist | `check-freshness` exits 1 ("doc-index.json not found") — run `init`, which builds it |
 | `doc-tools.sh` not found (the resolution block stops) | Stop and tell the user: the plugin's `scripts/` is not where the skill is installed |
 | Agent timeout | Report partial results, continue with other agents |
-| Mermaid MCP unavailable | Output Mermaid source text instead of PNG |
+| `diagram render` exits 2 (no Node 18+, no browser, no package install) | Keep the updated Mermaid source in its slot and report the PNGs not rendered |
 | No stale docs found | Report "All documentation is fresh" and exit |
 | `jq` not installed, or older than 1.6 | `doc-tools.sh` exits non-zero: a missing jq prints `required command not found: jq`; one older than 1.6 prints the requirement (`jq >= 1.6`) and the version found |
 | Old flat-file structure detected | `update` migrates to structured dirs (after a yes); `init` offers migration if creating new docs |

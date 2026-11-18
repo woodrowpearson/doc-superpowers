@@ -1,5 +1,41 @@
 # Release Notes
 
+## v3.16.0 (2026-11-18)
+
+This release renders Mermaid diagrams on your own machine. Until now the `diagram` action told agents to render through a Mermaid MCP tool, which hands back links to an outside rendering service, so each diagram's source left the machine. `doc-tools.sh diagram` replaces it: a pinned renderer runs in a local headless Chrome that refuses every outside request, and the skill, the docs and the evals no longer name the MCP tool.
+
+### Upgrading from 3.15.x
+- **Rendering needs Node 18 or later, `npm`, and Chrome or Chromium on the machine that renders.** Without them `diagram render` exits 2, and the docs keep their inline Mermaid source. Nothing else in doc-superpowers needs Node.
+- **The first `diagram render` per lockfile needs the network once:** it installs the pinned packages with `npm ci --ignore-scripts` into `~/.cache/doc-superpowers/diagram/<lock hash>`. Every later render is offline.
+- **No Chrome or Chromium?** `doc-tools.sh diagram install-browser` downloads the `chrome-headless-shell` build that puppeteer-core pins. It runs only when asked. `DOC_SUPERPOWERS_CHROME` names a browser of your own.
+- **Your diagrams' look** can live in one Mermaid config file, `docs/diagrams/config.json` (or `--config <file>`, or `DOC_SUPERPOWERS_DIAGRAM_CONFIG`). Without one, Mermaid's defaults apply.
+
+### Added
+- **`doc-tools.sh diagram list`** prints, as JSON, every Mermaid source block in the docs (a `mermaid` fence in a `<details><summary>Mermaid source</summary>` slot) with the PNG link above it, and whether it asks for ELK. A fence never closed is listed as `unterminated`, a `<details>` with attributes opens a slot, and an image link above an unrelated fence is not taken as the slot's PNG.
+- **`doc-tools.sh diagram render [--config <file>] [<doc>...]`** renders each block to its PNG: width 1248, device scale 2, white background, ELK registered for the blocks that set `layout: elk`. A PNG is replaced only when its render succeeded. Exit 0 rendered, 1 a diagram failed, 2 the renderer could not run, 3 usage.
+- **`doc-tools.sh diagram install-browser`**, the one verb that downloads a browser.
+- **The pinned renderer:** `scripts/diagram/` holds `package.json`, `package-lock.json` (mermaid 11.17.2, @mermaid-js/layout-elk 0.2.3, puppeteer-core 24.43.1, every entry with its integrity hash), `render.mjs` and `browser.mjs`.
+
+### Security
+- **The page cannot reach the network.** Three layers:
+  - Request interception aborts everything but `data:`, `about:`, and `file:` under the page's own directory and the pinned packages.
+  - The page carries a Content-Security-Policy with `connect-src 'none'`.
+  - Chrome starts with a dead proxy and a host resolver that resolves nothing.
+  A block that asks for anything else fails, naming the request.
+- **A diagram cannot draw a local file into a PNG:** an `<img>` or a `url()` naming a file outside those directories fails its block.
+- **The config file cannot loosen Mermaid's sanitising.** Only an allowlist of top-level keys reaches `mermaid.initialize`; `dompurifyConfig`, `secure`, `securityLevel`, `startOnLoad` and any `__proto__`, `constructor` or `prototype` key are dropped with a warning line, and `securityLevel` stays `strict`.
+- **A PNG path stays inside the work tree**, even through a symbolic link, and never names a path in `.git`.
+
+### Changed
+- **The `diagram` action and every doc that says how to render** now run `doc-tools.sh diagram list` and `render`. `SKILL.md`, `references/tool-mappings.md`, `references/doc-spec.md` and the evals no longer name the Mermaid MCP tool or an outside renderer.
+- **This repository's 13 diagrams** are redrawn with the local renderer. Each one keeps its content and reading order; the context and container diagrams now show the local browser where the MCP server was, and the container diagram is laid out more tightly.
+- `CLAUDE.md`'s *Diagrams* convention says diagrams are rendered only with `doc-tools.sh diagram render`.
+
+### Other
+- A line of inline code in backticks no longer opens a fence when the docs are scanned for Mermaid blocks.
+- Not run: `dep-audit` (it needs the network; `search/uv.lock` is unchanged) and a vulnerability audit of the renderer's npm packages (`npm audit` needs the network). The lockfile pins every package with its integrity hash.
+- Verified locally, since GitHub Actions does not run on this account. Under bash 5.x and `/bin/bash` 3.2: `test-doc-tools.sh` 2016, `test-hooks.sh` 4423, `test-spec-status-model.sh` 1078, `test-doc-pr-release.sh` 835, `test-merge-driver.sh` 844, `test-spec-claims.sh` 3269 and `test-ledger.sh` 3865 assertions passed, none failed. The writing suite passed under python3 3.13.3 and `/usr/bin/python3` 3.9.6, and the doc-search pytest suite passed (903, the 2 live tests skipped). So did `self-install`, `zizmor`, `gitleaks` and `check-version`. The real-render tests ran against system Chrome with the pinned packages already installed.
+
 ## v3.15.0 (2026-11-18)
 
 This release adds a CI template that keeps open pull requests merged with their base when the only thing between them is the doc index. Every merge to the base rebuilds `docs/.doc-index.json`, so every open pull request that also rebuilt it then conflicts there, and only there. The merge driver resolves that conflict entry by entry, but git runs it only in a clone that registers it, and GitHub's merge button never does. A consumer project with many open pull requests measured this as its most frequent merge chore.
