@@ -8908,6 +8908,20 @@ test_diagram_list_reads_fences_as_commonmark_does() {
   teardown
 }
 
+test_diagram_list_finds_elk_nested_in_front_matter() {
+  echo "test: diagram list: layout: elk indented under config: in the front matter, beside elk and flowchart settings, asks for ELK"
+  setup
+  local out rc
+  _dg_doc docs/nested.md diagrams/nested.png '---' 'config:' '  layout: elk' '  elk:' \
+    '    nodePlacementStrategy: BRANDES_KOEPF' '  flowchart:' '    curve: linear' '---' \
+    'flowchart LR' '  A --> B'
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/nested.md 2>&1) || rc=$?
+  assert_eq '0|[{"doc":"docs/nested.md","line":10,"png":"docs/diagrams/nested.png","elk":true}]' \
+    "$rc|$(jq -c . <<<"$out" 2>/dev/null)" "the block asks for ELK"
+  teardown
+}
+
 test_diagram_usage_errors_exit_3() {
   echo "test: diagram: usage errors exit 3; --help lists list, render and install-browser; outside a repository exits 2"
   setup
@@ -9534,6 +9548,52 @@ test_diagram_render_config_for_real() {
   teardown
 }
 
+# _dg_svg_nodes <svg>: each flowchart node's id and translate, one a line.
+_dg_svg_nodes() {
+  grep -oE '<g class="node [^>]*>' "$1" | grep -oE 'flowchart-[A-Za-z0-9]+|translate\([^)]*\)' | paste -d' ' - -
+}
+
+test_diagram_render_nested_front_matter_for_real() {
+  echo "test: diagram render, for real: settings nested under config: in a block's front matter reach the layout (ELK's node placement; the flowchart curve under the default layout; under ELK the curve has no effect)"
+  _dg_real_ready "diagram nested front matter real render" || return 0
+  unset DOC_SUPERPOWERS_DIAGRAM_CONFIG
+  setup
+  local out rc svg n
+  svg="$TEST_DIR/svg"
+  # The verbatim block of the list test, then the same front matter over a
+  # graph large enough for the placement strategy to move nodes.
+  _dg_doc docs/v.md diagrams/v.png '---' 'config:' '  layout: elk' '  elk:' \
+    '    nodePlacementStrategy: BRANDES_KOEPF' '  flowchart:' '    curve: linear' '---' \
+    'flowchart LR' '  A --> B'
+  _dg_doc docs/bk.md diagrams/bk.png '---' 'config:' '  layout: elk' '  elk:' \
+    '    nodePlacementStrategy: BRANDES_KOEPF' '  flowchart:' '    curve: linear' '---' "$_DG_BENT"
+  _dg_doc docs/si.md diagrams/si.png '---' 'config:' '  layout: elk' '  elk:' \
+    '    nodePlacementStrategy: SIMPLE' '  flowchart:' '    curve: linear' '---' "$_DG_BENT"
+  _dg_doc docs/eb.md diagrams/eb.png '---' 'config:' '  layout: elk' '  elk:' \
+    '    nodePlacementStrategy: BRANDES_KOEPF' '  flowchart:' '    curve: basis' '---' "$_DG_BENT"
+  _dg_doc docs/dl.md diagrams/dl.png '---' 'config:' '  flowchart:' '    curve: linear' '---' "$_DG_BENT"
+  _dg_doc docs/db.md diagrams/db.png '---' 'config:' '  flowchart:' '    curve: basis' '---' "$_DG_BENT"
+  DOC_TOOLS_DIAGRAM_SVG_DIR="$svg" _dg_real_render out rc "diagram nested front matter real render" \
+    docs/v.md docs/bk.md docs/si.md docs/eb.md docs/dl.md docs/db.md || { teardown; return 0; }
+  assert_eq "0" "$rc" "six diagrams render: exit 0 ($(printf '%s' "$out" | tail -n 2 | tr '\n' ' '))"
+  assert_contains "$out" "docs/diagrams/v.png" "the verbatim block renders to its PNG"
+  assert_contains "$out" "ELK" "…with ELK"
+  assert_eq "8" "$(_dg_svg_nodes "$svg/bk.svg" 2>/dev/null | wc -l | tr -d ' ')" "the BRANDES_KOEPF render places eight nodes"
+  assert_true "nodePlacementStrategy reaches ELK: BRANDES_KOEPF and SIMPLE place the nodes differently" \
+    test "$(_dg_svg_nodes "$svg/bk.svg" 2>/dev/null)" != "$(_dg_svg_nodes "$svg/si.svg" 2>/dev/null)"
+  n=$(_dg_svg_paths "$svg/dl.svg" 2>/dev/null | grep -c C || true)
+  assert_eq "10|0" "$(_dg_svg_paths "$svg/dl.svg" 2>/dev/null | wc -l | tr -d ' ')|$n" \
+    "under the default layout, curve linear reaches the edges: ten edges, no cubic C commands"
+  n=$(_dg_svg_paths "$svg/db.svg" 2>/dev/null | grep -c C || true)
+  assert_true "…and curve basis draws cubic C commands ($n)" test "${n:-0}" -gt 0
+  # Measured with the pinned Mermaid 11.17.2 and layout-elk 0.2.3: ELK routes
+  # its own edges and does not read flowchart.curve. If a new pin changes
+  # this, this assert is the one that says so.
+  assert_eq "$(_dg_svg_paths "$svg/bk.svg" 2>/dev/null)" "$(_dg_svg_paths "$svg/eb.svg" 2>/dev/null)" \
+    "under ELK, curve linear and basis draw the same edges"
+  teardown
+}
+
 # R8 of the design: no tracked file outside the dated records and the release
 # history names a renderer service or the Mermaid MCP tool, whose URL outputs
 # put the diagram source in a link to an outside service. The needles are
@@ -9880,6 +9940,7 @@ run_tests() {
   test_diagram_packages_are_pinned
   test_diagram_list_finds_blocks_and_targets
   test_diagram_list_reads_fences_as_commonmark_does
+  test_diagram_list_finds_elk_nested_in_front_matter
   test_diagram_usage_errors_exit_3
   test_diagram_render_installs_once_into_the_cache
   test_diagram_render_needs_node_18
@@ -9889,6 +9950,7 @@ run_tests() {
   test_diagram_install_browser
   test_diagram_render_for_real
   test_diagram_render_config_for_real
+  test_diagram_render_nested_front_matter_for_real
   test_diagram_no_renderer_service_is_named
 
   print_summary
