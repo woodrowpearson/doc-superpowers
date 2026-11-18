@@ -39,10 +39,13 @@ to other people's branches. `setup` lists it under `ci.workflows`.
 - **Not touched** (no comment): one GitHub reports as mergeable. A pull request whose mergeable
   state is still unknown after one retry is left out.
 - **Considered:** one GitHub reports as conflicting.
+- **Left out** as well (no comment, a line in the log and the run's summary): a considered pull
+  request whose branch moved while the resolver ran (R4, R5). A comment there would overwrite an
+  earlier "merged" notice and tells an author who is pushing nothing. The next run looks again.
 
 **R4. The merge.** For a considered pull request, the step fetches its head and checks that the
-head is still the one the listing named. It then merges the base with `docs/.doc-index.json` routed
-to the vendored driver, and accepts the merge only when all of these hold:
+head is still the one GitHub named; a head that moved is left out (R3). It then merges the base
+with `docs/.doc-index.json` routed to the vendored driver, and accepts the merge only when all of these hold:
 
 1. The only path git reports as conflicted without the driver is `docs/.doc-index.json`.
 2. With the driver, the merge completes with no conflict.
@@ -57,8 +60,8 @@ has, as the other templates' messages do: `/doc-superpowers hooks install --git`
 
 **R5. The push.** The merge commit's first parent is the head that was read, so the push is a
 fast-forward. The step pushes with `--force-with-lease=refs/heads/<branch>:<head>`, so a branch
-that moved since it was read refuses the push. A refused push on a branch that moved is a skip; on
-a branch that did not move it is a failure. That case is a protected branch (a branch protection
+that moved since it was read refuses the push. A refused push on a branch that moved is left out
+(R3); on a branch that did not move it is a failure. That case is a protected branch (a branch protection
 rule or ruleset: signed commits, linear history, restricted updates), which refuses every later run
 too. So it also gets the skip's comment: the refusal, the local command and the `no-index-resolve`
 label that opts out. Git authenticates through the template family's
@@ -81,7 +84,7 @@ a merge, on a skip and on a refused push (R5). It does not comment on a pull req
 did not touch, or on any other failure.
 
 **R8. Outcomes and exit codes.** Each considered pull request ends `merged`, `skipped` or
-`failed`. The step prints one line per pull request and exits 0 when none failed, 2 when any
+`failed`, or `left out` when its branch moved (R3). The step prints one line per pull request and exits 0 when none failed, 2 when any
 failed, and 3 on a usage error. A failure on one pull request does not stop the others.
 
 **R9. Hardening.** It follows the template family's rules:

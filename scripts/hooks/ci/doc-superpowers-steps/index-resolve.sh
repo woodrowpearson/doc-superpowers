@@ -11,16 +11,17 @@
 #               log and in the run's summary.
 #   not touched GitHub reports it as mergeable: no comment.
 #   considered  GitHub reports it as conflicting. It ends merged, skipped or
-#               failed.
-# A considered one is merged only when the head is still the one GitHub
-# named, git without the driver finds docs/.doc-index.json the only conflict,
+#               failed, or left out when its branch moved meanwhile.
+# A considered one whose head moved since GitHub named it, or whose branch
+# moved before the push, is left out (log only, no comment). It is merged only
+# when git without the driver finds docs/.doc-index.json the only conflict,
 # the driver merges it cleanly, the merged index keeps every entry both sides
 # hold (one deleted since the merge base may go), and the merge brings no file
 # under .github/workflows/ (the job token cannot push one). The merge is
 # written with `git merge-tree --write-tree` (the working tree is never left
 # mid-merge), its first parent the head, and pushed with
 # --force-with-lease=refs/heads/<branch>:<head>: a branch that moved meanwhile
-# refuses it (skipped), and a refusal on a branch that did not move (a branch
+# refuses it (left out), and a refusal on a branch that did not move (a branch
 # protection rule or ruleset) fails, with a comment that says so. The
 # driver and the attribute that routes the index to it are given to git for
 # the merge alone (git -c, --attr-source): the repository's config and
@@ -245,6 +246,14 @@ refused() {
   fi
 }
 
+# moved <n> <branch> <detail>: the branch moved while the resolver ran. Left
+# out, a line in the log and no comment: one would overwrite an earlier notice
+# and tells an author who is pushing nothing. The next run looks again.
+moved() {
+  N_LEFT=$((N_LEFT + 1))
+  say "$1" "$2" "left out" "$3; the next push to $BASE_BRANCH looks again"
+}
+
 # fail <n> <branch> <detail>: no comment.
 fail() {
   N_FAILED=$((N_FAILED + 1))
@@ -340,8 +349,7 @@ resolve_one() {
   fi
   head=$(git rev-parse FETCH_HEAD) || { fail "$n" "$ref" "cannot read the fetched head"; return 0; }
   if [ "$head" != "$sha" ]; then
-    skip "$n" "$ref" "The branch moved while the resolver ran; the next push to \`$(tick "$BASE_BRANCH")\` looks again." \
-      "the branch moved (GitHub named ${sha:0:12}, origin has ${head:0:12})"
+    moved "$n" "$ref" "the branch moved (GitHub named ${sha:0:12}, origin has ${head:0:12})"
     return 0
   fi
 
@@ -418,8 +426,7 @@ resolve_one() {
     fi
     tip="${tip%%[[:space:]]*}"
     if [ "$tip" != "$head" ]; then
-      skip "$n" "$ref" "The branch moved while the resolver ran; the next push to \`$(tick "$BASE_BRANCH")\` looks again." \
-        "the push was refused: the branch moved"
+      moved "$n" "$ref" "the push was refused: the branch moved"
     else
       refused "$n" "$ref" "$head"
     fi

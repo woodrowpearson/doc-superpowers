@@ -4405,7 +4405,7 @@ test_index_resolve_left_out_and_not_touched() {
 }
 
 test_index_resolve_skips_what_the_driver_cannot_fix() {
-  echo "Test: index-resolve.sh — another file conflicts, the driver cannot settle an entry, an entry would be dropped, the merge brings a workflow file, the head moved: skipped, nothing pushed, one comment naming the reason and the local fix"
+  echo "Test: index-resolve.sh — another file conflicts, or the driver cannot settle an entry: skipped, nothing pushed, one comment naming the reason and the local fix; the head moved since GitHub named it: left out, nothing pushed, a line in the log and no comment (it would overwrite an earlier notice)"
   _ir_fixture || { assert_true "fixture" false; return 0; }
   local out rc l n body
   out="$(harness_mktemp_d ir)/out"
@@ -4419,7 +4419,7 @@ test_index_resolve_skips_what_the_driver_cannot_fix() {
   rc=0; _ir_run "$out" || rc=$?
   assert_eq "0" "$rc" "skips are no failure: exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
   l=$(cat "$out.log")
-  for n in 1 2 3; do
+  for n in 1 2; do
     assert_contains "$(grep "PR #$n " <<<"$l")" "skipped" "PR #$n: skipped"
     assert_true "PR #$n: one comment" test -f "$IR_GH/posted-$n.json"
     body=$(jq -r .body "$IR_GH/posted-$n.json" 2>/dev/null || true)
@@ -4431,7 +4431,10 @@ test_index_resolve_skips_what_the_driver_cannot_fix() {
   done
   assert_contains "$(jq -r .body "$IR_GH/posted-1.json")" "README.md" "another file conflicts: the comment names it"
   assert_contains "$(jq -r .body "$IR_GH/posted-2.json")" "merge driver" "the driver's conflict: the comment says so"
-  assert_contains "$(jq -r .body "$IR_GH/posted-3.json")" "moved" "the head moved: the comment says so"
+  assert_contains "$(grep "PR #3 " <<<"$l")" "left out" "the head moved: left out"
+  assert_contains "$(grep "PR #3 " <<<"$l")" "moved" "…the log line says it moved"
+  assert_true "…and no comment" test ! -e "$IR_GH/posted-3.json"
+  assert_contains "$(cat "$out.summary")" "#3" "…the run's summary lists it"
   for b in readme driver moved; do
     assert_eq "$(git -C "$IR_DIR" rev-parse "$b")" "$(git -C "$IR_REMOTE" rev-parse "refs/heads/$b")" "$b: nothing pushed"
   done
@@ -4472,7 +4475,7 @@ test_index_resolve_refuses_a_dropped_entry_and_workflow_files() {
 }
 
 test_index_resolve_refused_push() {
-  echo "Test: index-resolve.sh — a push the remote refuses: a branch that moved meanwhile is skipped (comment), one that did not move (a protected branch, a ruleset) is failed, exit 2, with a comment naming the refusal, the local command and the label that opts out; a failure stops no other pull request"
+  echo "Test: index-resolve.sh — a push the remote refuses: a branch that moved meanwhile is left out (log only, no comment), one that did not move (a protected branch, a ruleset) is failed, exit 2, with a comment naming the refusal, the local command and the label that opts out; a failure stops no other pull request"
   _ir_fixture || { assert_true "fixture" false; return 0; }
   local out rc
   out="$(harness_mktemp_d ir)/out"
@@ -4508,8 +4511,9 @@ HOOK
   assert_contains "$body" "git merge origin/main" "…the local command"
   assert_contains "$body" "no-index-resolve" "…and the label that opts out"
   assert_eq "$(cat "$IR_REMOTE/moved-to")" "$(git -C "$IR_REMOTE" rev-parse refs/heads/move)" "precondition: the hook moved the branch and refused the push"
-  assert_contains "$(grep 'PR #2 ' "$out.log")" "skipped" "refused, moved: skipped"
-  assert_contains "$(jq -r .body "$IR_GH/posted-2.json" 2>/dev/null)" "moved" "…its comment says the branch moved"
+  assert_contains "$(grep 'PR #2 ' "$out.log")" "left out" "refused, moved: left out"
+  assert_contains "$(grep 'PR #2 ' "$out.log")" "moved" "…the log line says the branch moved"
+  assert_true "…and no comment" test ! -e "$IR_GH/posted-2.json"
   assert_contains "$(grep 'PR #3 ' "$out.log")" "merged" "the next pull request is still merged"
 }
 

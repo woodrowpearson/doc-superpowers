@@ -247,6 +247,9 @@ others install only when named:
 pull request against it (or the one `workflow_dispatch` names):
 - **Left out**, with no comment and a line in the run's summary: a fork, another base, the label
   `no-index-resolve`, a head that is the base, or a mergeable state still unknown after one retry.
+  Also a branch that moved while the resolver ran: its head is not the one GitHub named, or the
+  lease refused the push. A comment there would overwrite an earlier notice and tells an author
+  who is pushing nothing; the next run looks again.
   **Not touched**: one GitHub reports as mergeable.
 - **Merged**, when git without the driver finds `docs/.doc-index.json` the only conflict, the
   driver merges it cleanly, no entry both sides keep is dropped, and the merge brings no file under
@@ -256,7 +259,7 @@ pull request against it (or the one `workflow_dispatch` names):
   author's next push; without a dispatch, the comment asks for one (an empty commit works) or a
   close and reopen.
 - **Skipped**, with a comment naming the reason and the local fix (`git merge origin/<base>` in a
-  clone with the driver registered: `/doc-superpowers hooks install --git`): any other case, and a branch that moved.
+  clone with the driver registered: `/doc-superpowers hooks install --git`): any other case.
 - **Failed**: a push refused while the branch did not move, or a call that cannot run. The refused
   push is a protected branch: a branch protection rule or ruleset (signed commits, linear history,
   restricted updates) forbids the workflow token's push. Every later run would be refused the same
