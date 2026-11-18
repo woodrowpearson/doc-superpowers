@@ -307,14 +307,16 @@ resolve_one() {
     fail "$n" "$ref" "cannot read it (gh api failed, above)"
     return 0
   fi
-  mergeable=$(jq -r '.mergeable | if . == null then "unknown" else tostring end' "$T/pr.json")
+  mergeable=$(jq -r '.mergeable | if . == null then "unknown" else tostring end' "$T/pr.json") \
+    || { fail "$n" "$ref" "cannot read it (GitHub's answer is not JSON)"; return 0; }
   if [ "$mergeable" = unknown ]; then
     sleep "$RETRY"
     if ! gh api "repos/$REPO/pulls/$n" > "$T/pr.json"; then
       fail "$n" "$ref" "cannot read it (gh api failed, above)"
       return 0
     fi
-    mergeable=$(jq -r '.mergeable | if . == null then "unknown" else tostring end' "$T/pr.json")
+    mergeable=$(jq -r '.mergeable | if . == null then "unknown" else tostring end' "$T/pr.json") \
+    || { fail "$n" "$ref" "cannot read it (GitHub's answer is not JSON)"; return 0; }
   fi
   case "$mergeable" in
     true)
@@ -328,14 +330,15 @@ resolve_one() {
       return 0
       ;;
   esac
-  sha=$(jq -r '.head.sha // empty' "$T/pr.json")
+  sha=$(jq -r '.head.sha // empty' "$T/pr.json") \
+    || { fail "$n" "$ref" "cannot read its head (GitHub's answer is not JSON)"; return 0; }
 
   # The head, as GitHub named it.
   if ! git fetch -q --no-tags origin "refs/heads/$ref"; then
     fail "$n" "$ref" "cannot fetch the branch from origin"
     return 0
   fi
-  head=$(git rev-parse FETCH_HEAD)
+  head=$(git rev-parse FETCH_HEAD) || { fail "$n" "$ref" "cannot read the fetched head"; return 0; }
   if [ "$head" != "$sha" ]; then
     skip "$n" "$ref" "The branch moved while the resolver ran; the next push to \`$(tick "$BASE_BRANCH")\` looks again." \
       "the branch moved (GitHub named ${sha:0:12}, origin has ${head:0:12})"
@@ -349,7 +352,7 @@ resolve_one() {
     fail "$n" "$ref" "git merge-tree failed: $(head -n 1 "$T/err")"
     return 0
   fi
-  conflicts=$(printf '%s\n' "$out" | sed '1d')
+  conflicts=$(printf '%s\n' "$out" | sed '1d') || { fail "$n" "$ref" "cannot read git's conflict list"; return 0; }
   if [ "$rc" = 0 ] || [ -z "$conflicts" ]; then
     skip "$n" "$ref" "git merges \`$(tick "$BASE_BRANCH")\` into it without a conflict, so there is nothing for the resolver to settle." \
       "git finds no conflict"
@@ -374,7 +377,7 @@ resolve_one() {
       "the merge driver could not merge the index"
     return 0
   fi
-  tree=$(printf '%s\n' "$out" | sed -n 1p)
+  tree=$(printf '%s\n' "$out" | sed -n 1p) || { fail "$n" "$ref" "cannot read the merged tree"; return 0; }
 
   # No entry dropped.
   mb=$(git merge-base "$head" "$BASE_SHA" 2>/dev/null | head -n 1 || true)
@@ -394,7 +397,8 @@ resolve_one() {
   fi
 
   # No workflow file: the job token cannot push one.
-  bring=$(git diff --name-only "$head" "$tree" -- .github/workflows/)
+  bring=$(git diff --name-only "$head" "$tree" -- .github/workflows/) \
+    || { fail "$n" "$ref" "git diff failed on the merge"; return 0; }
   if [ -n "$bring" ]; then
     skip "$n" "$ref" "The merge brings files under \`.github/workflows/\` ($(printf '%s\n' "$bring" | list_md)), which the workflow token cannot push." \
       "the merge brings workflow files"

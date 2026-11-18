@@ -4568,6 +4568,24 @@ test_index_resolve_one_pull_request() {
   assert_eq "$(git -C "$IR_DIR" rev-parse one)" "$(git -C "$IR_REMOTE" rev-parse refs/heads/one)" "PR #1's branch is not pushed"
 }
 
+test_index_resolve_one_bad_answer_stops_no_other() {
+  echo "Test: index-resolve.sh — gh answers one pull request with something that is not JSON (a 200 all the same): that one fails, the next is still merged, exit 2 (errexit stops no run midway)"
+  _ir_fixture || { assert_true "fixture" false; return 0; }
+  local out rc
+  out="$(harness_mktemp_d ir)/out"
+  _ir_branch bad src/a/1/ -
+  _ir_branch good src/a/2/ -
+  _ir_base src/b/new/
+  _ir_pr 1 bad false
+  _ir_pr 2 good false
+  printf '<html>not JSON</html>\n' > "$IR_GH/pull-1.json"
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "2" "$rc" "one pull request failed: exit 2 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  assert_contains "$(grep 'PR #1 ' "$out.log")" "failed" "the one gh answered badly: failed"
+  assert_contains "$(grep 'PR #2 ' "$out.log")" "merged" "…and the next is still merged"
+  assert_contains "$(tail -n 1 "$out.log")" "1 merged" "…and the run ends with its count line"
+}
+
 test_index_resolve_listing_fails() {
   echo "Test: index-resolve.sh — the pull requests cannot be listed: ::error::, exit 2"
   _ir_fixture || { assert_true "fixture" false; return 0; }
@@ -4590,6 +4608,7 @@ test_index_resolve_refuses_a_dropped_entry_and_workflow_files
 test_index_resolve_refused_push
 test_index_resolve_updates_its_own_comment
 test_index_resolve_one_pull_request
+test_index_resolve_one_bad_answer_stops_no_other
 test_index_resolve_listing_fails
 
 print_summary
