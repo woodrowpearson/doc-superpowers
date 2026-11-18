@@ -133,7 +133,7 @@ If you ask for a work ledger (or `docs/ledger/config.json` already exists), it a
 
 # The others are opt-in by name: the Claude-powered ones and the shell doc-ledger-publish and doc-index-resolve
 /doc-superpowers hooks install --ci --workflows=doc-release
-/doc-superpowers hooks install --ci --workflows=doc-index-resolve --resolve-test-workflow=tests.yml  # merges the base into PRs that conflict only in the doc index; never by --workflows=all
+/doc-superpowers hooks install --ci --workflows=doc-index-resolve --resolve-test-workflow=tests.yml  # merges the base into PRs that conflict only in the doc index and docs' cite line numbers; never by --workflows=all
 /doc-superpowers hooks install --ci --workflows=none                 # vendor doc-tools.sh only
 
 # With a work ledger (docs/ledger/config.json): its opt-in sets, never part of --all

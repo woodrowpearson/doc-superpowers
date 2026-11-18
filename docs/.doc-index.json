@@ -885,13 +885,13 @@
       "code_oids": {
         "scripts/setup/": "befcab4737a484d1c96f2d24ac15b7ba78614ba1",
         "scripts/doc-superpowers": "1b7215de5914c609e961371fad3c511696327495",
-        "scripts/help/": "aacca40912ae1ce5908b28bef684deb9dc649945"
+        "scripts/help/": "5f420877cec5fc801f8a42b3aebd58c09afb5a17"
       },
-      "code_commit": "7cfc442451ef0a0d51ac589b1adb5c740230eab6",
+      "code_commit": "8a3f895247bc30a2948e945c7413070dc73c14df",
       "doc_type": "reference",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-11-18T05:28:46Z",
+      "last_verified": "2026-11-18T20:28:23Z",
       "implementation": []
     },
     "docs/superpowers/specs/2026-10-27-doc-search-readiness-gate-design.md": {

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # The step of doc-index-resolve.yml: merges the base branch into every open
-# pull request against it whose only conflict is the doc index
-# (docs/.doc-index.json), with doc-superpowers' index merge driver, vendored
-# beside this script (merge-doc-index.sh).
+# pull request against it whose only conflicts are the doc index
+# (docs/.doc-index.json) and the cite line numbers of indexed docs, with
+# doc-superpowers' index merge driver, vendored beside this script
+# (merge-doc-index.sh), and the cite relocator beside it (cite-resolve.sh).
 #
 # Which pull requests (one, PR=<n>, or every open one against the base):
 #   left out    a fork, another base, labelled no-index-resolve, a head that
@@ -14,10 +15,11 @@
 #               failed, or left out when its branch moved meanwhile.
 # A considered one whose head moved since GitHub named it, or whose branch
 # moved before the push, is left out (log only, no comment). It is merged only
-# when git without the driver finds docs/.doc-index.json the only conflict,
-# the driver merges it cleanly, the merged index keeps every entry both sides
-# hold (one deleted since the merge base may go), and the merge brings no file
-# under .github/workflows/ (the job token cannot push one). The merge is
+# when every file git without the driver conflicts on is docs/.doc-index.json
+# or a cite doc (below), the driver merges the index cleanly, the merged index
+# keeps every entry both sides hold (one deleted since the merge base may go),
+# and the merge brings no file under .github/workflows/ (the job token cannot
+# push one). The merge is
 # written with `git merge-tree --write-tree` (the working tree is never left
 # mid-merge), its first parent the head, and pushed with
 # --force-with-lease=refs/heads/<branch>:<head>: a branch that moved meanwhile
@@ -26,6 +28,16 @@
 # driver and the attribute that routes the index to it are given to git for
 # the merge alone (git -c, --attr-source): the repository's config and
 # attributes are not read or written for them.
+#
+# A cite doc (design 2026-11-18, R1-R6) is a regular Markdown file keyed in
+# both sides' indexes, changed on both sides, whose conflict blocks differ
+# only in the line numbers of code cites, and which reads current, unmodified
+# since its record, on the head and on the base. cite-resolve.sh rewrites
+# each one against the merged code; update-index re-records them in a
+# worktree at the head holding the merged files (no hook, no attribute),
+# each entry keeping the newer side's last_verified; check-freshness must
+# then read them current on the final tree. Any refusal is a skip. The index
+# need not conflict as well.
 #
 # A push with the job token starts no workflow: with TEST_WORKFLOW set, that
 # workflow is dispatched on the branch after the push. A dispatch starts that

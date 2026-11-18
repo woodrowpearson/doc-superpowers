@@ -14,7 +14,8 @@ Workflows:  10 templates.
   shell, no secret:  doc-freshness-pr  doc-freshness-schedule (the default 2)
                      doc-ledger-publish (opt-in; for a ledger host)
                      doc-index-resolve (opt-in by name, never by all: merges
-                     the base into PRs that conflict only in the doc index)
+                     the base into PRs that conflict only in the doc index
+                     and the cite line numbers of indexed docs)
   Claude-powered:    doc-audit-update  doc-pr-full-cycle  doc-pr-release
                      doc-release  doc-review-pr  doc-spec-verify
                      (they need CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY)
