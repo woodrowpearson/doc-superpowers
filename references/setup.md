@@ -84,7 +84,7 @@ A summary line reads `[x] <Group>  <value>` or `[ ] <Group>  off`, with ` (chang
 | `search.cache` | doc-search | value: `host` or an absolute path | `host` | local | `installed.local.json`; your env hook | `--set search.cache=host` |
 | `git` | Git hooks | choice: `hooks,merge-driver,off` | `hooks` | team (the driver's `.gitattributes` block), local (`.git/config`, the hooks) | `.gitattributes`, `.git/config`, `.git/hooks/` | `doc-superpowers hooks uninstall --git` |
 | `claude` | Claude hooks | toggle | `on` | local | `.claude/settings.local.json`, `.claude/hooks/doc-superpowers/`, `.git/info/exclude` | `doc-superpowers hooks uninstall --claude` |
-| `ci.workflows` | CI workflows | multi: the 9 workflows `install.sh help` lists | `none` | team | `.github/workflows/`, `.github/scripts/`, `.tiers.ci` in `installed.json` | `doc-superpowers hooks uninstall --ci` |
+| `ci.workflows` | CI workflows | multi: the 10 workflows `install.sh help` lists | `none` | team | `.github/workflows/`, `.github/scripts/`, `.tiers.ci` in `installed.json` | `doc-superpowers hooks uninstall --ci` |
 | `ci.base_branch` | CI workflows | value: a branch name | `main` | team | the workflows, `.tiers.ci` | `--set ci.base_branch=main` |
 | `ci.cron` | CI workflows | value: 5 cron fields (UTC) | `0 9 * * 1` | team | the workflows, `.tiers.ci` | `--set 'ci.cron=0 9 * * 1'` |
 | `ci.strict` | CI workflows | toggle | `off` | team | the workflows, `.tiers.ci` | `--set ci.strict=off` |
