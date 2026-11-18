@@ -3116,7 +3116,8 @@ diagram list|cmd_diagram_list|none|
   <details><summary>Mermaid source</summary> slot (<details> may carry
   attributes, as <details open>); line is its fence's line; png is the
   image link directly above the slot, resolved from the doc's directory
-  (null when there is none, or it is a URL or leaves the repository);
+  (null when there is none, or it is a URL, leaves the repository, even
+  through a symbolic link, or names a path in .git);
   elk is true when its front matter or init directive sets layout: elk.
   A block whose fence is never closed is listed with "unterminated":
   true, and render fails it. Fences follow CommonMark: one indented four
@@ -3798,6 +3799,10 @@ _dg_require_repo() {
     || _dg_cannot "must run inside a git repository, from its top level"
   [ -z "$(git rev-parse --show-prefix 2>/dev/null)" ] \
     || _dg_cannot "must run from the repository's top level (doc paths are keyed from the root). Run: cd \"\$(git rev-parse --show-toplevel)\""
+  # The top level with every symbolic link resolved: _dg_png holds each
+  # PNG's directory to it.
+  _DG_TOP=$(cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null && pwd -P) \
+    || _dg_cannot "cannot resolve the repository's top level"
 }
 
 # _dg_docs <verb> [<doc>…]: the docs to scan into _DG_DOCS — the named ones
@@ -3926,9 +3931,11 @@ END {
 
 # _dg_png <doc> <link>: the repository-relative PNG an image link in <doc>
 # names, into _DG_PNG; "" when the link is empty, a URL, an absolute path,
-# not a .png, or leaves the repository. Lexical: the file need not exist.
+# not a .png, leaves the repository, has a .git component (any case), or
+# its directory resolves (symbolic links followed, from the deepest part
+# that exists) outside _DG_TOP. The file and its directory need not exist.
 _dg_png() {
-  local doc="$1" link="$2" dir part out="" parts=()
+  local doc="$1" link="$2" dir part out="" parts=() real
   _DG_PNG=""
   case "$link" in
     ''|/*|*://*|*:*) return 0 ;;
@@ -3950,12 +3957,31 @@ _dg_png() {
         unset "stack[$((n - 1))]"
         stack=(${stack[@]+"${stack[@]}"})
         ;;
+      [.][gG][iI][tT]) return 0 ;;
       *) stack+=("$part") ;;
     esac
   done
   for part in ${stack[@]+"${stack[@]}"}; do
     out="${out:+$out/}$part"
   done
+  # Physically: the deepest part of the PNG's directory that exists, with
+  # its symbolic links resolved, must lie inside the top level.
+  dir="${out%/*}"
+  [ "$dir" != "$out" ] || dir="."
+  while [ ! -d "$dir" ]; do
+    case "$dir" in
+      */*) dir="${dir%/*}" ;;
+      *) dir="." ;;
+    esac
+  done
+  real=$(cd "$dir" 2>/dev/null && pwd -P) || return 0
+  case "$real/" in
+    "$_DG_TOP"/*) ;;
+    *) return 0 ;;
+  esac
+  case "$real/" in
+    "$_DG_TOP"/.git/*|"$_DG_TOP"/.GIT/*) return 0 ;;
+  esac
   _DG_PNG="$out"
 }
 
@@ -4166,7 +4192,7 @@ cmd_diagram_render() {
       continue
     fi
     if [ -z "$png" ]; then
-      echo "diagram: FAILED $doc:$line: no image link to a PNG in this repository directly above its <details> slot" >&2
+      echo "diagram: FAILED $doc:$line: no image link to a PNG in this repository directly above its <details> slot (none, a URL, outside the repository, through a symbolic link out of it, or into .git)" >&2
       failed=$((failed + 1))
       continue
     fi
@@ -4175,11 +4201,11 @@ cmd_diagram_render() {
     else
       src=""
     fi
-    mkdir -p "$(dirname "$png")" || _dg_cannot "cannot create the directory of $png"
-    out="$(dirname "$png")/.$(basename "$png").render.$$.$id"
-    _TMP_PATHS+=("$out")
+    # The render lands in the scratch directory; the PNG's directory is made
+    # only when a finished render moves in, so a failed block makes none.
+    out="$_SCRATCH/render.$id.png"
     jq -cn --argjson id "$id" --arg doc "$doc" --argjson line "$line" --arg png "$png" \
-      --argjson elk "$([ "$elk" = 1 ] && echo true || echo false)" --arg source "$src" --arg out "$PWD/$out" \
+      --argjson elk "$([ "$elk" = 1 ] && echo true || echo false)" --arg source "$src" --arg out "$out" \
       '{id: $id, doc: $doc, line: $line, png: $png, elk: $elk, source: $source, out: $out}' \
       >> "$_SCRATCH/jobs.ndjson" || _dg_cannot "cannot write the job list"
     j_doc+=("$doc") j_line+=("$line") j_png+=("$png") j_out+=("$out")
@@ -4212,7 +4238,15 @@ cmd_diagram_render() {
         if [ "$r_id" = "$i" ]; then found=1; break; fi
       done < "$_SCRATCH/results.tsv"
       if [ "$found" = 1 ] && [ "$r_ok" = 1 ] && _dg_is_png "${j_out[$i]}"; then
-        mv -f "${j_out[$i]}" "${j_png[$i]}" || _dg_cannot "cannot move the render onto ${j_png[$i]}"
+        # Copied beside the PNG first, then renamed onto it: the PNG is
+        # either the old one or the whole new one, never a partial copy.
+        local pdir tmp
+        pdir=$(dirname "${j_png[$i]}")
+        mkdir -p "$pdir" || _dg_cannot "cannot create the directory of ${j_png[$i]}"
+        tmp="$pdir/.$(basename "${j_png[$i]}").render.$$.$i"
+        _TMP_PATHS+=("$tmp")
+        cp "${j_out[$i]}" "$tmp" && mv -f "$tmp" "${j_png[$i]}" \
+          || _dg_cannot "cannot move the render onto ${j_png[$i]}"
         echo "rendered ${j_png[$i]} (${j_doc[$i]}:${j_line[$i]}$([ "$r_elk" = 1 ] && echo ', ELK'))"
         rendered=$((rendered + 1))
       else

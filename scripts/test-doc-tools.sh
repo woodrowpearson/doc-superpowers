@@ -9318,6 +9318,39 @@ test_diagram_render_replaces_a_png_only_on_success() {
   teardown
 }
 
+test_diagram_render_keeps_pngs_inside_the_work_tree() {
+  echo "test: diagram: a PNG path through a symbolic link out of the repository, or into .git, has no PNG (list null, render fails it and writes nothing there); a failed block makes no directory"
+  setup
+  _dg_stubs
+  local out rc outside
+  outside=$(harness_mktemp_d diagram-outside)
+  ln -s "$outside" docs/out
+  _dg_doc docs/l.md out/l.png 'flowchart LR' '  A --> B'
+  _dg_doc docs/g.md ../.git/g.png 'flowchart LR' '  A --> B'
+  _dg_doc docs/h.md diagrams/.git/h.png 'flowchart LR' '  A --> B'
+  _dg_doc docs/k.md .GIT/k.png 'flowchart LR' '  A --> B'
+  _dg_doc docs/ok.md diagrams/ok.png 'flowchart LR' '  A --> B'
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/l.md docs/g.md docs/h.md docs/k.md docs/ok.md 2>&1) || rc=$?
+  assert_eq "0|null null null null docs/diagrams/ok.png" "$rc|$(jq -r '[.[].png | tostring] | join(" ")' <<<"$out" 2>/dev/null)" \
+    "list: a link through a symbolic link out of the repository, or with a .git component, has no PNG"
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/l.md docs/g.md docs/h.md docs/k.md docs/ok.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "render: those blocks fail, exit 1"
+  assert_contains "$out" "1 rendered, 4 failed" "…four failed, the plain one rendered"
+  assert_eq "" "$(ls -A "$outside")" "…nothing is written through the link"
+  assert_true "…nor into .git" test ! -e .git/g.png -a ! -e docs/diagrams/.git -a ! -e docs/.GIT
+
+  # A block that fails makes no directory for its PNG.
+  _dg_doc docs/new3/f.md diagrams/f.png 'flowchart LR' '  A --> BAD'
+  rc=0
+  out=$(PATH="$DG_BIN:$PATH" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render docs/new3/f.md 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a failing block in a doc whose diagrams/ does not exist: exit 1"
+  assert_true "…and no diagrams/ directory is left behind" test ! -e docs/new3/diagrams
+  _dg_stubs_off
+  teardown
+}
+
 test_diagram_render_names_one_config_file() {
   echo "test: diagram render hands the renderer one Mermaid config file: --config, else DOC_SUPERPOWERS_DIAGRAM_CONFIG, else docs/diagrams/config.json if it exists, else none; an explicit path that is missing or not a JSON object exits 3, naming it"
   setup
@@ -10069,6 +10102,7 @@ run_tests() {
   test_diagram_render_needs_node_18
   test_diagram_render_finds_a_browser
   test_diagram_render_replaces_a_png_only_on_success
+  test_diagram_render_keeps_pngs_inside_the_work_tree
   test_diagram_render_names_one_config_file
   test_diagram_install_browser
   test_diagram_render_for_real

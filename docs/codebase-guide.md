@@ -633,7 +633,8 @@ doc-tools.sh diagram list|render [--config <file>] [<doc>...]  (or doc-superpowe
     <summary>Mermaid source</summary>, outside any other fence (fences as CommonMark reads them: a
     backtick line with a backtick in its info string opens none, nor a line indented 4+ spaces; a
     fence never closed is listed unterminated, and render fails it); the image link above the slot
-    → _dg_png resolves it from the doc's directory (null: none, a URL, outside the repository);
+    → _dg_png resolves it from the doc's directory (null: none, a URL, outside the repository,
+    a .git component, or a directory whose real path, symbolic links followed, is outside the top level);
     ELK from the front matter, an init directive or flowchart-elk
   list → the blocks as a JSON array {doc, line, png, elk}
   render → _dg_config: --config, else DOC_SUPERPOWERS_DIAGRAM_CONFIG, else docs/diagrams/config.json
@@ -651,7 +652,8 @@ doc-tools.sh diagram list|render [--config <file>] [<doc>...]  (or doc-superpowe
       prototype at any depth, dropped with one warning line) deep-merged into
       mermaid.initialize, securityLevel forced to strict and
       Mermaid's default secure keys kept, so a block's front matter overrides the file but never the level)
-    → each ok job whose file is a PNG is moved onto its PNG; a failed one is deleted, the old PNG kept
+    → each ok job whose file is a PNG is moved onto its PNG (its directory made only then); a failed
+      one is deleted, the old PNG kept and no directory made
 doc-tools.sh diagram install-browser
   → the same install, then node browser.mjs install <node_modules> <cache>/browsers: prints the path
 ```
