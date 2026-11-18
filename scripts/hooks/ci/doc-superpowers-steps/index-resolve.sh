@@ -26,9 +26,13 @@
 # attributes are not read or written for them.
 #
 # A push with the job token starts no workflow: with TEST_WORKFLOW set, that
-# workflow is dispatched on the branch after the push. Each merged or skipped
-# pull request gets one comment marked <!-- doc-superpowers:index-resolve -->,
-# the resolver's own (author type Bot) updated in place.
+# workflow is dispatched on the branch after the push. A dispatch starts that
+# one workflow only; the pull request's other checks wait for the author's
+# next push (or a close and reopen), which the comment asks for when nothing
+# was dispatched. A re-run would check the original commit, not the merge.
+# Each merged or skipped pull request gets one comment marked
+# <!-- doc-superpowers:index-resolve -->, the resolver's own (author type Bot)
+# updated in place.
 #
 # Env:
 #   BASE_BRANCH        the base branch (required)
@@ -223,13 +227,17 @@ fail() {
   say "$1" "$2" failed "$3"
 }
 
+# What starts checks on the merge commit. A re-run does not: it checks the
+# commit its run first checked.
+PUSH_FOR_CHECKS="Before you merge, push a commit (\`git pull\`, then \`git commit --allow-empty -m 'Run the checks'\` and \`git push\`), or close and reopen the pull request."
+
 # merged <n> <branch> <merge commit> <checks: started | not-started | none>
 merged() {
   local checks
   case "$4" in
-    started) checks="The \`$(tick "$TEST_WORKFLOW")\` workflow was started on this branch for the merge." ;;
-    not-started) checks="The \`$(tick "$TEST_WORKFLOW")\` workflow could not be started for the merge (the resolver's run log says why): re-run the checks, or push a commit, before you merge." ;;
-    *) checks="A push by the workflow token starts no workflow, so this merge has no checks yet: re-run the checks, or push a commit, before you merge." ;;
+    started) checks="The \`$(tick "$TEST_WORKFLOW")\` workflow was started on this branch for the merge. The pull request's other checks start on your next push." ;;
+    not-started) checks="The \`$(tick "$TEST_WORKFLOW")\` workflow could not be started for the merge (the resolver's run log says why). $PUSH_FOR_CHECKS" ;;
+    *) checks="A push by the workflow token starts no workflow, so this merge has no checks yet. $PUSH_FOR_CHECKS" ;;
   esac
   {
     echo "$MARKER"

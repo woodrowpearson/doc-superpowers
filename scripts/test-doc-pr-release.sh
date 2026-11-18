@@ -4322,6 +4322,7 @@ test_index_resolve_merges_an_index_only_conflict() {
   assert_contains "$body" "<!-- doc-superpowers:index-resolve -->" "one comment, carrying the marker"
   assert_contains "$body" "${tip:0:7}" "…naming the merge commit"
   assert_contains "$body" "tests.yml" "…and the checks it started"
+  assert_contains "$body" "other checks" "…and that the pull request's other checks wait for the next push"
   assert_contains "$body" "git pull" "…and the author's next step"
   assert_contains "$(cat "$out.summary" 2>/dev/null)" "#5" "the run's summary lists it"
   assert_eq "" "$(git -C "$IR_DIR" status --porcelain)" "the checkout is left clean (no merge in progress)"
@@ -4335,7 +4336,7 @@ test_index_resolve_merges_an_index_only_conflict() {
 }
 
 test_index_resolve_checks_without_a_test_workflow() {
-  echo "Test: index-resolve.sh — no test workflow recorded: nothing dispatched, the comment asks the author to re-run the checks; a dispatch that fails: the comment says the checks could not be started"
+  echo "Test: index-resolve.sh — no test workflow recorded: nothing dispatched, and the comment asks for a push (an empty commit works) or a close and reopen, never a re-run (a re-run checks the original commit); a dispatch that fails: the same, saying the workflow could not be started; one started: the pull request's other checks wait for the next push"
   _ir_fixture || { assert_true "fixture" false; return 0; }
   local out rc body
   out="$(harness_mktemp_d ir)/out"
@@ -4347,7 +4348,9 @@ test_index_resolve_checks_without_a_test_workflow() {
   assert_eq "0" "$rc" "exit 0"
   assert_true "nothing dispatched" test ! -e "$IR_GH/dispatches.log"
   body=$(jq -r .body "$IR_GH/posted-1.json" 2>/dev/null || true)
-  assert_contains "$body" "re-run the checks" "the comment asks the author to re-run the checks"
+  assert_contains "$body" "git commit --allow-empty" "the comment asks for a push: an empty commit works"
+  assert_contains "$body" "close and reopen" "…or a close and reopen of the pull request"
+  assert_not_contains "$body" "re-run" "…and never a re-run, which checks the original commit"
   rm -f "$IR_GH/pull-1.json"
   _ir_pr 2 two false
   : > "$IR_GH/fail-dispatch"
@@ -4355,6 +4358,8 @@ test_index_resolve_checks_without_a_test_workflow() {
   assert_eq "0" "$rc" "a failed dispatch after a push: exit 0 (the merge landed)"
   body=$(jq -r .body "$IR_GH/posted-2.json" 2>/dev/null || true)
   assert_contains "$body" "could not be started" "…and the comment says the checks could not be started"
+  assert_contains "$body" "git commit --allow-empty" "…and asks for a push"
+  assert_not_contains "$body" "re-run" "…not a re-run"
   assert_contains "$(cat "$out.log")" "::warning::" "…with a warning in the run log"
 }
 

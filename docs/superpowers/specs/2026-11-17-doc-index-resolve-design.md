@@ -62,8 +62,12 @@ git-token block, reading `DOC_SUPERPOWERS_GIT_TOKEN`; no token is kept on disk.
 **R6. Checks on the merge.** A push with the workflow token starts no workflow. When the recorded
 choice `resolve_test_workflow` names a workflow file, the step dispatches it on the pull request's
 branch (`POST /actions/workflows/<file>/dispatches`). When the choice is empty, nothing is
-dispatched and the comment tells the author to re-run the checks. A failed dispatch after a
-successful push still posts the comment, which says the checks could not be started.
+dispatched and the comment asks the author to push a commit (`git commit --allow-empty` works)
+or to close and reopen the pull request. A re-run does not help: it checks the commit its run
+first checked, not the merge. A dispatch starts that one workflow only, so the pull request's other
+required `pull_request` checks stay missing until the author pushes. A failed dispatch after a
+successful push still posts the comment, which says the checks could not be started and asks for
+the same push.
 
 **R7. The comment.** Each pull request gets at most one comment from the resolver, marked with
 `<!-- doc-superpowers:index-resolve -->`. The step updates its own comment (author type `Bot`)

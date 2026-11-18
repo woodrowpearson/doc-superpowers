@@ -10,8 +10,10 @@
 # doc-superpowers' merge driver (vendored beside the step). The merge is
 # pushed with a lease, so a branch that moved meanwhile is left alone. A push
 # with the job token starts no workflow, so the step dispatches the test
-# workflow install --ci --resolve-test-workflow=<file> recorded (none: the
-# comment asks the author to re-run the checks). Each pull request it merged
+# workflow install --ci --resolve-test-workflow=<file> recorded. That starts one
+# workflow only: the pull request's other checks wait for the author's next
+# push, which the comment asks for (a re-run would check the original commit,
+# not the merge). Each pull request it merged
 # or could not merge gets one comment, updated in place. A pull request from a
 # fork, labelled no-index-resolve, or GitHub reports as mergeable is not
 # touched. It never runs on a pull_request event, so a pull request's own code

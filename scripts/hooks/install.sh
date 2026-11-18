@@ -397,9 +397,11 @@ CI options (install --ci / --all):
                             the workflow file doc-index-resolve dispatches on a
                             branch it merged (a push with the job token starts
                             no workflow), e.g. tests.yml; a name of letters,
-                            digits and . _ - ending .yml or .yaml (default:
-                            none, and the comment asks the author to re-run the
-                            checks; recorded only when given, and
+                            digits and . _ - ending .yml or .yaml, with a
+                            workflow_dispatch trigger. It starts that workflow
+                            only: the other checks wait for the author's next
+                            push, which the comment asks for when none is named
+                            (default: none; recorded only when given, and
                             --resolve-test-workflow= clears the record)
   --helpers=<true|false>    deprecated, and inert: the helpers ship exactly
                             while an installed workflow runs them.
