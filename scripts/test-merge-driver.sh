@@ -689,6 +689,65 @@ assert_ways '.docs["docs/a.md"].last_verified' "$T3" "newer side's verification 
 assert_ways_same_docs "one-sided field vs newer verify"
 teardown
 
+# R7: both sides re-recorded one entry. The record that matches the three-way
+# merge of content_hash and code_oids describes the merged files, so it wins
+# even when the other side's record is newer.
+# Merge B into A on a scratch head and return check-freshness on the result.
+merged_freshness() {
+  git checkout -q -f --detach A
+  git merge -q --no-edit B > /dev/null 2>&1
+  "$DOC_TOOLS" check-freshness 2>/dev/null
+  git reset -q --hard
+  git checkout -q -f main
+}
+
+echo ""
+echo "--- R7: A changes a ref and re-records, B re-records later with nothing changed: A's record wins ---"
+base_repo
+git checkout -q -b A
+echo "// a changed" > src/a.js
+git add -A && git commit -qm "A: code"
+dt "$T2" update-index docs/a.md
+commit_all "A: re-verify a (new code)"
+A_OID=$(git rev-parse A:src/a.js)
+git checkout -q -b B main
+echo "# b, revised" > docs/b.md
+git add -A && git commit -qm "B: doc b"
+dt "$T3" update-index docs/a.md docs/b.md
+commit_all "B: re-verify a (unchanged) and b"
+run_ways
+assert_ways '.docs["docs/a.md"].code_oids["src/a.js"]' "$A_OID" "the record that matches the merged code wins"
+assert_ways '.docs["docs/a.md"].last_verified' "$T2" "…whole, with its own last_verified"
+assert_ways '.docs["docs/b.md"].last_verified' "$T3" "the other side's re-verify of b survives"
+assert_ways_same_docs "R7 code ref"
+FRESH=$(merged_freshness)
+assert_json_field "$FRESH" '.docs["docs/a.md"].status' "current" "check-freshness reads a current on the merged tree"
+assert_json_field "$FRESH" '.summary.stale' "0" "…and nothing stale"
+teardown
+
+echo ""
+echo "--- R7: A changes the doc text and re-records, B re-records later with nothing changed: A's record wins ---"
+base_repo
+git checkout -q -b A
+echo "# a, revised" > docs/a.md
+git add -A && git commit -qm "A: doc"
+dt "$T2" update-index docs/a.md
+commit_all "A: re-verify a (new doc)"
+A_HASH=$(jq -r '.docs["docs/a.md"].content_hash' docs/.doc-index.json)
+git checkout -q -b B main
+dt "$T3" update-index docs/a.md
+commit_all "B: re-verify a (unchanged)"
+assert_true "precondition: B re-recorded a with a newer last_verified" \
+  test "$(jq -r '.docs["docs/a.md"].last_verified' docs/.doc-index.json)" = "$T3"
+run_ways
+assert_ways '.docs["docs/a.md"].content_hash' "$A_HASH" "the record that matches the merged doc wins"
+assert_ways '.docs["docs/a.md"].last_verified' "$T2" "…whole, with its own last_verified"
+assert_ways_same_docs "R7 doc text"
+FRESH=$(merged_freshness)
+assert_json_field "$FRESH" '.docs["docs/a.md"].status' "current" "check-freshness reads a current on the merged tree"
+assert_json_field "$FRESH" '.docs["docs/a.md"].doc_modified' "false" "…its doc unmodified since the record"
+teardown
+
 echo ""
 echo "--- git revert of a deprecation reverts it, keeps the later re-verify ---"
 base_repo
@@ -1099,6 +1158,58 @@ assert_eq "1" "$DRV_RC" "tied re-verifications: exit 1 (never a pair nobody veri
 assert_contains "$DRV_ERR" "the verification record" "tied re-verifications: the record is named"
 drive_swapped
 assert_eq "1" "$DRV_RC" "tied re-verifications (swapped): exit 1"
+write_index "$B" "{\"docs/a.md\": $ENTRY}"
+
+echo ""
+echo "--- R7, direct: the record matching the three-way content wins; both or neither matching, the newer side ---"
+REC='.docs["docs/a.md"] | [.content_hash, .code_oids["src/a.js"], .code_commit, .last_verified] | join(" ")'
+# (a) ours changed the ref and re-recorded; theirs re-recorded later, unchanged.
+derive "$O" '.docs["docs/a.md"] += {code_oids: {"src/a.js": "oid1"}, code_commit: "c1", last_verified: "2026-01-01T00:00:02Z"}'
+derive "$T" '.docs["docs/a.md"] += {code_commit: "c2", last_verified: "2026-01-01T00:00:03Z"}'
+for way in drive drive_swapped; do
+  "$way"
+  assert_eq "0" "$DRV_RC" "R7 changed ref vs later re-record ($way): exit 0"
+  assert_json_field "$DRV_OUT" "$REC" "sha256:h0 oid1 c1 2026-01-01T00:00:02Z" "R7 changed ref: the older, matching record wins whole ($way)"
+done
+# (b) the same with the doc text (content_hash) changed instead.
+derive "$O" '.docs["docs/a.md"] += {content_hash: "sha256:h1", code_commit: "c1", last_verified: "2026-01-01T00:00:02Z"}'
+for way in drive drive_swapped; do
+  "$way"
+  assert_eq "0" "$DRV_RC" "R7 changed doc vs later re-record ($way): exit 0"
+  assert_json_field "$DRV_OUT" "$REC" "sha256:h1 oid0 c1 2026-01-01T00:00:02Z" "R7 changed doc: the older, matching record wins whole ($way)"
+done
+# (c) both changed the same ref differently: neither matches, the newer wins.
+derive "$O" '.docs["docs/a.md"] += {code_oids: {"src/a.js": "oid1"}, code_commit: "c1", last_verified: "2026-01-01T00:00:02Z"}'
+derive "$T" '.docs["docs/a.md"] += {code_oids: {"src/a.js": "oid2"}, code_commit: "c2", last_verified: "2026-01-01T00:00:03Z"}'
+for way in drive drive_swapped; do
+  "$way"
+  assert_eq "0" "$DRV_RC" "R7 same ref changed on both ($way): exit 0"
+  assert_json_field "$DRV_OUT" "$REC" "sha256:h0 oid2 c2 2026-01-01T00:00:03Z" "R7 neither matches: the newer record wins ($way)"
+done
+# (d) only theirs re-recorded: pick3 takes it, unchanged.
+cp "$B" "$O"
+derive "$T" '.docs["docs/a.md"] += {code_oids: {"src/a.js": "oid2"}, code_commit: "c2", last_verified: "2026-01-01T00:00:03Z"}'
+for way in drive drive_swapped; do
+  "$way"
+  assert_eq "0" "$DRV_RC" "R7 one side re-recorded ($way): exit 0"
+  assert_json_field "$DRV_OUT" "$REC" "sha256:h0 oid2 c2 2026-01-01T00:00:03Z" "R7 one side: its record (pick3) ($way)"
+done
+# (e) both records match the three-way content: the newer wins.
+derive "$O" '.docs["docs/a.md"] += {code_oids: {"src/a.js": "oid1"}, code_commit: "c1", last_verified: "2026-01-01T00:00:02Z"}'
+derive "$T" '.docs["docs/a.md"] += {code_oids: {"src/a.js": "oid1"}, code_commit: "c2", last_verified: "2026-01-01T00:00:03Z"}'
+for way in drive drive_swapped; do
+  "$way"
+  assert_eq "0" "$DRV_RC" "R7 both match ($way): exit 0"
+  assert_json_field "$DRV_OUT" "$REC" "sha256:h0 oid1 c2 2026-01-01T00:00:03Z" "R7 both match: the newer record wins ($way)"
+done
+# Unordered (equal last_verified) stays a conflict, even when one side matches.
+derive "$O" '.docs["docs/a.md"] += {code_oids: {"src/a.js": "oid1"}, code_commit: "c1", last_verified: "2026-01-01T00:00:03Z"}'
+derive "$T" '.docs["docs/a.md"] += {code_commit: "c2", last_verified: "2026-01-01T00:00:03Z"}'
+for way in drive drive_swapped; do
+  "$way"
+  assert_eq "1" "$DRV_RC" "R7 unordered, one side matches ($way): still exit 1"
+  assert_contains "$DRV_ERR" "the verification record" "R7 unordered ($way): the record is named"
+done
 write_index "$B" "{\"docs/a.md\": $ENTRY}"
 
 echo ""
