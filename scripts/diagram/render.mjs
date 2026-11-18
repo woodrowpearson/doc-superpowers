@@ -29,7 +29,9 @@
 //
 // Nothing leaves the machine: every request a page makes to anything but a
 // file:, data: or about: URL is aborted, and a job whose page made one fails
-// and names it. Mermaid and the ELK plugin load from <node_modules> as file:
+// and names it. Behind that, the page's Content-Security-Policy names no
+// network source, and Chrome runs with a dead proxy and a resolver that
+// resolves nothing. Mermaid and the ELK plugin load from <node_modules> as file:
 // URLs (--allow-file-access-from-files lets a file: page import file: ES
 // modules); no CDN and no renderer service is used.
 //
@@ -168,10 +170,15 @@ try {
 
 // The page every job renders in: an empty white body. It lives in a private
 // temporary directory, so its file: URL names nothing of the repository.
+// Its Content-Security-Policy names no network source (scripts, styles,
+// images and fonts from file: and data: only, no fetch or XHR): a second
+// wall behind the request interception.
+const CSP_META = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src file: 'unsafe-eval' 'unsafe-inline'; style-src 'unsafe-inline' file:; img-src data: file:; font-src data: file:; connect-src 'none'">`;
 const pageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-superpowers-diagram-'));
 const pageFile = path.join(pageDir, 'page.html');
 fs.writeFileSync(pageFile,
   '<!doctype html><html><head><meta charset="utf-8">' +
+  CSP_META +
   '<style>html,body{background:#ffffff;margin:0}body{margin:8px}</style>' +
   '</head><body><div id="container"></div></body></html>\n');
 
@@ -189,6 +196,12 @@ try {
       '--no-first-run',
       '--no-default-browser-check',
       '--hide-scrollbars',
+      // A third wall: whatever escaped the interception and the CSP goes to
+      // a proxy that listens nowhere (the discard port), loopback included,
+      // and no host name resolves.
+      '--proxy-server=127.0.0.1:9',
+      '--proxy-bypass-list=<-loopback>',
+      '--host-resolver-rules=MAP * ~NOTFOUND',
     ],
   });
 } catch (e) {
@@ -209,6 +222,14 @@ async function renderJob(job) {
         if (!blocked.includes(url)) blocked.push(url);
         request.abort('blockedbyclient').catch(() => {});
       }
+    });
+    // What the CSP refuses never reaches the interception: the page records
+    // each refusal, and the job reports it as blocked too.
+    await page.evaluateOnNewDocument(() => {
+      window.__cspBlocked = [];
+      document.addEventListener('securitypolicyviolation', (e) => {
+        window.__cspBlocked.push(String(e.blockedURI || e.violatedDirective));
+      });
     });
     await page.setViewport({ width: WIDTH, height: 800, deviceScaleFactor: SCALE });
     await page.goto(pathToFileURL(pageFile).href, { waitUntil: 'load' });
@@ -233,6 +254,9 @@ async function renderJob(job) {
         return { ok: false, error: String((e && e.message) || e) };
       }
     }, pathToFileURL(mermaidFile).href, pathToFileURL(elkFile).href, job.source, Boolean(job.elk), mermaidConfig);
+    for (const url of await page.evaluate(() => window.__cspBlocked || [])) {
+      if (!blocked.includes(url)) blocked.push(url);
+    }
     if (!result.ok) return { id: job.id, ok: false, error: result.error, blocked };
     if (!(result.width > 0 && result.height > 0)) {
       return { id: job.id, ok: false, error: 'the diagram rendered empty', blocked };

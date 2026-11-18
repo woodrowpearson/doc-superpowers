@@ -9623,6 +9623,21 @@ test_diagram_render_nested_front_matter_for_real() {
   teardown
 }
 
+# Defence in depth behind the request interception: the page carries a
+# Content-Security-Policy that names no network source, and Chrome starts
+# with a dead proxy and a resolver that resolves nothing. Static: the real
+# render tests show the page still renders under them.
+test_diagram_renderer_closes_the_network_twice() {
+  echo "test: diagram: render.mjs gives its page a CSP with no network source, and starts Chrome with a dead proxy (loopback not bypassed) and a resolver that resolves nothing"
+  local src
+  src=$(cat "$SCRIPT_DIR/diagram/render.mjs")
+  assert_contains "$src" "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src file: 'unsafe-eval' 'unsafe-inline'; style-src 'unsafe-inline' file:; img-src data: file:; font-src data: file:; connect-src 'none'\">" \
+    "the page carries the CSP meta"
+  assert_contains "$src" "'--proxy-server=127.0.0.1:9'" "Chrome starts with a dead proxy"
+  assert_contains "$src" "'--proxy-bypass-list=<-loopback>'" "…that loopback does not bypass"
+  assert_contains "$src" "'--host-resolver-rules=MAP * ~NOTFOUND'" "…and a resolver that resolves no host"
+}
+
 # R8 of the design: no tracked file outside the dated records and the release
 # history names a renderer service or the Mermaid MCP tool, whose URL outputs
 # put the diagram source in a link to an outside service. The needles are
@@ -9981,6 +9996,7 @@ run_tests() {
   test_diagram_render_config_for_real
   test_diagram_render_config_allowlist_for_real
   test_diagram_render_nested_front_matter_for_real
+  test_diagram_renderer_closes_the_network_twice
   test_diagram_no_renderer_service_is_named
 
   print_summary
