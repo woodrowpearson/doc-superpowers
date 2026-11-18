@@ -8945,6 +8945,21 @@ test_diagram_list_skips_no_block_silently() {
   teardown
 }
 
+# The image link is the slot's only when nothing but blank lines stands
+# between it and <details>: a fence between them (opened and closed) ends it.
+test_diagram_list_takes_no_link_across_a_fence() {
+  echo "test: diagram list: an image link above another fence is not the PNG of a slot below that fence"
+  setup
+  local out rc
+  printf '# F\n\n![X](diagrams/x.png)\n\n```sh\necho hi\n```\n\n<details>\n<summary>Mermaid source</summary>\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\n</details>\n' > docs/f.md
+  printf '# G\n\n![Y](diagrams/y.png)\n```sh\n```\n<details>\n<summary>Mermaid source</summary>\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\n</details>\n' > docs/g.md
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/f.md docs/g.md 2>&1) || rc=$?
+  assert_eq "0|null null" "$rc|$(jq -r '[.[].png | tostring] | join(" ")' <<<"$out" 2>/dev/null)" \
+    "a fence between the image link and <details> leaves the slot with no PNG"
+  teardown
+}
+
 test_diagram_list_finds_elk_nested_in_front_matter() {
   echo "test: diagram list: layout: elk indented under config: in the front matter, beside elk and flowchart settings, asks for ELK"
   setup
@@ -10047,6 +10062,7 @@ run_tests() {
   test_diagram_list_finds_blocks_and_targets
   test_diagram_list_reads_fences_as_commonmark_does
   test_diagram_list_skips_no_block_silently
+  test_diagram_list_takes_no_link_across_a_fence
   test_diagram_list_finds_elk_nested_in_front_matter
   test_diagram_usage_errors_exit_3
   test_diagram_render_installs_once_into_the_cache

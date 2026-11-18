@@ -3832,7 +3832,7 @@ _dg_docs() {
 # <summary>Mermaid source</summary> (blank lines between them allowed); a
 # block whose fence is never closed runs to the end of the file and is
 # flagged unterminated; link is the image link on the last non-blank line above
-# <details>, or "". Lines inside any other fence are never read as slot
+# <details>, or "" (a fence opening or closing in between ends it). Lines inside any other fence are never read as slot
 # lines, so a slot shown as an example in a doc is not a block. Fences follow
 # CommonMark: up to three spaces of indent; a backtick opener's info string
 # holds no backtick; a closing fence repeats the opener's character at least
@@ -3871,7 +3871,7 @@ FNR == 1 { state = 0; infence = 0; blk = 0; prev = "" }
   if (infence) {
     if (closes(line)) {
       if (blk) printf "%s\037%d\037%s\037%d\037%d\037%d\0370\n", FILENAME, bline, link, elk, bline + 1, FNR - 1
-      infence = 0; blk = 0
+      infence = 0; blk = 0; prev = ""
       next
     }
     if (blk) {
@@ -3901,7 +3901,7 @@ FNR == 1 { state = 0; infence = 0; blk = 0; prev = "" }
   }
   if (isfence) {
     sub(/^[ \t]+/, "", t)
-    infence = 1
+    infence = 1; prev = ""
     if (state == 2 && t ~ /^mermaid([ \t]|$)/) { blk = 1; bline = FNR; elk = 0; first = 1; fm = 0 }
     state = 0
     next
