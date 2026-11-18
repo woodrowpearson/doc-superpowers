@@ -1365,10 +1365,11 @@ AI_WORKFLOWS="doc-audit-update doc-review-pr doc-release doc-spec-verify doc-pr-
 AI_USES="anthropics/claude-code-action"
 ALL_REPO=$(installed_repo --all --workflows=all) || ALL_REPO=""
 # --workflows=all skips doc-ledger-publish on a host without
-# docs/ledger/config.json (final review OPS-I2); named, it installs: every
+# docs/ledger/config.json (final review OPS-I2), and never installs
+# doc-index-resolve (design 2026-11-17 R2); named, they install: every
 # template is then on disk.
 if [ -n "$ALL_REPO" ]; then
-  ( cd "$ALL_REPO" && PATH="$BASH_PATH" "$BASH_BIN" "$INSTALLER" install --ci --workflows=doc-ledger-publish ) > /dev/null 2>&1 || ALL_REPO=""
+  ( cd "$ALL_REPO" && PATH="$BASH_PATH" "$BASH_BIN" "$INSTALLER" install --ci --workflows=doc-ledger-publish,doc-index-resolve ) > /dev/null 2>&1 || ALL_REPO=""
 fi
 
 # _need_all_repo <label>: a FAIL, and 1, when the install --all fixture failed.
@@ -1467,7 +1468,7 @@ test_i8_every_job_has_a_timeout() {
   done
   [ -z "$bad" ] || printf '%s' "$bad"
   assert_eq "" "$bad" "no job without timeout-minutes"
-  assert_eq "9" "$n" "9 installed workflows checked"
+  assert_eq "10" "$n" "10 installed workflows checked"
 }
 
 test_i8_pins_carry_exact_versions() {
@@ -1964,7 +1965,7 @@ test_templates_keep_no_git_token_on_disk() {
         then "\($wf) / \($job): a checkout without persist-credentials: false\n"
         elif ((.uses // "") | startswith($u + "@")) and ((.with.use_commit_signing | tostring) != "true")
         then "\($wf) / \($job): the AI action without use_commit_signing (it would write the token into the remote URL)\n"
-        elif ((.run // "") | test("commit-changes\\.sh --allow|commit-and-push\\.sh|ledger-publish\\.sh")) and (.env.DOC_SUPERPOWERS_GIT_TOKEN != "${{ github.token }}") and ((.run // "") | test("--check-only") | not)
+        elif ((.run // "") | test("commit-changes\\.sh --allow|commit-and-push\\.sh|ledger-publish\\.sh|index-resolve\\.sh")) and (.env.DOC_SUPERPOWERS_GIT_TOKEN != "${{ github.token }}") and ((.run // "") | test("--check-only") | not)
         then "\($wf) / \($job): a step that pushes without DOC_SUPERPOWERS_GIT_TOKEN\n"
         else empty end')"
   done
@@ -1998,7 +1999,7 @@ test_git_token_helper_answers_only_for_the_jobs_host() {
   local block f out
   block=$(_git_token_block "$STEPS_DIR/commit-changes.sh")
   assert_true "commit-changes.sh holds the block" test -n "$block"
-  for f in "$HELPERS_DIR/commit-and-push.sh" "$STEPS_DIR/ledger-publish.sh"; do
+  for f in "$HELPERS_DIR/commit-and-push.sh" "$STEPS_DIR/ledger-publish.sh" "$STEPS_DIR/index-resolve.sh"; do
     assert_eq "$block" "$(_git_token_block "$f")" "${f##*/} holds the same bytes"
   done
   local repo probe
@@ -4251,6 +4252,35 @@ _ir_run() {
     RESOLVE_RETRY_SECONDS=0 GITHUB_STEP_SUMMARY="$out.summary" "$@" -- "$IR_STEP"
 }
 
+test_index_resolve_template() {
+  echo "Test: doc-index-resolve.yml — a push to the base and workflow_dispatch (one optional pr), never a pull_request event; one job: contents, pull-requests and actions write, one run at a time never cancelled, a timeout, the pinned checkout with no persisted token and full history, the jq pin, then the step with its env"
+  yaml_unavailable "index_resolve_template" && return 0
+  local dir json
+  dir=$(installed_repo --ci --workflows=doc-index-resolve --resolve-test-workflow=tests.yml) \
+    || { assert_true "install --ci --workflows=doc-index-resolve" false; return 0; }
+  assert_eq "# doc-superpowers workflow v1" "$(head -n 1 "$dir/.github/workflows/doc-index-resolve.yml")" "the workflow marker on line 1"
+  json=$(_yaml_json "$dir/.github/workflows/doc-index-resolve.yml")
+  assert_eq '["main"]' "$(jq -c '(.on // .true).push.branches' <<<"$json")" "runs on a push to the base branch"
+  assert_eq "pr|false|string" "$(jq -r '(.on // .true).workflow_dispatch.inputs | keys[0] + "|" + (.pr.required | tostring) + "|" + .pr.type' <<<"$json")" \
+    "…and by hand, with one optional pr input"
+  assert_eq "push,workflow_dispatch" "$(jq -r '(.on // .true) | keys | join(",")' <<<"$json")" "no other trigger (no pull_request, no pull_request_target)"
+  assert_eq '{"actions":"write","contents":"write","pull-requests":"write"}' "$(jq -cS '[.jobs[].permissions] | first' <<<"$json")" \
+    "permissions: contents, pull-requests and actions write, nothing else"
+  assert_eq "1|null" "$(jq -r '"\(.jobs | length)|\(.permissions)"' <<<"$json")" "one job, no workflow-level permissions"
+  assert_eq "doc-index-resolve|false" "$(jq -r '"\(.concurrency.group)|\(.concurrency["cancel-in-progress"])"' <<<"$json")" \
+    "one run at a time, never cancelled midway"
+  assert_eq "number" "$(jq -r '[.jobs[]["timeout-minutes"] | type] | first' <<<"$json")" "the job has a timeout"
+  assert_eq "false|0" "$(jq -r '[.jobs[].steps[] | select((.uses // "") | startswith("actions/checkout@"))] | first | "\(.with["persist-credentials"])|\(.with["fetch-depth"])"' <<<"$json")" \
+    "the checkout persists no token and has the full history"
+  assert_eq ".github/scripts/doc-superpowers-steps/install-jq.sh" "$(jq -r '[.jobs[].steps[] | select(.run != null)] | first | .run' <<<"$json")" "the jq pin first"
+  json=$(jq 'del(.jobs[].steps[] | select((.run // "") | endswith("install-jq.sh")))' <<<"$json")
+  assert_eq "1" "$(jq '[.jobs[].steps[] | select(.run != null)] | length' <<<"$json")" "then one run: step"
+  # shellcheck disable=SC2016  # the workflow's literal expressions
+  assert_eq '.github/scripts/doc-superpowers-steps/index-resolve.sh|main|${{ inputs.pr }}|tests.yml|${{ github.token }}|${{ github.token }}' \
+    "$(jq -r '[.jobs[].steps[] | select(.run != null)] | first | "\(.run | rtrimstr("\n"))|\(.env.BASE_BRANCH)|\(.env.PR)|\(.env.TEST_WORKFLOW)|\(.env.DOC_SUPERPOWERS_GIT_TOKEN)|\(.env.GH_TOKEN)"' <<<"$json")" \
+    "…the step, with the base, the dispatch input, the recorded test workflow and the job token for git and gh"
+}
+
 test_index_resolve_usage_errors() {
   echo "Test: index-resolve.sh — a missing base branch or repository, a pull request number that is not one, or a test workflow that is no file name: exit 3, nothing listed"
   _ir_fixture || { assert_true "fixture" false; return 0; }
@@ -4528,6 +4558,7 @@ test_index_resolve_listing_fails() {
   assert_contains "$(cat "$out.log")" "::error::" "…with an ::error:: line"
 }
 
+test_index_resolve_template
 test_index_resolve_usage_errors
 test_index_resolve_merges_an_index_only_conflict
 test_index_resolve_checks_without_a_test_workflow
