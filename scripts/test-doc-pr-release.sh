@@ -4470,7 +4470,7 @@ test_index_resolve_refuses_a_dropped_entry_and_workflow_files() {
 }
 
 test_index_resolve_refused_push() {
-  echo "Test: index-resolve.sh — a push the remote refuses: a branch that moved meanwhile is skipped (comment), one that did not move is failed (no comment, exit 2); a failure stops no other pull request"
+  echo "Test: index-resolve.sh — a push the remote refuses: a branch that moved meanwhile is skipped (comment), one that did not move (a protected branch, a ruleset) is failed, exit 2, with a comment naming the refusal, the local command and the label that opts out; a failure stops no other pull request"
   _ir_fixture || { assert_true "fixture" false; return 0; }
   local out rc
   out="$(harness_mktemp_d ir)/out"
@@ -4500,7 +4500,11 @@ HOOK
   assert_eq "2" "$rc" "a failed pull request: exit 2"
   assert_contains "$(grep 'PR #1 ' "$out.log")" "failed" "refused, not moved: failed"
   assert_contains "$(cat "$out.log")" "::error::" "…with an ::error:: line"
-  assert_true "…and no comment" test ! -e "$IR_GH/posted-1.json"
+  body=$(jq -r .body "$IR_GH/posted-1.json" 2>/dev/null || true)
+  assert_contains "$body" "<!-- doc-superpowers:index-resolve -->" "…and a comment, so the author hears of it"
+  assert_contains "$body" "refused" "…naming the refusal"
+  assert_contains "$body" "git merge origin/main" "…the local command"
+  assert_contains "$body" "no-index-resolve" "…and the label that opts out"
   assert_eq "$(cat "$IR_REMOTE/moved-to")" "$(git -C "$IR_REMOTE" rev-parse refs/heads/move)" "precondition: the hook moved the branch and refused the push"
   assert_contains "$(grep 'PR #2 ' "$out.log")" "skipped" "refused, moved: skipped"
   assert_contains "$(jq -r .body "$IR_GH/posted-2.json" 2>/dev/null)" "moved" "…its comment says the branch moved"

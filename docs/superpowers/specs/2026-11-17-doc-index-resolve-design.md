@@ -56,7 +56,10 @@ Anything else is a skip, with a comment naming the reason and the local command 
 **R5. The push.** The merge commit's first parent is the head that was read, so the push is a
 fast-forward. The step pushes with `--force-with-lease=refs/heads/<branch>:<head>`, so a branch
 that moved since it was read refuses the push. A refused push on a branch that moved is a skip; on
-a branch that did not move it is a failure. Git authenticates through the template family's
+a branch that did not move it is a failure. That case is a protected branch (a branch protection
+rule or ruleset: signed commits, linear history, restricted updates), which refuses every later run
+too. So it also gets the skip's comment: the refusal, the local command and the `no-index-resolve`
+label that opts out. Git authenticates through the template family's
 git-token block, reading `DOC_SUPERPOWERS_GIT_TOKEN`; no token is kept on disk.
 
 **R6. Checks on the merge.** A push with the workflow token starts no workflow. When the recorded
@@ -71,8 +74,8 @@ the same push.
 
 **R7. The comment.** Each pull request gets at most one comment from the resolver, marked with
 `<!-- doc-superpowers:index-resolve -->`. The step updates its own comment (author type `Bot`)
-rather than adding another. It comments on a merge and on a skip. It does not comment on a pull
-request it left out, did not touch, or failed on.
+rather than adding another. It comments on a merge, on a skip and on a refused push (R5). It does not
+comment on a pull request it left out or did not touch, or on any other failure.
 
 **R8. Outcomes and exit codes.** Each considered pull request ends `merged`, `skipped` or
 `failed`. The step prints one line per pull request and exits 0 when none failed, 2 when any

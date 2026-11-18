@@ -20,7 +20,8 @@
 # written with `git merge-tree --write-tree` (the working tree is never left
 # mid-merge), its first parent the head, and pushed with
 # --force-with-lease=refs/heads/<branch>:<head>: a branch that moved meanwhile
-# refuses it (skipped), and a refusal on a branch that did not move fails. The
+# refuses it (skipped), and a refusal on a branch that did not move (a branch
+# protection rule or ruleset) fails, with a comment that says so. The
 # driver and the attribute that routes the index to it are given to git for
 # the merge alone (git -c, --attr-source): the repository's config and
 # attributes are not read or written for them.
@@ -199,11 +200,12 @@ upsert_comment() {
   fi
 }
 
-# skip <n> <branch> <reason, one Markdown sentence> <log detail>
-skip() {
+# local_fix <headline> <reason, one Markdown sentence>: the comment for a pull
+# request the resolver could not merge or could not push, into body.md.
+local_fix() {
   {
     echo "$MARKER"
-    echo "**doc-index-resolve could not merge \`$(tick "$BASE_BRANCH")\` into this branch.** $3 Nothing was pushed."
+    echo "**$1** $2 Nothing was pushed."
     echo ""
     echo "To merge it yourself, in a clone with doc-superpowers' index merge driver registered (\`scripts/hooks/install.sh install --git\`):"
     echo ""
@@ -212,11 +214,29 @@ skip() {
     echo ""
     echo "Resolve any other conflict, commit, and push. The label \`$LABEL\` turns this resolver off for this pull request."
   } > "$T/body.md"
+}
+
+# skip <n> <branch> <reason, one Markdown sentence> <log detail>
+skip() {
+  local_fix "doc-index-resolve could not merge \`$(tick "$BASE_BRANCH")\` into this branch." "$3"
   if upsert_comment "$1" "$T/body.md"; then
     N_SKIPPED=$((N_SKIPPED + 1))
     say "$1" "$2" skipped "$4"
   else
     fail "$1" "$2" "skipped ($4), and the comment that says so could not be written"
+  fi
+}
+
+# refused <n> <branch> <head>: the push was refused while the branch was still
+# at <head> (a branch protection rule or ruleset). Failed, and the author is
+# told, since every later run would be refused the same way.
+refused() {
+  local_fix "doc-index-resolve merged \`$(tick "$BASE_BRANCH")\` into this branch, but GitHub refused its push." \
+    "The branch was still at ${3:0:12}, so a branch protection rule or ruleset (signed commits, linear history, restricted updates) refused the workflow token's push; the resolver's run log has git's message."
+  if upsert_comment "$1" "$T/body.md"; then
+    fail "$1" "$2" "the push was refused while the branch was still at ${3:0:12} (git's message is above; the comment says so)"
+  else
+    fail "$1" "$2" "the push was refused while the branch was still at ${3:0:12} (git's message is above), and the comment that says so could not be written"
   fi
 }
 
@@ -392,7 +412,7 @@ resolve_one() {
       skip "$n" "$ref" "The branch moved while the resolver ran; the next push to \`$(tick "$BASE_BRANCH")\` looks again." \
         "the push was refused: the branch moved"
     else
-      fail "$n" "$ref" "the push was refused while the branch was still at ${head:0:12} (git's message is above)"
+      refused "$n" "$ref" "$head"
     fi
     return 0
   fi

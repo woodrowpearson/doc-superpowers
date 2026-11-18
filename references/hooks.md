@@ -257,8 +257,11 @@ pull request against it (or the one `workflow_dispatch` names):
   close and reopen.
 - **Skipped**, with a comment naming the reason and the local fix (`git merge origin/<base>` in a
   clone with the driver registered: `install --git`): any other case, and a branch that moved.
-- **Failed**, with no comment: a push refused while the branch did not move, or a call that cannot
-  run. Exit 2; otherwise 0, and 3 on a usage error. One comment per pull request, marked
+- **Failed**: a push refused while the branch did not move, or a call that cannot run. The refused
+  push is a protected branch: a branch protection rule or ruleset (signed commits, linear history,
+  restricted updates) forbids the workflow token's push. Every later run would be refused the same
+  way, so it gets the skip's comment, naming the refusal, the local command and the
+  `no-index-resolve` label that opts out. Any other failure has no comment. Exit 2; otherwise 0, and 3 on a usage error. One comment per pull request, marked
   `<!-- doc-superpowers:index-resolve -->`, the resolver's own (author type `Bot`) updated in
   place. The merge uses `git merge-tree --write-tree` with the driver given to git for that call
   alone (git 2.40 or later), so the checkout is never left mid-merge.
