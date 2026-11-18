@@ -965,7 +965,7 @@ The one list of diagram triggers: the templates, the depth guidance and SKILL.md
 
 ## Diagram File Naming
 
-Diagrams are co-located with their doc section, each named `{type}-{name}.png` — or `{type}.png` for the one diagram of its type (`c4-context.png`, `erd.png`). Agentic diagrams carry their own prefix, so a skill named like a workflow cannot collide with it. The Mermaid source stays in the doc under the PNG.
+Diagrams are co-located with their doc section, each named `{type}-{name}.png` — or `{type}.png` for the one diagram of its type (`c4-context.png`, `erd.png`). Agentic diagrams carry their own prefix, so a skill named like a workflow cannot collide with it. The Mermaid source stays in the doc under the PNG, in a `<details><summary>Mermaid source</summary>` block directly below the image link: `doc-tools.sh diagram render` finds each block there and renders it to the PNG that link names.
 
 | Diagram | Location | Filename |
 |---------|----------|----------|

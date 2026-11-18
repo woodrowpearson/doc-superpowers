@@ -9342,6 +9342,36 @@ test_diagram_render_for_real() {
   teardown
 }
 
+# R8 of the design: no tracked file outside the dated records and the release
+# history names a renderer service or the Mermaid MCP tool, whose URL outputs
+# put the diagram source in a link to an outside service. The needles are
+# built from parts, so this file does not name them itself; the skill names
+# the danger generically ("a renderer service", "an MCP tool's URL outputs").
+test_diagram_no_renderer_service_is_named() {
+  echo "test: diagram: no tracked file outside docs/plans, docs/issues, docs/archive, docs/superpowers and RELEASE-NOTES.md names a Mermaid renderer service or the Mermaid MCP tool"
+  if ! git -C "$_DG_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    record_skip "diagram renderer-service guard: the plugin is not a git checkout"
+    return 0
+  fi
+  local needle hits rc
+  for needle in "mermaid""\\.ink" "kro""ki" "mcp__""mermaid"; do
+    rc=0
+    hits=$(git -C "$_DG_ROOT" grep -n -i -E -e "$needle" -- . \
+      ':(exclude)docs/plans' ':(exclude)docs/issues' ':(exclude)docs/archive' \
+      ':(exclude)docs/superpowers' ':(exclude)RELEASE-NOTES.md' 2>&1) || rc=$?
+    assert_eq "1|" "$rc|$hits" "no tracked file names '${needle//\\/}'"
+  done
+  # The guard itself still finds a planted name.
+  local probe
+  probe=$(harness_mktemp_d diagram-guard-probe)
+  git -C "$probe" init -q
+  printf 'render it at https://%s/svg/x\n' "mermaid"".ink" > "$probe/notes.md"
+  git -C "$probe" add notes.md
+  rc=0
+  git -C "$probe" grep -q -i -E -e "mermaid""\\.ink" -- . ':(exclude)docs/plans' || rc=$?
+  assert_eq "0" "$rc" "control: the same search finds a planted name"
+}
+
 run_tests() {
   echo "=== doc-tools.sh test suite ==="
   echo ""
@@ -9664,6 +9694,7 @@ run_tests() {
   test_diagram_render_replaces_a_png_only_on_success
   test_diagram_install_browser
   test_diagram_render_for_real
+  test_diagram_no_renderer_service_is_named
 
   print_summary
 }

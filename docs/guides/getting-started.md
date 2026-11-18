@@ -12,7 +12,7 @@
 - [ ] A project to document (any language, any framework)
 
 Optional:
-- [ ] Mermaid MCP server configured (for PNG diagram rendering)
+- [ ] Node **18 or newer**, `npm`, and Chrome or Chromium — only for rendering diagrams to PNG (`doc-tools.sh diagram render`). The first render installs the pinned renderer into `~/.cache/doc-superpowers/diagram/` from the npm registry; it sends no diagram anywhere. With no browser, `doc-tools.sh diagram install-browser` installs a pinned `chrome-headless-shell` there. Without these the `diagram` action keeps the Mermaid source in the doc and reports the PNGs it could not render
 - [ ] [`gh`](https://cli.github.com), authenticated — only for the work ledger's GitHub adapters (`doc-superpowers:ledger-pr-gh`, `doc-superpowers:ledger-items-gh`) and `ledger init --sources github`
 - [ ] `python3` **3.9 or newer** — only for the writing lint (`doc-tools.sh writing`), standard library only, nothing to install; `DOC_SUPERPOWERS_PYTHON` names another interpreter. Without one, a writing verb prints `writing: skipped (needs python3 3.9 or later)` and exits 3
 - [ ] [`uv`](https://docs.astral.sh/uv/) — only for doc-search, the opt-in docs-and-code MCP server (`docs/search/config.json`): it runs the plugin's `search/` Python package, and fetches Python 3.12 when the host has none
@@ -69,7 +69,7 @@ No configuration required for the doc suite: `setup` (below) turns on what you c
 
 | Enhancement | How to Add | What It Enables |
 |-------------|-----------|-----------------|
-| Mermaid MCP | `claude mcp add` (`--scope user` for every project; `--scope project` writes `.mcp.json` at the project root, shared through git) | PNG diagram rendering instead of inline source |
+| Diagram renderer | Node 18 or newer, `npm` and Chrome or Chromium (`DOC_SUPERPOWERS_CHROME` names one; `doc-tools.sh diagram install-browser` installs one) | PNG diagrams rendered on your machine (`doc-tools.sh diagram render`) instead of inline source |
 
 Bundled: `scripts/doc-tools.sh` provides freshness tracking out of the box — content hashing for docs, content identity for code (the git object id of each code ref, recorded when a doc is indexed or re-baselined). No additional scripts needed.
 

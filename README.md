@@ -442,6 +442,7 @@ doc-superpowers/
 │   ├── leak-scan.sh              # Machine paths, emails and tokens in tracked files
 │   ├── ledger/                   # The work ledger's modules (lib.sh + sourced *.sh, *.jq, *.awk)
 │   ├── adapters/                 # Reference ledger adapters (ledger-pr-gh.sh, ledger-items-gh.sh; GitHub via gh)
+│   ├── diagram/                  # The local Mermaid renderer (Node 18+): pinned package.json + lock, render.mjs, browser.mjs
 │   ├── writing/                  # The writing lint (python3 3.9+, standard library only): lint.py, anchors.py, config.py + defaults.json, markdown.py, and tests/ (its unittest suite)
 │   ├── search/launch.sh          # doc-search's launcher (POSIX sh), copied to .claude/doc-superpowers/search-mcp.sh by install --search
 │   ├── merge-doc-index.sh        # Custom git merge driver for .doc-index.json
@@ -509,6 +510,7 @@ The skill runs the bundled tooling in `scripts/` and reads `references/` from it
 | `jq` | Yes, **≥ 1.6**; 1.8.2 advised | `brew install jq` / `apt install jq`. 1.6 is the floor: the index writers use `--args` / `$ARGS.positional`. `doc-tools.sh` refuses an older jq with a clear error, and warns once a day below the versions in [SECURITY.md](SECURITY.md) (jq, git, gawk) |
 | `sha256sum` or `shasum` | Yes | Standard on Linux/macOS respectively |
 | `python3` | Only for the writing lint (`doc-tools.sh writing`); **≥ 3.9**, 3.12 or later advised | Standard library only, nothing to install. `DOC_SUPERPOWERS_PYTHON` names another interpreter. A host without it skips the lint with exit 3; see [SECURITY.md](SECURITY.md) |
+| Node, `npm`, Chrome or Chromium | Only to render diagrams to PNG (`doc-tools.sh diagram render`); Node **≥ 18** | The first render installs the pinned renderer (`scripts/diagram/package-lock.json`) into `~/.cache/doc-superpowers/diagram/` from the npm registry. It renders in a local headless Chrome that refuses every outside request: no diagram leaves the machine. `DOC_SUPERPOWERS_CHROME` names a browser; `doc-tools.sh diagram install-browser` installs the pinned `chrome-headless-shell` into the cache. Without them the `diagram` action keeps the Mermaid source in the doc |
 | `uv` | Only for doc-search (a project with `docs/search/config.json`) | It runs the `search/` package (Python 3.12, which uv fetches if missing); see `references/search.md` |
 | `gh` (GitHub CLI), authenticated | Only for the work ledger's GitHub adapters | `doc-superpowers:ledger-pr-gh`, `doc-superpowers:ledger-items-gh` and `ledger init --sources github`, when a project's `docs/ledger/config.json` names them |
 

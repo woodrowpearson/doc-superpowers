@@ -569,7 +569,7 @@
       "id": 8,
       "name": "diagram-regenerate",
       "prompt": "I've restructured the API layer significantly. Can you regenerate the architecture diagrams? /doc-superpowers diagram",
-      "expected_output": "Should find docs containing mermaid code blocks, verify diagram accuracy against current code, check agentic inventory for missing workflow diagrams, regenerate PNGs to co-located diagrams/ dirs (architecture/diagrams/ and workflows/diagrams/). Should flag diagrams where code has diverged.",
+      "expected_output": "Should find docs containing mermaid code blocks, verify diagram accuracy against current code, check agentic inventory for missing workflow diagrams, regenerate PNGs to co-located diagrams/ dirs (architecture/diagrams/ and workflows/diagrams/) with doc-tools.sh diagram render, on this machine. Should flag diagrams where code has diverged.",
       "files": [],
       "assertions": [
         {
@@ -577,6 +577,12 @@
           "type": "tool_call_check",
           "description": "Searches docs/ for files containing mermaid code blocks",
           "command": "grep -rlF? '```mermaid' docs"
+        },
+        {
+          "name": "renders-locally",
+          "type": "tool_call_check",
+          "description": "Renders the PNGs on this machine with the plugin's pinned renderer, never a renderer service",
+          "command": "doc-tools\\.sh\"? diagram render"
         },
         {
           "name": "co-located-output",

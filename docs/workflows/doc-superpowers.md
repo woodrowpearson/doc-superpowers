@@ -315,7 +315,7 @@ Update is the **write counterpart** to audit's read-only analysis. It consumes a
    - **Multi-actor sequence diagram** — required if the skill dispatches sub-agents
    - **State diagram** — internals depth only, and only if state tracking is detected
 4. Verify diagram accuracy against current code
-5. Render via Mermaid MCP into the co-located `diagrams/` directories — `docs/architecture/diagrams/` for architecture diagrams, `docs/workflows/diagrams/` for workflow diagrams (or output inline source if unavailable) — and keep each diagram's source in the doc, in the `<details>` block under its PNG
+5. Render on this machine with `doc-tools.sh diagram render`, into the co-located `diagrams/` directories the image links name: `docs/architecture/diagrams/` for architecture diagrams, `docs/workflows/diagrams/` for workflow diagrams. Keep each diagram's source in the doc, in the `<details>` block under its PNG. The renderer is pinned and local: no renderer service, no URL output. Where it cannot run (exit 2), keep the source and report the PNGs left unrendered
 6. Flag missing diagrams as P2 Incomplete, and flag diverged ones (the code has moved on)
 
 ## Process: `sync` — Sync Doc Index
@@ -855,7 +855,7 @@ Claims are enabled when `docs/spec-claims/` exists. The chunk gate and the final
 
 | Script | What it does | Used by |
 |--------|--------------|---------|
-| `scripts/doc-tools.sh` (21 subcommands, `claims`, `ledger` and `writing` among them) — index writers: `build-index`, `update-index`, `add-entry`, `remove-entry`, `move-entry`, `set-code-refs`, `set-doc-type`, `upgrade-entries`, `deprecate-entry` | Write `docs/.doc-index.json` under its lock, one verb per kind of change (SKILL.md *Index-write routing*). Only `update-index` re-baselines a doc, and only one read against its code; `set-doc-type` retypes an entry in place, e.g. when a doc becomes a record; `upgrade-entries` fills pre-v3 entries' `code_oids` without a baseline reset; `move-entry` also repoints other entries' links and `code_refs` to the moved doc; the read-only `audit-merges` replays index merges through the driver to find silent reverts | `init`, `update`, `sync`, `spec-generate`, `spec-inject` |
+| `scripts/doc-tools.sh` (22 subcommands, `claims`, `ledger`, `writing` and `diagram` among them) — index writers: `build-index`, `update-index`, `add-entry`, `remove-entry`, `move-entry`, `set-code-refs`, `set-doc-type`, `upgrade-entries`, `deprecate-entry` | Write `docs/.doc-index.json` under its lock, one verb per kind of change (SKILL.md *Index-write routing*). Only `update-index` re-baselines a doc, and only one read against its code; `set-doc-type` retypes an entry in place, e.g. when a doc becomes a record; `upgrade-entries` fills pre-v3 entries' `code_oids` without a baseline reset; `move-entry` also repoints other entries' links and `code_refs` to the moved doc; the read-only `audit-merges` replays index merges through the driver to find silent reverts | `init`, `update`, `sync`, `spec-generate`, `spec-inject` |
 | `scripts/doc-tools.sh` — read-only checks: `check-freshness`, `status`, `implementation-status` | Report freshness (`status`: one doc's; `check-freshness`: all, or scoped by `--tree` / `--code-refs-from`) or an ADR's or SPEC's realization state | Discovery, `audit`, `review-pr`, `update`, `sync`, `spec-*`, the hooks and CI |
 | `scripts/doc-tools.sh` — `set-implementation` | Writes one entry of an ADR's `Implementation:` or a SPEC's `Realized-by:` block; `update-index` records the entries in the index | No flow above calls it |
 | `scripts/doc-tools.sh` — `bump-version`, `check-version`, `fragments list` / `validate` / `merge` | Write and verify the version in the manifests the project has; list, validate and merge the per-PR release-notes fragments | `release` (steps 3, 8, 9); the CI release templates |
@@ -971,7 +971,7 @@ The phases are the three of the pipeline flowchart above.
 
 | Tool | Purpose | When Called |
 |------|---------|-----------|
-| `mcp__mermaid__generate_mermaid_diagram` | Render Mermaid source to PNG | `diagram` action, `init` action (diagram generation step) |
+| `scripts/doc-tools.sh diagram render` (with `scripts/diagram/render.mjs`) | Render each Mermaid source block to its PNG on this machine: the pinned Mermaid in a local headless Chrome that refuses every outside request | `diagram` action, `init` action (diagram generation step) |
 
 ### Artifacts
 

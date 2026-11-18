@@ -1005,6 +1005,7 @@ _scored='review-pr-scoped|identifies-changed-files|### `review-pr`
 review-pr-scoped|base-from-origin-head|### `review-pr`
 review-pr-scoped|scoped-freshness-check|### `review-pr`
 diagram-regenerate|finds-mermaid-blocks|### `diagram`
+diagram-regenerate|renders-locally|### `diagram`
 audit-stale-docs|runs-check-freshness|### Run Baseline Checks
 update-from-audit|runs-verification-gate|### `update`
 update-from-audit|re-keys-with-move-entry|### `update`

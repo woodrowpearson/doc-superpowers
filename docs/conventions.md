@@ -13,7 +13,7 @@ Follows [obra/superpowers](https://github.com/obra/superpowers) skill convention
 
 ## Code Style
 
-The shipped scripts — `scripts/doc-tools.sh`, `scripts/merge-doc-index.sh`, the installer, the hook scripts and the CI helpers — are bash, written for the floors in README.md → *Dependencies*: bash ≥ 3.2, `jq` ≥ 1.6, and the POSIX userland as stock macOS and Linux ship it. The one exception is the writing engine in `scripts/writing/`: Python 3.9 or later, standard library only, run by `doc-tools.sh writing` (`references/writing.md`). Its floor is held by running its unittest suite on a 3.9 interpreter (`check-ci.sh writing`), not by the bash rules below. `scripts/test-doc-tools.sh` enforces three of these rules statically, on every run and under any bash, so a violation fails on the Linux leg too, where no bash 3.2 or BSD userland would catch it by running:
+The shipped scripts — `scripts/doc-tools.sh`, `scripts/merge-doc-index.sh`, the installer, the hook scripts and the CI helpers — are bash, written for the floors in README.md → *Dependencies*: bash ≥ 3.2, `jq` ≥ 1.6, and the POSIX userland as stock macOS and Linux ship it. There are two exceptions. The writing engine in `scripts/writing/` is Python 3.9 or later, standard library only, run by `doc-tools.sh writing` (`references/writing.md`); its floor is held by running its unittest suite on a 3.9 interpreter (`check-ci.sh writing`), not by the bash rules below. The diagram renderer in `scripts/diagram/` (`render.mjs`, `browser.mjs`) is Node 18 or later: ES modules with the packages its lockfile pins, run by `doc-tools.sh diagram`. `engines.node` in its `package.json` states the floor, and its real-render test runs under the Node on `PATH`. `scripts/test-doc-tools.sh` enforces three of these rules statically, on every run and under any bash, so a violation fails on the Linux leg too, where no bash 3.2 or BSD userland would catch it by running:
 
 | Rule | Enforced by |
 |------|-------------|
@@ -201,7 +201,7 @@ Optional tools trigger fallbacks; a missing required tool fails, naming itself:
 
 | Missing | Fallback |
 |---------|----------|
-| Mermaid MCP | Inline Mermaid source |
+| Node 18+, `npm` or a browser (`doc-tools.sh diagram render` exits 2) | Inline Mermaid source; the PNGs not rendered are reported |
 | Doc-index (first run) | `check-freshness` exits 1 ("doc-index.json not found"); `init` builds it |
 | `git` or `jq` (required) | `doc-tools.sh` exits non-zero: "required command not found: jq" (or `git`) |
 | A `jq` older than 1.6 (required) | `doc-tools.sh` exits non-zero naming the requirement (`jq >= 1.6`: the index writers use `--args` / `$ARGS.positional`) and the version found |
