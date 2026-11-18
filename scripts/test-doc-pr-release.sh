@@ -4782,6 +4782,7 @@ test_index_resolve_skips_docs_it_cannot_recompute() {
   body=$(jq -r .body "$IR_GH/posted-1.json" 2>/dev/null || true)
   assert_contains "$body" '`docs/a.md`' "a text conflict: the comment names the doc"
   assert_contains "$body" "more than cite numbers" "…and why"
+  assert_contains "$body" "line 3 of the head's version" "…and the block's line in the head's version (R6)"
   body=$(jq -r .body "$IR_GH/posted-2.json" 2>/dev/null || true)
   assert_contains "$body" '`docs/notes.md`' "a doc the index does not key: the comment names it"
   body=$(jq -r .body "$IR_GH/posted-3.json" 2>/dev/null || true)
@@ -4791,6 +4792,115 @@ test_index_resolve_skips_docs_it_cannot_recompute() {
     assert_eq "$(git -C "$IR_DIR" rev-parse "$b")" "$(git -C "$IR_REMOTE" rev-parse "refs/heads/$b")" "$b: nothing pushed"
   done
   assert_eq "1" "$(git -C "$IR_DIR" worktree list | wc -l | tr -d ' ')" "no worktree is left"
+}
+
+test_index_resolve_skips_a_doc_not_fresh_on_either_side() {
+  echo "Test: index-resolve.sh — a doc stale but not modified on the head, or modified since its record on the base: skipped, the comment naming the doc and the side"
+  _ir_cite_fixture || { assert_true "fixture" false; return 0; }
+  local out rc body
+  out="$(harness_mktemp_d ir)/out"
+  # The head re-baselines, then changes the code again: stale, not modified.
+  _ir_cite_side stale "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" 2026-11-05T00:00:00Z
+  (cd "$IR_DIR" && git checkout -q stale && printf 'head extra\n' >> src/app/server.py && git commit -qam "code after the record" \
+    && git push -q origin stale && git checkout -q main)
+  _ir_cite_side fresh "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" 2026-11-05T00:00:00Z
+  _ir_cite_side main "$IR_MAIN_CODE" "$(_ir_doc 5-7 14)" 2026-11-10T00:00:00Z
+  assert_eq "stale|false" "$(_ir_dt check-freshness --tree stale 2>/dev/null | jq -r '.docs["docs/a.md"] | "\(.status)|\(.doc_modified)"')" \
+    "the fixture: docs/a.md is stale and unmodified on the head"
+  _ir_pr 1 stale false
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  assert_contains "$(grep 'PR #1 ' "$out.log")" "skipped" "stale on the head: skipped"
+  body=$(jq -r .body "$IR_GH/posted-1.json" 2>/dev/null || true)
+  assert_contains "$body" '`docs/a.md` does not read current' "…the comment names the doc"
+  assert_contains "$body" "on the head" "…and the head"
+  assert_eq "$(git -C "$IR_DIR" rev-parse stale)" "$(git -C "$IR_REMOTE" rev-parse refs/heads/stale)" "…nothing pushed"
+  # main edits the doc after its record: modified on the base.
+  (cd "$IR_DIR" && printf 'More.\n' >> docs/a.md && git commit -qam "an edit after the record" && git push -q origin main)
+  rm -f "$IR_GH/pull-1.json"
+  _ir_pr 2 fresh false
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  assert_contains "$(grep 'PR #2 ' "$out.log")" "skipped" "modified on the base: skipped"
+  body=$(jq -r .body "$IR_GH/posted-2.json" 2>/dev/null || true)
+  assert_contains "$body" '`docs/a.md` does not read current' "…the comment names the doc"
+  assert_contains "$body" 'on `main`' "…and the base branch"
+  assert_eq "$(git -C "$IR_DIR" rev-parse fresh)" "$(git -C "$IR_REMOTE" rev-parse refs/heads/fresh)" "…nothing pushed"
+}
+
+test_index_resolve_update_index_fails_in_the_worktree() {
+  echo "Test: index-resolve.sh — update-index fails in the worktree: exit 1 is a skip with a comment, above 1 a failure (exit 2, no comment); the worktree goes either way, nothing pushed"
+  _ir_cite_fixture || { assert_true "fixture" false; return 0; }
+  local out rc code dt
+  out="$(harness_mktemp_d ir)/out"
+  _ir_cite_side topic "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" 2026-11-05T00:00:00Z
+  _ir_cite_side main "$IR_MAIN_CODE" "$(_ir_doc 5-7 14)" 2026-11-10T00:00:00Z
+  _ir_pr 1 topic false
+  # A shim for the step's doc-tools.sh: update-index exits <code>, the rest
+  # is the vendored copy.
+  dt="$IR_DIR/.github/scripts/doc-tools.sh"
+  cp "$dt" "$IR_DIR/.github/scripts/doc-tools.real.sh"
+  for code in 1 2; do
+    printf '%s\n' '#!/usr/bin/env bash' \
+      "if [ \"\$1\" = update-index ]; then echo 'update-index: refused (shim)' >&2; exit $code; fi" \
+      'exec bash "$(dirname "$0")/doc-tools.real.sh" "$@"' > "$dt"
+    rm -f "$IR_GH/posted-1.json"
+    rc=0; _ir_run "$out" || rc=$?
+    if [ "$code" = 1 ]; then
+      assert_eq "0" "$rc" "update-index exit 1: exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+      assert_contains "$(grep 'PR #1 ' "$out.log")" "skipped" "…skipped"
+      assert_contains "$(jq -r .body "$IR_GH/posted-1.json" 2>/dev/null)" "update-index could not re-record" "…the comment says why"
+    else
+      assert_eq "2" "$rc" "update-index exit 2: the step exits 2"
+      assert_contains "$(grep 'PR #1 ' "$out.log")" "failed" "…the pull request failed"
+      assert_true "…with no comment" test ! -e "$IR_GH/posted-1.json"
+    fi
+    assert_contains "$(cat "$out.log")" "update-index: refused (shim)" "…update-index ran (its output is in the log)"
+    assert_eq "1" "$(git -C "$IR_DIR" worktree list | wc -l | tr -d ' ')" "…and its worktree is gone"
+    assert_eq "$(git -C "$IR_DIR" rev-parse topic)" "$(git -C "$IR_REMOTE" rev-parse refs/heads/topic)" "…nothing pushed"
+  done
+  mv "$IR_DIR/.github/scripts/doc-tools.real.sh" "$dt"
+}
+
+test_index_resolve_worktree_git_cannot_remove() {
+  echo "Test: index-resolve.sh — git cannot remove the re-record's worktree: its directory goes, prune drops it, and the next pull request in the run adds its own"
+  _ir_cite_fixture || { assert_true "fixture" false; return 0; }
+  local out rc real l
+  out="$(harness_mktemp_d ir)/out"
+  _ir_cite_side one "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" 2026-11-05T00:00:00Z
+  _ir_cite_side two "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" 2026-11-05T00:00:00Z
+  _ir_cite_side main "$IR_MAIN_CODE" "$(_ir_doc 5-7 14)" 2026-11-10T00:00:00Z
+  _ir_pr 1 one false
+  _ir_pr 2 two false
+  # A git on the step's PATH that refuses only to remove a worktree.
+  real=$(command -v git)
+  printf '%s\n' '#!/usr/bin/env bash' '[ "$1" = worktree ] && [ "$2" = remove ] && exit 1' \
+    "exec \"$real\" \"\$@\"" > "$IR_GH/bin/git"
+  chmod +x "$IR_GH/bin/git"
+  rc=0; _ir_run "$out" || rc=$?
+  rm -f "$IR_GH/bin/git"
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  l=$(cat "$out.log")
+  assert_contains "$(grep 'PR #1 ' <<<"$l")" "merged" "PR #1 is merged"
+  assert_contains "$(grep 'PR #2 ' <<<"$l")" "merged" "PR #2 is merged too: its worktree add was not refused"
+  assert_eq "1" "$(git -C "$IR_DIR" worktree list | wc -l | tr -d ' ')" "no worktree is left registered"
+}
+
+test_index_resolve_doc_not_a_regular_file() {
+  echo "Test: index-resolve.sh — a cite-numbers doc that is executable on the head (mode 100755): not a doc it rewrites, skipped as another file"
+  _ir_cite_fixture || { assert_true "fixture" false; return 0; }
+  local out rc
+  out="$(harness_mktemp_d ir)/out"
+  _ir_cite_side topic "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" 2026-11-05T00:00:00Z
+  (cd "$IR_DIR" && git checkout -q topic && chmod +x docs/a.md && git update-index --chmod=+x docs/a.md && git commit -qm "an executable doc" \
+    && git push -q origin topic && git checkout -q main)
+  _ir_cite_side main "$IR_MAIN_CODE" "$(_ir_doc 5-7 14)" 2026-11-10T00:00:00Z
+  _ir_pr 1 topic false
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  assert_contains "$(grep 'PR #1 ' "$out.log")" "skipped" "skipped"
+  assert_contains "$(jq -r .body "$IR_GH/posted-1.json" 2>/dev/null)" 'Files other than the doc index conflict: `docs/a.md`' "…as another file"
+  assert_eq "$(git -C "$IR_DIR" rev-parse topic)" "$(git -C "$IR_REMOTE" rev-parse refs/heads/topic)" "…nothing pushed"
 }
 
 test_index_resolve_cite_lines_with_a_workflow_file() {
@@ -4843,6 +4953,10 @@ test_index_resolve_recomputes_cite_lines
 test_index_resolve_recomputes_cite_lines_without_an_index_conflict
 test_index_resolve_skips_docs_it_cannot_recompute
 test_index_resolve_cite_lines_with_a_workflow_file
+test_index_resolve_skips_a_doc_not_fresh_on_either_side
+test_index_resolve_update_index_fails_in_the_worktree
+test_index_resolve_worktree_git_cannot_remove
+test_index_resolve_doc_not_a_regular_file
 
 
 # ============================================================================

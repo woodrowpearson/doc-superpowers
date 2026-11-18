@@ -138,7 +138,13 @@ DRIVER_ABS="$(cd "$(dirname "$DRIVER")" && pwd)/merge-doc-index.sh"
 T=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/index-resolve.XXXXXX") || cannot_run "cannot create a scratch directory"
 # drop_wt: the re-record's worktree (cite_merge) removed, when there is one.
 drop_wt() {
-  [ ! -e "$T/wt" ] || git worktree remove --force "$T/wt" >/dev/null 2>&1 || rm -rf "$T/wt"
+  [ -e "$T/wt" ] || return 0
+  if ! git worktree remove --force "$T/wt" >/dev/null 2>&1; then
+    # The directory goes by hand; prune then drops its registration, or the
+    # next pull request's worktree add at this path would refuse.
+    rm -rf "$T/wt"
+    git worktree prune >/dev/null 2>&1 || true
+  fi
 }
 trap 'drop_wt; rm -rf "$T"' EXIT
 
@@ -360,7 +366,9 @@ stage_of() {
 # (stages 1, 2 and 3), and keyed in the head's and the base's index.
 cite_doc() {
   case "$1" in *.md) ;; *) return 1 ;; esac
-  [ -n "$(stage_of "$1" 1 2)" ] && [ -n "$(stage_of "$1" 2 2)" ] && [ -n "$(stage_of "$1" 3 2)" ] || return 1
+  # A regular file on all three stages: no symlink, no executable.
+  [ "$(stage_of "$1" 1 1)" = 100644 ] && [ "$(stage_of "$1" 2 1)" = 100644 ] && [ "$(stage_of "$1" 3 1)" = 100644 ] \
+    || return 1
   jq -e --arg k "$1" '(.docs // {}) | has($k)' "$T/h.json" >/dev/null 2>&1 \
     && jq -e --arg k "$1" '(.docs // {}) | has($k)' "$T/b.json" >/dev/null 2>&1
 }
@@ -429,20 +437,29 @@ cite_merge_in() {
     fail "$n" "$ref" "cannot set up the worktree for update-index: $(head -n 1 "$T/err")"
     return 1
   fi
-  if ! (
-    cd "$T/wt" || exit 1
+  rc=0
+  (
+    cd "$T/wt" || exit 2
     set --
     while IFS= read -r doc; do set -- "$@" "$doc"; done < "$T/docs"
     plain_env "${BASH:-bash}" "$DOC_TOOLS" update-index "$@"
-  ) > "$T/update.log" 2>&1; then
+  ) > "$T/update.log" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
     sed 's/^/  update-index: /' "$T/update.log"
-    skip "$n" "$ref" "doc-tools.sh update-index could not re-record $(list_md < "$T/docs") on the merged files (the resolver's run log says why)." \
-      "update-index failed"
+    # Exit 1 is doc-tools' refusal of a doc; above it, it could not run.
+    if [ "$rc" -eq 1 ]; then
+      skip "$n" "$ref" "doc-tools.sh update-index could not re-record $(list_md < "$T/docs") on the merged files (the resolver's run log says why)." \
+        "update-index failed"
+    else
+      fail "$n" "$ref" "doc-tools.sh update-index could not run (exit $rc; its output is above)"
+    fi
     return 1
   fi
   # update-index stamps last_verified now, but the step only read the cites,
   # so it verified nothing (R5): each re-recorded entry keeps the newer of
   # the two sides' last_verified. A jq edit of that one field.
+  # max compares the values as strings: right for doc-tools' one form,
+  # ISO 8601 in UTC (2026-11-10T00:00:00Z).
   if ! jq --slurpfile h "$T/h.json" --slurpfile b "$T/b.json" --rawfile d "$T/docs" '
       reduce ($d | split("\n")[] | select(. != "")) as $k (.;
         .docs[$k].last_verified = ([$h[0].docs[$k].last_verified, $b[0].docs[$k].last_verified]
@@ -584,6 +601,16 @@ resolve_one() {
   fi
   tree=$(printf '%s\n' "$out" | sed -n 1p) || { fail "$n" "$ref" "cannot read the merged tree"; return 0; }
 
+  # No workflow file: the job token cannot push one. Read on the driver's
+  # tree, before the rewrite, which changes only docs and the index.
+  bring=$(git diff --name-only "$head" "$tree" -- .github/workflows/) \
+    || { fail "$n" "$ref" "git diff failed on the merge"; return 0; }
+  if [ -n "$bring" ]; then
+    skip "$n" "$ref" "The merge brings files under \`.github/workflows/\` ($(printf '%s\n' "$bring" | list_md)), which the workflow token cannot push." \
+      "the merge brings workflow files"
+    return 0
+  fi
+
   # The docs' cites recomputed and their entries re-recorded (R3, R5).
   final="$tree"
   if [ -s "$T/docs" ]; then
@@ -603,15 +630,6 @@ resolve_one() {
   if [ -n "$dropped" ]; then
     skip "$n" "$ref" "The merged doc index would drop entries that both sides keep: $(printf '%s\n' "$dropped" | list_md)." \
       "the merge would drop index entries ($(printf '%s\n' "$dropped" | head -n 5 | tr '\n' ' ' | sed 's/ $//'))"
-    return 0
-  fi
-
-  # No workflow file: the job token cannot push one.
-  bring=$(git diff --name-only "$head" "$final" -- .github/workflows/) \
-    || { fail "$n" "$ref" "git diff failed on the merge"; return 0; }
-  if [ -n "$bring" ]; then
-    skip "$n" "$ref" "The merge brings files under \`.github/workflows/\` ($(printf '%s\n' "$bring" | list_md)), which the workflow token cannot push." \
-      "the merge brings workflow files"
     return 0
   fi
 
