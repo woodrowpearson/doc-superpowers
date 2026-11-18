@@ -8816,6 +8816,110 @@ test_diagram_packages_are_pinned() {
   fi
 }
 
+# _dg_doc <path> <image-link|-> <mermaid source…>: a doc holding one block in
+# the slot the skill writes — the image link, then <details>, the summary
+# line and the mermaid fence. "-" writes no image link.
+_dg_doc() {
+  local path="$1" link="$2"
+  shift 2
+  mkdir -p "$(dirname "$path")"
+  {
+    printf '# %s\n\nSome prose.\n\n' "$(basename "$path" .md)"
+    if [ "$link" != - ]; then printf '![Diagram](%s)\n\n' "$link"; fi
+    printf '<details>\n<summary>Mermaid source</summary>\n\n```mermaid\n'
+    printf '%s\n' "$@"
+    printf '```\n\n</details>\n'
+  } >> "$path"
+}
+
+test_diagram_list_finds_blocks_and_targets() {
+  echo "test: diagram list prints each Mermaid source block under docs/ as JSON: the doc, the fence's line, the PNG of the image link above it, and whether it asks for ELK"
+  setup
+  local out rc
+  _dg_doc docs/architecture/overview.md diagrams/c4-context.png 'flowchart LR' '  A --> B'
+  _dg_doc docs/architecture/overview.md ./diagrams/../diagrams/second.png 'sequenceDiagram' '  A->>B: hi'
+  _dg_doc docs/workflows/flow.md diagrams/flow.png '---' 'config:' '  layout: elk' '---' 'flowchart LR' '  A --> B'
+  _dg_doc docs/workflows/init.md diagrams/init.png '%%{init: {"layout": "elk"}}%%' 'flowchart TD' '  A --> B'
+  _dg_doc docs/workflows/none.md - 'flowchart LR' '  A --> B'
+  # Not blocks: the slot shown inside another fence, and a bare mermaid fence.
+  mkdir -p docs/plans
+  printf '# Plan\n\n````markdown\n![X](diagrams/x.png)\n\n<details>\n<summary>Mermaid source</summary>\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\n</details>\n````\n' > docs/plans/example.md
+  printf '# Bare\n\n```mermaid\nflowchart LR\n  A --> B\n```\n' > docs/guides.md
+  rc=0
+  out=$("$DOC_TOOLS" diagram list 2>&1) || rc=$?
+  assert_eq "0" "$rc" "diagram list exits 0"
+  assert_eq "5" "$(jq 'length' <<<"$out" 2>/dev/null)" "five blocks: the fenced example and the bare fence are not blocks"
+  assert_eq '{"doc":"docs/architecture/overview.md","line":10,"png":"docs/architecture/diagrams/c4-context.png","elk":false}' \
+    "$(jq -c '.[0]' <<<"$out" 2>/dev/null)" "the first block: doc, the mermaid fence's line, the PNG beside the doc"
+  assert_eq '{"doc":"docs/architecture/overview.md","line":25,"png":"docs/architecture/diagrams/second.png","elk":false}' \
+    "$(jq -c '.[1]' <<<"$out" 2>/dev/null)" "a second block in the same doc; ./ and .. in the link are resolved"
+  assert_eq 'docs/workflows/flow.md|docs/workflows/diagrams/flow.png|true' \
+    "$(jq -r '.[2] | "\(.doc)|\(.png)|\(.elk)"' <<<"$out" 2>/dev/null)" "layout: elk in the front matter asks for ELK"
+  assert_eq 'docs/workflows/init.md|true' \
+    "$(jq -r '.[3] | "\(.doc)|\(.elk)"' <<<"$out" 2>/dev/null)" "an init directive with layout elk asks for ELK"
+  assert_eq 'docs/workflows/none.md|null' \
+    "$(jq -r '.[4] | "\(.doc)|\(.png)"' <<<"$out" 2>/dev/null)" "a block with no image link above it has no PNG (null)"
+
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/workflows/flow.md docs/architecture/overview.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "diagram list <doc>… exits 0"
+  assert_eq 'docs/workflows/flow.md docs/architecture/overview.md docs/architecture/overview.md' \
+    "$(jq -r '[.[].doc] | join(" ")' <<<"$out" 2>/dev/null)" "…and lists the named docs only, in the order named"
+
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/guides.md 2>&1) || rc=$?
+  assert_eq "0|[]" "$rc|$(jq -c . <<<"$out" 2>/dev/null)" "a named doc with no block lists nothing, exit 0"
+
+  # A link that leaves the repository, or names another site, has no PNG.
+  _dg_doc docs/out.md ../../elsewhere.png 'flowchart LR' '  A --> B'
+  _dg_doc docs/out.md 'https://example.com/x.png' 'flowchart LR' '  A --> B'
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/out.md 2>&1) || rc=$?
+  assert_eq "0|null null" "$rc|$(jq -r '[.[].png | tostring] | join(" ")' <<<"$out" 2>/dev/null)" "a link outside the repository or to a URL has no PNG"
+  teardown
+}
+
+test_diagram_usage_errors_exit_3() {
+  echo "test: diagram: usage errors exit 3; --help lists list, render and install-browser; outside a repository exits 2"
+  setup
+  local out rc v
+  rc=0
+  out=$("$DOC_TOOLS" diagram 2>&1) || rc=$?
+  assert_eq "3" "$rc" "a bare 'diagram' exits 3"
+  rc=0
+  out=$("$DOC_TOOLS" diagram draw 2>&1) || rc=$?
+  assert_eq "3" "$rc" "an unknown diagram verb exits 3"
+  assert_contains "$out" "unknown subcommand 'diagram draw'" "…naming it"
+  rc=0
+  out=$("$DOC_TOOLS" diagram list --bogus 2>&1) || rc=$?
+  assert_eq "3" "$rc" "an unknown option exits 3"
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/no-such.md 2>&1) || rc=$?
+  assert_eq "3" "$rc" "a doc that does not exist exits 3"
+  assert_contains "$out" "docs/no-such.md" "…naming it"
+  rc=0
+  out=$("$DOC_TOOLS" diagram render docs/no-such.md 2>&1) || rc=$?
+  assert_eq "3" "$rc" "render: a doc that does not exist exits 3"
+  rc=0
+  out=$("$DOC_TOOLS" diagram install-browser docs/x.md 2>&1) || rc=$?
+  assert_eq "3" "$rc" "install-browser takes no argument: exit 3"
+  rc=0
+  out=$("$DOC_TOOLS" diagram --help 2>&1) || rc=$?
+  assert_eq "0" "$rc" "diagram --help exits 0"
+  for v in list render install-browser; do
+    assert_contains "$out" "Usage: doc-tools.sh diagram $v" "diagram --help lists '$v'"
+  done
+  rc=0
+  out=$("$DOC_TOOLS" --help 2>&1) || rc=$?
+  assert_contains "$out" "diagram render" "doc-tools.sh --help lists the diagram verbs"
+  local nogit
+  nogit=$(harness_mktemp_d diagram-nogit)
+  rc=0
+  out=$(cd "$nogit" && GIT_CEILING_DIRECTORIES="$SUITE_TMP" "$DOC_TOOLS" diagram list 2>&1) || rc=$?
+  assert_eq "2" "$rc" "outside a git work tree: exit 2 (could not run)"
+  teardown
+}
+
 run_tests() {
   echo "=== doc-tools.sh test suite ==="
   echo ""
@@ -9130,6 +9234,8 @@ run_tests() {
 
   # --- Diagram verbs ---
   test_diagram_packages_are_pinned
+  test_diagram_list_finds_blocks_and_targets
+  test_diagram_usage_errors_exit_3
 
   print_summary
 }
