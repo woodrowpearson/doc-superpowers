@@ -18,8 +18,13 @@ server that provides it, two output types (`svg_url`, `png_url`) return a `merma
 carries the diagram source in its URL. Whoever opens that link sends the source to an outside
 service. A doc's diagrams describe its system, which a project may treat as confidential. The
 tool's local outputs depend on which server a client has configured, and clients without it had
-no renderer at all. Diagrams laid out with ELK (the Eclipse Layout Kernel, Mermaid's optional
-layered-layout plugin) could not be rendered by `mmdc`, which does not load layout plugins.
+no renderer at all.
+
+`mmdc` (`@mermaid-js/mermaid-cli`) is not the answer either, though it does render ELK (the Eclipse
+Layout Kernel, Mermaid's optional layered-layout plugin): the bundle of mermaid-cli 11.6.0
+registers it. mermaid-cli 12 needs Node 22.13 or later. `mmdc` offers no way to block the outside
+requests its page makes. A page of our own gives the request interception R2 requires, and pins
+every part (R3).
 
 ## Requirements
 
