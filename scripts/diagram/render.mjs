@@ -24,8 +24,10 @@
 // stays "strict", and `secure` (the keys a block may not set) stays
 // Mermaid's default, so no block can loosen the level either.
 //
-// Test seam: with DOC_TOOLS_DIAGRAM_SVG_DIR set, each rendered SVG is also
-// written there, named after its PNG (a.png -> a.svg).
+// Test seams: with DOC_TOOLS_DIAGRAM_SVG_DIR set, each rendered SVG is also
+// written there, named after its PNG (a.png -> a.svg); with
+// DOC_TOOLS_DIAGRAM_CLOSE_BROWSER=1 the browser is closed before the first
+// job, as if it had crashed.
 //
 // Nothing leaves the machine: every request a page makes to anything but a
 // data: or about: URL, or a file: URL under the page's own directory or the
@@ -38,7 +40,7 @@
 //
 // Exit 0: every job rendered. 1: a job failed. 2: could not run (bad
 // arguments, an unreadable job file, missing packages, a browser that will
-// not start).
+// not start or that fails under a job).
 
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -301,21 +303,33 @@ async function renderJob(job) {
     }
     return { id: job.id, ok: true, elk: Boolean(job.elk) };
   } catch (e) {
+    // The browser itself gone (crashed, killed): not this job's failure.
+    if (!browser.connected) throw e;
     return { id: job.id, ok: false, error: String((e && e.message) || e), blocked };
   } finally {
     await page.close().catch(() => {});
   }
 }
 
+// Test seam: with DOC_TOOLS_DIAGRAM_CLOSE_BROWSER=1 the browser is closed
+// before the first job, as if it had crashed.
+if (process.env.DOC_TOOLS_DIAGRAM_CLOSE_BROWSER === '1') await browser.close().catch(() => {});
+
+// A failure of the browser itself (a page it cannot open, a crash under a
+// job) is "could not run", exit 2, never a job's failure.
 let failed = 0;
+let browserError = null;
 try {
   for (const job of jobs) {
     const result = await renderJob(job);
     if (!result.ok) failed += 1;
     process.stdout.write(JSON.stringify(result) + '\n');
   }
+} catch (e) {
+  browserError = e;
 } finally {
   await browser.close().catch(() => {});
   fs.rmSync(pageDir, { recursive: true, force: true });
 }
+if (browserError) fail(`the browser failed: ${(browserError && browserError.message) || browserError}`);
 process.exit(failed > 0 ? 1 : 0);

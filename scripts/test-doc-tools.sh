@@ -9606,6 +9606,23 @@ test_diagram_render_refuses_local_files_for_real() {
   teardown
 }
 
+test_diagram_render_browser_failure_exits_2_for_real() {
+  echo "test: diagram render, for real: a browser that goes away under the renderer (the DOC_TOOLS_DIAGRAM_CLOSE_BROWSER seam) is 'could not run', exit 2, and no PNG is changed"
+  _dg_real_ready "diagram browser failure real render" || return 0
+  unset DOC_SUPERPOWERS_DIAGRAM_CONFIG
+  setup
+  local out rc
+  _dg_doc docs/a.md diagrams/a.png 'flowchart LR' '  A --> B'
+  mkdir -p docs/diagrams
+  printf 'old a' > docs/diagrams/a.png
+  DOC_TOOLS_DIAGRAM_CLOSE_BROWSER=1 _dg_real_render out rc "diagram browser failure real render" docs/a.md \
+    || { teardown; return 0; }
+  assert_eq "2" "$rc" "the browser gone before the first page: exit 2 ($(printf '%s' "$out" | tail -n 2 | tr '\n' ' '))"
+  assert_contains "$out" "the renderer could not run" "…reported as could not run"
+  assert_eq "old a" "$(cat docs/diagrams/a.png)" "…and the old PNG is kept"
+  teardown
+}
+
 # A graph whose edges bend under the default layout, and whose nodes ELK
 # places differently by strategy.
 _DG_BENT='flowchart LR
@@ -10107,6 +10124,7 @@ run_tests() {
   test_diagram_install_browser
   test_diagram_render_for_real
   test_diagram_render_refuses_local_files_for_real
+  test_diagram_render_browser_failure_exits_2_for_real
   test_diagram_render_config_for_real
   test_diagram_render_config_allowlist_for_real
   test_diagram_render_nested_front_matter_for_real
