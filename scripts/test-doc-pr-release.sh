@@ -4637,4 +4637,280 @@ test_index_resolve_dispatch_names_the_pull_request
 test_index_resolve_one_bad_answer_stops_no_other
 test_index_resolve_listing_fails
 
+
+# ============================================================================
+# cite-resolve.sh, which recomputes the cites of one doc whose conflict is
+# only cite line numbers (design 2026-11-18, R2–R4)
+# ============================================================================
+echo
+echo "=== cite-resolve ==="
+
+CR_SCRIPT="$(bash_bin_shim "$STEPS_DIR/cite-resolve.sh")"
+
+# _cr_seq <word> <from> <to>: the lines "<word> <k>", one per k.
+_cr_seq() {
+  local k
+  for ((k = $2; k <= $3; k++)); do printf '%s %s\n' "$1" "$k"; done
+}
+
+# _cr_repo <doc>: a repository (CR_DIR) whose main holds the merge base:
+# src/app/server.py ("server 1" to "server 20"), src/app/util.py ("util 1" to
+# "util 10") and docs/a.md holding <doc>. Branch pr, the pull request's head,
+# starts there too (a branch named head is HEAD on a case-insensitive disk).
+_cr_repo() {
+  CR_DIR=$(new_repo) || return 1
+  mkdir -p "$CR_DIR/src/app" "$CR_DIR/docs"
+  _cr_seq server 1 20 > "$CR_DIR/src/app/server.py"
+  _cr_seq util 1 10 > "$CR_DIR/src/app/util.py"
+  printf '%s\n' "$1" > "$CR_DIR/docs/a.md"
+  git -C "$CR_DIR" add -A && git -C "$CR_DIR" commit -q -m base && git -C "$CR_DIR" branch pr
+}
+
+# _cr_commit <branch> <path> <content>: a commit on <branch> in which <path>
+# holds <content> and a newline.
+_cr_commit() {
+  git -C "$CR_DIR" checkout -q "$1" && mkdir -p "$CR_DIR/$(dirname "$2")" \
+    && printf '%s\n' "$3" > "$CR_DIR/$2" && git -C "$CR_DIR" add -A && git -C "$CR_DIR" commit -q -m "$1: $2"
+}
+
+# _cr_run <out> [<arg>…]: merges pr and main with git merge-tree and runs
+# cite-resolve.sh on docs/a.md: the doc, pr, main, the merged tree and
+# the doc's stage 1, 2 and 3 blobs; or on the given arguments. Its stdout goes
+# to <out>, its stderr to <out>.err. Returns its exit code.
+_cr_run() {
+  local out="$1" mt rc=0
+  shift
+  if [ $# -eq 0 ]; then
+    mt=$(git -C "$CR_DIR" merge-tree --write-tree pr main) || true
+    set -- docs/a.md "$(git -C "$CR_DIR" rev-parse pr)" "$(git -C "$CR_DIR" rev-parse main)" "$(sed -n 1p <<<"$mt")" \
+      "$(_cr_stage 1 <<<"$mt")" "$(_cr_stage 2 <<<"$mt")" "$(_cr_stage 3 <<<"$mt")"
+  fi
+  (cd "$CR_DIR" && "$CR_SCRIPT" "$@") > "$out" 2> "$out.err" || rc=$?
+  return "$rc"
+}
+
+# _cr_stage <n>: docs/a.md's stage <n> blob in merge-tree's output (stdin).
+_cr_stage() {
+  awk -F'\t' -v n="$1" '$2 == "docs/a.md" { split($1, f, " "); if (f[3] == n) print f[2] }'
+}
+
+# The code moves of most cases: pr adds three lines at the top of
+# server.py, main two after its line 8. Base line 5 is pr's 8, main's 5 and
+# the merge's 8; base line 12 is pr's 15, main's 14 and the merge's 17.
+_cr_moves() {
+  _cr_commit pr src/app/server.py "$(_cr_seq head 1 3; _cr_seq server 1 20)"
+  _cr_commit main src/app/server.py "$(_cr_seq server 1 8; _cr_seq main 1 2; _cr_seq server 9 20)"
+}
+
+test_cite_resolve_moves_every_form() {
+  echo "Test: cite-resolve.sh — a full cite, a range, a list item and a continuation each move to the merged lines of their content; the rest of the doc is kept"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo '# A
+
+The handler is `src/app/server.py:5-7`, then `src/app/server.py:12`.
+Both: `src/app/server.py:5-7, 12`.
+Again: `src/app/server.py:5`, `:12`.
+
+The helper is `src/app/util.py:3`.' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit pr docs/a.md '# A
+
+The handler is `src/app/server.py:8-10`, then `src/app/server.py:15`.
+Both: `src/app/server.py:8-10, 15`.
+Again: `src/app/server.py:8`, `:15`.
+
+The helper is `src/app/util.py:3`.'
+  _cr_commit main docs/a.md '# A
+
+The handler is `src/app/server.py:5-7`, then `src/app/server.py:14`.
+Both: `src/app/server.py:5-7, 14`.
+Again: `src/app/server.py:5`, `:14`.
+
+The helper is `src/app/util.py:3`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(cat "$out.err"))"
+  assert_eq '# A
+
+The handler is `src/app/server.py:8-10`, then `src/app/server.py:17`.
+Both: `src/app/server.py:8-10, 17`.
+Again: `src/app/server.py:8`, `:17`.
+
+The helper is `src/app/util.py:3`.' "$(cat "$out")" "the doc, its cites at the merged lines"
+  assert_eq "6" "$(cat "$out.err")" "stderr: the number of cites recomputed"
+}
+
+test_cite_resolve_path_on_an_earlier_line() {
+  echo "Test: cite-resolve.sh — a continuation takes its path from an earlier line of the same paragraph"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The writer lives in `src/app/server.py`
+(write at `:12`).' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit pr docs/a.md 'The writer lives in `src/app/server.py`
+(write at `:15`).'
+  _cr_commit main docs/a.md 'The writer lives in `src/app/server.py`
+(write at `:14`).'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(cat "$out.err"))"
+  assert_eq 'The writer lives in `src/app/server.py`
+(write at `:17`).' "$(cat "$out")" "the continuation names the merged line"
+}
+
+test_cite_resolve_bare_file_name() {
+  echo "Test: cite-resolve.sh — a bare file name resolves to the one tracked file with that name"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `server.py:12`.' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit pr docs/a.md 'The loop is `server.py:15`.'
+  _cr_commit main docs/a.md 'The loop is `server.py:14`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(cat "$out.err"))"
+  assert_eq 'The loop is `server.py:17`.' "$(cat "$out")" "server.py is src/app/server.py"
+}
+
+test_cite_resolve_digit_outside_a_cite() {
+  echo "Test: cite-resolve.sh — a digit difference outside a cite is a text difference: exit 1, naming the doc and the block's line in the head's version"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo '# A
+
+Intro.
+
+3 loops at `src/app/server.py:12`.' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit pr docs/a.md '# A
+
+Intro.
+
+3 loops at `src/app/server.py:15`.'
+  # main also adds two lines above the block, which pr does not have.
+  _cr_commit main docs/a.md '# A
+
+Intro.
+More.
+More still.
+
+4 loops at `src/app/server.py:14`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "1" "$rc" "exit 1"
+  assert_contains "$(cat "$out.err")" '`docs/a.md`' "the reason names the doc"
+  assert_contains "$(cat "$out.err")" "line 5 of the head's version" "…and the block's line in the head's version"
+  assert_eq "1" "$(wc -l < "$out.err" | tr -d ' ')" "…on one line"
+  assert_eq "" "$(cat "$out")" "nothing on stdout"
+}
+
+test_cite_resolve_ambiguous() {
+  echo "Test: cite-resolve.sh — code duplicated with equal context five lines out: exit 1, ambiguous"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The copy is `src/app/server.py:6-8`.' || { assert_true "fixture" false; return 0; }
+  _cr_commit main src/app/server.py "$(_cr_seq dup 1 13; _cr_seq server 1 10)"
+  git -C "$CR_DIR" branch -f pr main
+  _cr_commit pr src/app/server.py "$(_cr_seq head 1 3; _cr_seq dup 1 13; _cr_seq server 1 10)"
+  _cr_commit pr docs/a.md 'The copy is `src/app/server.py:9-11`.'
+  _cr_commit main src/app/server.py "$(_cr_seq dup 1 13; _cr_seq server 1 10; _cr_seq dup 1 13)"
+  _cr_commit main docs/a.md 'The copy is `src/app/server.py:29-31`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "1" "$rc" "exit 1"
+  assert_contains "$(cat "$out.err")" "more than once" "the reason: the lines match more than once"
+}
+
+test_cite_resolve_sides_land_apart() {
+  echo "Test: cite-resolve.sh — the two sides' cites land on different merged lines: exit 1"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `src/app/server.py:12`.' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit pr docs/a.md 'The loop is `src/app/server.py:15`.'
+  # main's 13 is "server 11": main moved the cite to another line.
+  _cr_commit main docs/a.md 'The loop is `src/app/server.py:13`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "1" "$rc" "exit 1"
+  assert_contains "$(cat "$out.err")" "different lines" "the reason: the sides land on different lines"
+}
+
+test_cite_resolve_unanchored_outside_the_blocks() {
+  echo "Test: cite-resolve.sh — a cite outside the blocks that no side anchors in the merged code: exit 1"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `src/app/server.py:12`.
+
+The start is `src/app/server.py:8`.' || { assert_true "fixture" false; return 0; }
+  # Both sides add lines above base line 8: its line 8 names other code on
+  # each side and in the merge.
+  _cr_commit pr src/app/server.py "$(_cr_seq server 1 2; _cr_seq head 1 3; _cr_seq server 3 20)"
+  _cr_commit main src/app/server.py "$(_cr_seq server 1 4; _cr_seq main 1 2; _cr_seq server 5 20)"
+  _cr_commit pr docs/a.md 'The loop is `src/app/server.py:15`.
+
+The start is `src/app/server.py:8`.'
+  _cr_commit main docs/a.md 'The loop is `src/app/server.py:14`.
+
+The start is `src/app/server.py:8`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "1" "$rc" "exit 1"
+  assert_contains "$(cat "$out.err")" '`src/app/server.py:8`' "the reason names the cite"
+  assert_contains "$(cat "$out.err")" "not anchored" "…as not anchored"
+  assert_contains "$(cat "$out.err")" "line 3 of the head's version" "…at its line in the head's version"
+}
+
+test_cite_resolve_range_past_the_end() {
+  echo "Test: cite-resolve.sh — a cite range past the end of its file: exit 1"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `src/app/server.py:12`.' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit pr docs/a.md 'The loop is `src/app/server.py:40-42`.'
+  _cr_commit main docs/a.md 'The loop is `src/app/server.py:14`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "1" "$rc" "exit 1"
+  assert_contains "$(cat "$out.err")" "past the end" "the reason: past the end of the file"
+}
+
+test_cite_resolve_prose_port_outside_the_blocks() {
+  echo "Test: cite-resolve.sh — outside the blocks, a bare :N with no path in its paragraph (on :8090) names no code: it is text"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `src/app/server.py:12`.
+
+It listens on :8090.' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit pr docs/a.md 'The loop is `src/app/server.py:15`.
+
+It listens on :8090.'
+  _cr_commit main docs/a.md 'The loop is `src/app/server.py:14`.
+
+It listens on :8090.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(cat "$out.err"))"
+  assert_eq 'The loop is `src/app/server.py:17`.
+
+It listens on :8090.' "$(cat "$out")" "the cite moves; the port is kept"
+}
+
+test_cite_resolve_usage_and_cannot_run() {
+  echo "Test: cite-resolve.sh — a wrong argument count: exit 3; an object the repository does not hold: exit 2"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `src/app/server.py:12`.' || { assert_true "fixture" false; return 0; }
+  rc=0; _cr_run "$out" docs/a.md pr || rc=$?
+  assert_eq "3" "$rc" "two arguments: exit 3"
+  rc=0; _cr_run "$out" docs/a.md pr main "pr^{tree}" 0123456789012345678901234567890123456789 \
+    0123456789012345678901234567890123456789 0123456789012345678901234567890123456789 || rc=$?
+  assert_eq "2" "$rc" "a blob the repository does not hold: exit 2"
+  assert_contains "$(cat "$out.err")" "cite-resolve.sh: cannot run" "…with a line saying so"
+}
+
+test_cite_resolve_moves_every_form
+test_cite_resolve_path_on_an_earlier_line
+test_cite_resolve_bare_file_name
+test_cite_resolve_digit_outside_a_cite
+test_cite_resolve_ambiguous
+test_cite_resolve_sides_land_apart
+test_cite_resolve_unanchored_outside_the_blocks
+test_cite_resolve_range_past_the_end
+test_cite_resolve_prose_port_outside_the_blocks
+test_cite_resolve_usage_and_cannot_run
+
 print_summary
