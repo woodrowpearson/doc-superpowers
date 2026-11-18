@@ -816,6 +816,14 @@ assert_contains "$SKILLMD" '`workflows/{workflow-name}.md`' "the primary workflo
 assert_not_contains "$SKILLMD" '| `adr` (existing) |' "adr/specs README + template are unconditional, as init step 6 says"
 assert_contains "$SKILLMD" '| `docs/architecture.md` | `docs/architecture/system-overview.md` |' "update has a flat→structured mapping table"
 assert_not_contains "$SKILLMD" "rg -l" "diagram finds Mermaid docs without rg (not a guaranteed tool)"
+_dgm=$(_section "$SKILLMD" '### `diagram`')
+assert_contains "$_dgm" '"$DOC_TOOLS" diagram list' "diagram finds its blocks with diagram list"
+assert_not_contains "$SKILLMD" "grep -rlF '\`\`\`mermaid'" "…not with a grep for mermaid fences"
+assert_contains "$_dgm" "installs the pinned npm packages into the cache" "diagram says the first render installs the pinned packages"
+assert_contains "$_dgm" "needs the network once" "…which needs the network once"
+assert_contains "$_dgm" "downloads Chrome only when asked" "…and that install-browser downloads Chrome only when asked"
+assert_contains "$MAPPINGS" "needs the network once" "tool-mappings says the first render needs the network once"
+assert_contains "$MAPPINGS" "downloads Chrome only when asked" "…and that install-browser downloads Chrome only when asked"
 assert_contains "$SKILLMD" "find .claude/skills skills -maxdepth 2 -name SKILL.md" "agentic discovery finds plugin-layout skills, glob-free"
 assert_not_contains "$SKILLMD" "against actual SKILL.md actions" "audit/sync compare README with the host project, not this skill"
 _upd=$(_section "$SKILLMD" '### `update`')
