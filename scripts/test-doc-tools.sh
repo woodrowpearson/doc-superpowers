@@ -8879,6 +8879,35 @@ test_diagram_list_finds_blocks_and_targets() {
   teardown
 }
 
+# CommonMark's fence rules: a backtick fence's info string holds no backtick,
+# so a line whose backticks open and close on it is inline code, not a fence.
+# A tilde fence's info string may hold anything, so "~~~foo~~~" opens one.
+test_diagram_list_reads_fences_as_commonmark_does() {
+  echo "test: diagram list: a line of inline code in backticks opens no fence, so the slot after it is found; a tilde line with text after it opens one"
+  setup
+  local out rc
+  mkdir -p docs
+  printf '# Inline\n\n```foo``` is inline code, not a fence.\n\n' > docs/inline.md
+  _dg_doc docs/inline.md diagrams/inline.png 'flowchart LR' '  A --> B'
+  printf '# Backtick later\n\n```js and `x` later\n\n' > docs/inline2.md
+  _dg_doc docs/inline2.md diagrams/inline2.png 'flowchart LR' '  A --> B'
+  # A tilde fence with a tilde in its info string: the slot inside it is an
+  # example, not a block; the one after its closing fence is a block.
+  printf '# Tilde\n\n~~~foo~~~\n' > docs/tilde.md
+  _dg_doc docs/tilde.md diagrams/inside.png 'flowchart LR' '  A --> B'
+  printf '~~~\n\n' >> docs/tilde.md
+  _dg_doc docs/tilde.md diagrams/after.png 'flowchart LR' '  A --> B'
+  rc=0
+  out=$("$DOC_TOOLS" diagram list docs/inline.md docs/inline2.md docs/tilde.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "diagram list exits 0"
+  out=$(jq -c '.[]' <<<"$out" 2>&1)
+  assert_contains "$out" '"png":"docs/diagrams/inline.png"' "a slot after a line of inline code (\`\`\`foo\`\`\`) is found"
+  assert_contains "$out" '"png":"docs/diagrams/inline2.png"' "…and after a line whose would-be info string holds a backtick further on"
+  assert_not_contains "$out" '"png":"docs/diagrams/inside.png"' "a slot inside a ~~~foo~~~ fence is not a block"
+  assert_contains "$out" '"png":"docs/diagrams/after.png"' "…and the slot after that fence closes is one"
+  teardown
+}
+
 test_diagram_usage_errors_exit_3() {
   echo "test: diagram: usage errors exit 3; --help lists list, render and install-browser; outside a repository exits 2"
   setup
@@ -9687,6 +9716,7 @@ run_tests() {
   # --- Diagram verbs ---
   test_diagram_packages_are_pinned
   test_diagram_list_finds_blocks_and_targets
+  test_diagram_list_reads_fences_as_commonmark_does
   test_diagram_usage_errors_exit_3
   test_diagram_render_installs_once_into_the_cache
   test_diagram_render_needs_node_18

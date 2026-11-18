@@ -3810,7 +3810,10 @@ _dg_docs() {
 # <details> and <summary>Mermaid source</summary> (blank lines between them
 # allowed); link is the image link on the last non-blank line above
 # <details>, or "". Lines inside any other fence are never read as slot
-# lines, so a slot shown as an example in a doc is not a block. ELK: a
+# lines, so a slot shown as an example in a doc is not a block. Fences follow
+# CommonMark: up to three spaces of indent; a backtick opener's info string
+# holds no backtick; a closing fence repeats the opener's character at least
+# as many times, with only spaces or tabs after it. ELK: a
 # front-matter line "layout: elk…", an init directive naming layout elk, or a
 # flowchart-elk diagram.
 # shellcheck disable=SC2016  # awk program
@@ -3864,9 +3867,15 @@ FNR == 1 { state = 0; infence = 0; blk = 0; prev = "" }
     next
   }
   t = strip_indent(line)
+  isfence = 0
   if (substr(t, 1, 3) == "```" || substr(t, 1, 3) == "~~~") {
-    fch = substr(t, 1, 1); flen = 0
-    while (substr(t, 1, 1) == fch) { t = substr(t, 2); flen++ }
+    c = substr(t, 1, 1); n = 0
+    while (substr(t, 1, 1) == c) { t = substr(t, 2); n++ }
+    # A backtick fence info string holds no backtick (CommonMark): a line
+    # like ```foo``` is inline code and opens nothing. A tilde one may.
+    if (c != "`" || index(t, "`") == 0) { isfence = 1; fch = c; flen = n }
+  }
+  if (isfence) {
     sub(/^[ \t]+/, "", t)
     infence = 1
     if (state == 2 && t ~ /^mermaid([ \t]|$)/) { blk = 1; bline = FNR; elk = 0; first = 1; fm = 0 }
