@@ -7125,15 +7125,48 @@ doc-superpowers-steps:hooks/ci/doc-superpowers-steps:doc-superpowers-steps
 ledger:ledger:ledger
 ledger:adapters:adapters"
 
+# Scripts of scripts/ that a step script runs from beside itself, as
+# "$(dirname "$0")/<name>" (index-resolve.sh runs the index merge driver).
+# They ship into doc-superpowers-steps/ with the step scripts — named by
+# --step, or with the whole set — and are removed like them.
+_TOOLS_STEP_COMPANIONS="merge-doc-index.sh"
+
+# _tools_is_companion <name>: <name> is one of _TOOLS_STEP_COMPANIONS.
+_tools_is_companion() {
+  case " $_TOOLS_STEP_COMPANIONS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
 # _tools_part <part>: split one _TOOLS_PARTS entry into _TP_SET, _TP_SRC (an
-# absolute path), _TP_SUB and _TP_LABEL.
+# absolute path), _TP_SUB and _TP_LABEL, and list its source files in
+# _TP_FILES: the source dir's *.sh, *.awk and *.jq (an unmatched pattern stays
+# as it is: callers skip what is not a file), and for the step scripts the
+# companions, from scripts/.
 _tools_part() {
-  local r
+  local r c
   _TP_SET=${1%%:*}
   r=${1#*:}
   _TP_SRC="$SCRIPT_DIR/${r%%:*}"
   _TP_SUB=${r#*:}
   if [ "$_TP_SUB" = "$_TP_SET" ]; then _TP_LABEL="$_TP_SET helpers"; else _TP_LABEL="$_TP_SET $_TP_SUB"; fi
+  _TP_FILES=("$_TP_SRC"/*.sh "$_TP_SRC"/*.awk "$_TP_SRC"/*.jq)
+  if [ "$_TP_SET" = doc-superpowers-steps ]; then
+    for c in $_TOOLS_STEP_COMPANIONS; do
+      _TP_FILES+=("$SCRIPT_DIR/$c")
+    done
+  fi
+}
+
+# _tools_part_source <name>: the plugin's copy of the part's file <name> (a
+# companion's is in scripts/).
+_tools_part_source() {
+  if [ "$_TP_SET" = doc-superpowers-steps ] && [ ! -f "$_TP_SRC/$1" ] && _tools_is_companion "$1"; then
+    printf '%s' "$SCRIPT_DIR/$1"
+  else
+    printf '%s' "$_TP_SRC/$1"
+  fi
 }
 
 # _tools_copy <src> <dest> <mode for a new dest> [exec]: copy through a tmp
@@ -7198,8 +7231,8 @@ _tools_step_selection() {
     esac
     # From a vendored copy there is no set to check against: its helper
     # refusal (exit 1) follows.
-    if _tools_is_plugin && [ ! -f "$src/$n" ]; then
-      _usage_error "$1" "unknown step script '$s' (the plugin's are scripts/hooks/ci/doc-superpowers-steps/*.sh)"
+    if _tools_is_plugin && [ ! -f "$src/$n" ] && ! _tools_is_companion "$n"; then
+      _usage_error "$1" "unknown step script '$s' (the plugin's are scripts/hooks/ci/doc-superpowers-steps/*.sh, and $_TOOLS_STEP_COMPANIONS from scripts/)"
     fi
     case " $sel " in
       *" $n "*) ;;
@@ -7254,7 +7287,7 @@ cmd_tools_install() {
       _tools_part "$p"
       case " $helpers " in *" $_TP_SET "*) ;; *) continue ;; esac
       [ -d "$_TP_SRC" ] || _die "the plugin's helper directory $_TP_SRC is missing. Nothing was installed."
-      for f in "$_TP_SRC"/*.sh "$_TP_SRC"/*.awk "$_TP_SRC"/*.jq; do
+      for f in "${_TP_FILES[@]}"; do
         [ -f "$f" ] || continue
         _tools_in_steps "$f" "$steps" || continue
         _tools_no_link "$dest/$_TP_SUB/${f##*/}"
@@ -7280,7 +7313,7 @@ cmd_tools_install() {
     case " $helpers " in *" $_TP_SET "*) ;; *) continue ;; esac
     mkdir -p "$dest/$_TP_SUB" || _die "cannot create $dest/$_TP_SUB"
     n=0
-    for f in "$_TP_SRC"/*.sh "$_TP_SRC"/*.awk "$_TP_SRC"/*.jq; do
+    for f in "${_TP_FILES[@]}"; do
       [ -f "$f" ] || continue
       _tools_in_steps "$f" "$steps" || continue
       case "$f" in
@@ -7349,7 +7382,7 @@ cmd_tools_uninstall() {
     case " ${only:-$_TOOLS_HELPER_DIRS} " in *" $_TP_SET "*) ;; *) continue ;; esac
     [ -d "$dest/$_TP_SUB" ] || continue
     n=0
-    for p in "$_TP_SRC"/*.sh "$_TP_SRC"/*.awk "$_TP_SRC"/*.jq; do
+    for p in "${_TP_FILES[@]}"; do
       [ -f "$p" ] || continue
       _tools_in_steps "$p" "$steps" || continue
       f="$dest/$_TP_SUB/${p##*/}"
@@ -7445,7 +7478,7 @@ cmd_tools_status() {
         [ -f "$f" ] || continue
         n=$((n + 1))
         [ "$plugin" = 1 ] || continue
-        p="$_TP_SRC/${f##*/}"
+        p=$(_tools_part_source "${f##*/}")
         if [ ! -f "$p" ]; then
           added=$((added + 1))
         elif ! cmp -s "$p" "$f"; then

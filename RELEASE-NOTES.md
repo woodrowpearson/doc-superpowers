@@ -1,5 +1,31 @@
 # Release Notes
 
+## v3.15.0 (2026-11-18)
+
+This release adds a CI template that keeps open pull requests merged with their base when the only thing between them is the doc index. Every merge to the base rebuilds `docs/.doc-index.json`, so every open pull request that also rebuilt it then conflicts there, and only there. The merge driver resolves that conflict entry by entry, but git runs it only in a clone that registers it, and GitHub's merge button never does. A consumer project with many open pull requests measured this as its most frequent merge chore.
+
+### Upgrading from 3.14.x
+Nothing to do: the template is opt-in by name, and no installed workflow changes behavior. To use it:
+- **Install it by name:** `hooks install --ci --workflows=doc-index-resolve`. `--workflows=all` never installs it, because it pushes to other people's branches; once installed, `all` refreshes it.
+- **Name your test workflow** with `--resolve-test-workflow=<file>`. A push with the workflow token starts no workflow, so the resolver dispatches this one on each branch it merged. That file needs a `workflow_dispatch:` trigger on the default branch.
+- **If that workflow takes the pull request number as an input,** name the input with `--resolve-test-pr-input=<name>`. The dispatch then sends the number. GitHub refuses an input a workflow does not declare, so leave it unset otherwise.
+- **A workflow file of your own at `.github/workflows/doc-index-resolve.yml`** is kept, and the template is skipped (`1 skipped (existing non-managed)`). Remove or rename yours first.
+
+### Added
+- **`doc-index-resolve`, a shell CI template** (`references/hooks.md` → *CI templates*). It runs on each push to the base branch, and by hand for one pull request.
+  - It merges the base into each open same-repository pull request whose only conflict is the doc index, with the merge driver vendored beside its step (`.github/scripts/doc-superpowers-steps/index-resolve.sh` and `merge-doc-index.sh`).
+  - It accepts a merge only when git without the driver reports the index as the sole conflict, the driver merges it cleanly, no index entry either side holds is dropped, and the merge brings no file under `.github/workflows/`.
+  - It pushes with `--force-with-lease` on the head it read, so a branch that moved is left alone. It never touches a fork, a pull request labelled `no-index-resolve`, or one GitHub reports as mergeable.
+  - It keeps one comment per pull request, updated in place, saying what it merged or why it skipped. A branch that branch protection refuses gets that comment, with the label that opts out.
+  - One pull request's failure does not stop the others. The step exits 2 when any failed.
+  - Job-level permissions only (`contents`, `pull-requests`, `actions`: write), one run at a time, `persist-credentials: false`, the git-token block, zizmor clean. It needs git 2.40 or later on the runner (`merge-tree --attr-source`).
+- **Two recorded choices:** `--resolve-test-workflow=<file>` and `--resolve-test-pr-input=<name>`, in `installed.json` under `.tiers.ci`, with the usual precedence (flag, recorded, default empty).
+- **A step companion:** a script of `scripts/` that a vendored step runs beside itself ships with that step as a byte copy, and `check-self-install.sh` holds it.
+
+### Other
+- Not run on GitHub: the dispatch, the comment and the lease push are proven against a bare remote and a stubbed `gh`. The comment's author login and the 422 on an undeclared input are GitHub's behavior, not measured here.
+- Verified locally, since GitHub Actions does not run on this account. Under bash 5.x and `/bin/bash` 3.2: `test-doc-tools.sh` 1804, `test-hooks.sh` 4423, `test-spec-status-model.sh` 1067, `test-doc-pr-release.sh` 835, `test-merge-driver.sh` 844, `test-spec-claims.sh` 3269 and `test-ledger.sh` 3865 assertions passed, none failed. The writing suite passed under python3 3.13.3 and `/usr/bin/python3` 3.9.6, and the doc-search pytest suite passed (903, the 2 live tests skipped). So did `self-install`, `zizmor`, `gitleaks` and `check-version`. Not run: `dep-audit`, which needs the network; `search/uv.lock` is unchanged since 3.14.1.
+
 ## v3.14.1 (2026-11-16)
 
 This patch release stops a caller's `uv` settings from moving doc-search's environment. The launcher runs doc-search through `uv`, and `uv` reads settings from the environment as well as from its command line. A shell that exports `UV_PROJECT_ENVIRONMENT` for its own project therefore made the launcher's `uv` treat that folder as doc-search's environment and build it there.

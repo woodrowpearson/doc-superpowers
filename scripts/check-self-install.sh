@@ -38,10 +38,22 @@ state=.claude/doc-superpowers/installed.json
 fail=0 git_fail=0
 drift() { echo "::error file=$1::$2"; fail=1; }
 esc() { printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'; }
+# companion <name>: a script of scripts/ that doc-tools.sh vendors beside the
+# step scripts (its _TOOLS_STEP_COMPANIONS, read from the checkout's copy).
+companions=$(sed -n 's/^_TOOLS_STEP_COMPANIONS="\(.*\)"$/\1/p' scripts/doc-tools.sh)
+companion() {
+  case " $companions " in
+    *" $1 "*) [ -f "scripts/$1" ] ;;
+    *) return 1 ;;
+  esac
+}
 [ -f "$state" ] || { echo "::error::$state is missing"; exit 1; }
 base=$(esc "$(jq -r '.tiers.ci.base_branch' "$state")")
 cron=$(esc "$(jq -r '.tiers.ci.cron' "$state")")
 strict=$(jq -r 'if .tiers.ci.ci_strict == true then 1 else 0 end' "$state")
+# The test workflow doc-index-resolve dispatches (none: empty).
+rtw=$(esc "$(jq -r '.tiers.ci.resolve_test_workflow // empty' "$state")")
+rpi=$(esc "$(jq -r '.tiers.ci.resolve_test_pr_input // empty' "$state")")
 installed=$(jq -r '.tiers.ci.workflows // {} | to_entries[] | select(.value.state == "installed") | .key' "$state")
 version="" market="" steps_run=""
 [ -n "$installed" ] || drift "$state" "records no installed workflow"
@@ -71,6 +83,8 @@ for t in scripts/hooks/ci/*.yml; do
   sed -e "s|__BASE_BRANCH__|$base|g" -e "s|__VERSION__|$version|g" \
     -e "s|__CRON_SCHEDULE__|$cron|g" -e "s|__CI_STRICT__|$strict|g" \
     -e "s|__MARKETPLACE_URL__|$market|g" -e "s|__PLUGIN_COMMIT__|$pin|g" \
+    -e "s|__RESOLVE_TEST_WORKFLOW__|$rtw|g" \
+    -e "s|__RESOLVE_TEST_PR_INPUT__|$rpi|g" \
     "$t" > "$work/$w.rendered.yml"
   diff -u "$work/$w.rendered.yml" "$f" \
     || drift "$f" "differs from $t rendered with the choices in $state"
@@ -117,6 +131,11 @@ for d in .github/scripts/*/; do
   esac
   for f in ".github/scripts/$d"/*; do
     p="$src/$(basename "$f")"
+    # A step companion (doc-tools.sh's _TOOLS_STEP_COMPANIONS: the index merge
+    # driver) is a script of scripts/ vendored beside the step that runs it.
+    if [ "$d" = doc-superpowers-steps ] && [ ! -f "$p" ] && companion "$(basename "$f")"; then
+      p="scripts/$(basename "$f")"
+    fi
     if [ ! -f "$p" ]; then
       drift "$f" "is not a plugin helper (no $p)"
       continue
@@ -144,6 +163,11 @@ while [ -n "$queue" ]; do
   case " $need " in *" $n "*) continue ;; esac
   need="$need $n"
   p=scripts/hooks/ci/doc-superpowers-steps/$n
+  if [ ! -f "$p" ] && companion "$n"; then
+    [ -x ".github/scripts/doc-superpowers-steps/$n" ] \
+      || drift ".github/scripts/doc-superpowers-steps" "lacks $n, which an installed workflow's step script runs"
+    continue
+  fi
   [ -f "$p" ] || continue
   [ -x ".github/scripts/doc-superpowers-steps/$n" ] \
     || drift ".github/scripts/doc-superpowers-steps" "lacks $n, which an installed workflow's step script runs"

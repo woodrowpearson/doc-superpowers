@@ -131,8 +131,9 @@ If you ask for a work ledger (or `docs/ledger/config.json` already exists), it a
 /doc-superpowers hooks install --claude        # Claude Code hooks only (per-user)
 /doc-superpowers hooks install --ci            # GitHub Actions: the 2 shell workflows
 
-# The others are opt-in by name: the Claude-powered ones and the shell doc-ledger-publish
+# The others are opt-in by name: the Claude-powered ones and the shell doc-ledger-publish and doc-index-resolve
 /doc-superpowers hooks install --ci --workflows=doc-release
+/doc-superpowers hooks install --ci --workflows=doc-index-resolve --resolve-test-workflow=tests.yml  # merges the base into PRs that conflict only in the doc index; never by --workflows=all
 /doc-superpowers hooks install --ci --workflows=none                 # vendor doc-tools.sh only
 
 # With a work ledger (docs/ledger/config.json): its opt-in sets, never part of --all
@@ -148,7 +149,7 @@ The installer acts on the repository's top level from any subdirectory, puts git
 
 **Upgrading from 2.x?** Re-run every tier you use (`/doc-superpowers hooks status` marks each hook, script or setting another version installed `⚠ … outdated`), and read the README's [Upgrading from 2.x](../../README.md#upgrading-from-2x): v2's AI workflows stay installed until you remove them, the Claude tier's files must be untracked (each teammate then re-runs `install --claude`), design specs typed `spec` are retyped with `set-doc-type` (`--stdin` for many), and `doc-tools.sh upgrade-entries --all` fills a v2 index's `code_oids` without re-baselining any doc.
 
-The CI tier records its choices — the workflow set, `--base-branch`, `--cron`, `--ci-strict`, and `--marketplace-url` when given — in `.claude/doc-superpowers/installed.json` (commit it); a plain `install --ci` reproduces them. A workflow you uninstalled with `/doc-superpowers hooks uninstall --ci --workflows=doc-release` is NOT re-added on the next no-flag `install --ci` — re-add it with `--workflows=doc-release` (explicit beats state) or `--force` (bypass state-respect). Use `--transient` on uninstall to mark "remove for now but re-add automatically next time."
+The CI tier records its choices — the workflow set, `--base-branch`, `--cron`, `--ci-strict`, and `--marketplace-url`, `--resolve-test-workflow` and `--resolve-test-pr-input` when given — in `.claude/doc-superpowers/installed.json` (commit it); a plain `install --ci` reproduces them. A workflow you uninstalled with `/doc-superpowers hooks uninstall --ci --workflows=doc-release` is NOT re-added on the next no-flag `install --ci` — re-add it with `--workflows=doc-release` (explicit beats state) or `--force` (bypass state-respect). Use `--transient` on uninstall to mark "remove for now but re-add automatically next time."
 
 Independent of hooks, you can vendor `doc-tools.sh` itself into a consumer repo. Inside a session the skill resolves the tool itself (SKILL.md, *Detect Bundled Tooling*: `${CLAUDE_SKILL_DIR}/../../scripts/doc-tools.sh`, the plugin root two directories above the skill). From a terminal, set `$DOC_TOOLS` to that same file — the path depends on how the skill was installed:
 

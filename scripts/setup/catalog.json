@@ -144,6 +144,7 @@
       "options": [
         "doc-freshness-pr",
         "doc-freshness-schedule",
+        "doc-index-resolve",
         "doc-ledger-publish",
         "doc-audit-update",
         "doc-pr-full-cycle",
@@ -160,6 +161,7 @@
       "option_details": {
         "doc-freshness-pr": "(default set) runs on PR open/sync; contents: read, pull-requests: write; one PR comment (updated each push); --ci-strict fails the check.",
         "doc-freshness-schedule": "(default set) runs on a weekly cron; contents: read, issues: write; opens/updates/closes an audit issue (with docs/spec-claims/: also for spec-claims findings).",
+        "doc-index-resolve": "(no AI; by name only, never by all) runs on a push to the base branch, and by hand; contents + pull-requests + actions: write; merges the base into each open same-repository PR whose only conflict is docs/.doc-index.json (merged by the vendored index merge driver), pushes that merge to the PR branch with a lease, dispatches the test workflow --resolve-test-workflow names, and writes one PR comment; a PR labelled no-index-resolve is left alone.",
         "doc-ledger-publish": "(no AI) runs every 30 minutes, and by hand; contents: write; pull-requests + issues: read; with docs/ledger/config.json, ledger publish pushes one commit to the views branch (views.branch, default doc-ledger-views) and, with in-flight awareness on, deletes stale in-flight refs; without it, nothing.",
         "doc-audit-update": "(AI) runs on a push to a non-base branch that leaves indexed docs stale or missing (not Dependabot's); contents: write; a checked step commits docs/ and indexed docs to that branch: the doc updates and the audit report itself (docs/plans/<date>-audit-report.md), one per run that finds work.",
         "doc-pr-full-cycle": "(AI) runs on PR open touching indexed docs or their code; contents + pull-requests: write; a checked step commits docs/ and indexed docs to the PR branch.",
