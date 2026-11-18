@@ -12503,10 +12503,10 @@ test_setup_prompt_items() {
   assert_true "…08 opened the Terminal command group, 01 ticked it: the shim written" test -f "$HOME/.local/bin/doc-superpowers"
   assert_not_contains "$RUN_ERR" "value too great" "…no octal error"
   assert_not_contains "$RUN_OUT" "harness=claude-code" "…and no --list catalog"
-  run_setup_prompt 'c\n5\n1\n09\n0\n99999999999999999999\nx\n\n\n\nq\n' --
-  assert_eq "0" "$RUN_RC" "the CI multi: 09, 0, a huge number, a word, then q: exit 0 (stderr: $RUN_ERR)"
-  assert_contains "$RUN_OUT" "  9) [x] doc-spec-verify" "…09 ticked the 9th workflow"
-  assert_eq "3" "$(grep -c 'answer a number from 1 to 9, or an empty line' <<<"$RUN_OUT")" "…0, the huge number and the word asked again"
+  run_setup_prompt 'c\n5\n1\n010\n0\n99999999999999999999\nx\n\n\n\nq\n' --
+  assert_eq "0" "$RUN_RC" "the CI multi: 010, 0, a huge number, a word, then q: exit 0 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "  10) [x] doc-spec-verify" "…010 ticked the 10th workflow (decimal, not octal 8)"
+  assert_eq "3" "$(grep -c 'answer a number from 1 to 10, or an empty line' <<<"$RUN_OUT")" "…0, the huge number and the word asked again"
   assert_eq "" "$RUN_ERR" "…nothing on stderr (no integer expression error)"
   assert_contains "$RUN_OUT" "Quit: nothing was written." "…q quit"
   assert_not_contains "$RUN_OUT" "harness=claude-code" "…and no --list catalog"
@@ -12770,7 +12770,7 @@ test_setup_tui_eof_quits() {
   before=$(setup_snapshot)
   # Space toggles in the tree and never chooses: on the summary, the review
   # and the per-user question it is no answer, so spaces alone write nothing.
-  for k in '' '\033[B\n' '\n' 'q' '\033[B\nq' '\033[B\033[B\033[B\n' "\\033[B\\n$(tui_downs 4)\\n$(tui_downs 12)e" \
+  for k in '' '\033[B\n' '\n' 'q' '\033[B\nq' '\033[B\033[B\033[B\n' "\\033[B\\n$(tui_downs 4)\\n$(tui_downs 13)e" \
     '  ' '          ' ' \033[B \033[B  \033[A \033[B\033[B  '; do
     run_setup_tui "$k" --
     assert_eq "0" "$RUN_RC" "keys '$k' then the end of input: exit 0 (stderr: $RUN_ERR)"
@@ -12815,9 +12815,9 @@ test_setup_tui_same_plan() {
   assert_eq "$yes" "$tui" "…the same files as --yes --set search=on"
   teardown
   # Git hooks opened (row 2): merge-driver (row 5) chosen; CI workflows (row 8)
-  # opened: the cron (row 20) edited, doc-spec-verify (row 18) ticked.
+  # opened: the cron (row 21) edited, doc-spec-verify (row 19) ticked.
   setup
-  run_setup_tui "\\033[B\\n$(tui_downs 2)\\n$(tui_downs 3)\\n$(tui_downs 3)\\n$(tui_downs 12)e0 6 * * 1\\n\\033[A\\033[A \\033\\n\\n" --
+  run_setup_tui "\\033[B\\n$(tui_downs 2)\\n$(tui_downs 3)\\n$(tui_downs 3)\\n$(tui_downs 13)e0 6 * * 1\\n\\033[A\\033[A \\033\\n\\n" --
   assert_eq "0" "$RUN_RC" "git, the cron, a workflow: exit 0 (stderr: $RUN_ERR)"
   assert_contains "$RUN_OUT" "(*) merge-driver" "the choice's options shown, merge-driver chosen"
   assert_contains "$RUN_OUT" "Schedule (cron): 0 6 * * 1 (changed)" "the value edited"
@@ -12830,7 +12830,7 @@ test_setup_tui_same_plan() {
   yes=$(tui_state_untimed)
   assert_eq "$yes" "$tui" "…the same files as --yes with those --set values (the CI record's install times aside)"
   # An invalid value says why and changes nothing; ? shows the item's help.
-  run_setup_tui "\\033[B\\n$(tui_downs 4)\\n$(tui_downs 12)enot a cron\\n?" --
+  run_setup_tui "\\033[B\\n$(tui_downs 4)\\n$(tui_downs 13)enot a cron\\n?" --
   assert_contains "$RUN_OUT" "ci.cron takes" "an invalid cron: the reason"
   assert_contains "$(tui_frame last)" "Undo: " "?: the item's help, its undo"
   # A locked item says why.

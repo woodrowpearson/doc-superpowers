@@ -148,7 +148,7 @@ LIST_JQ='
        elif (.base.ref // "") != $base then "against another base (\(.base.ref // ""))"
        elif (.head.repo.full_name // "") != $repo then "from a fork"
        elif .head.ref == $base then "its head is the base branch"
-       elif any(.labels[]?; .name == $label) then "labelled \($label)"
+       elif any(.labels[]?; .name == $lbl) then "labelled \($lbl)"
        else "" end) ]
   | map(tostring) | join("\u001f")'
 
@@ -158,7 +158,7 @@ else
   gh api --paginate "repos/$REPO/pulls?state=open&base=$BASE_BRANCH&per_page=100" > "$T/list.json" \
     || cannot_run "cannot list the open pull requests against $BASE_BRANCH (gh api failed, above)"
 fi
-jq -r --arg base "$BASE_BRANCH" --arg repo "$REPO" --arg label "$LABEL" "$LIST_JQ" "$T/list.json" > "$T/list.tsv" \
+jq -r --arg base "$BASE_BRANCH" --arg repo "$REPO" --arg lbl "$LABEL" "$LIST_JQ" "$T/list.json" > "$T/list.tsv" \
   || cannot_run "cannot read the pull request listing (not the JSON GitHub returns)"
 
 git fetch -q --no-tags origin "refs/heads/$BASE_BRANCH" || cannot_run "cannot fetch $BASE_BRANCH from origin"

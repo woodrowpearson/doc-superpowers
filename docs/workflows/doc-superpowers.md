@@ -332,7 +332,7 @@ Update is the **write counterpart** to audit's read-only analysis. It consumes a
 4. Update `docs/specs/README.md` and `docs/adr/README.md` indexes
 5. Check CLAUDE.md currency — compare sections against actual filesystem; update if stale per `references/doc-spec.md` rules. In a doc-superpowers CI workflow, report what it needs instead of editing it
 6. Check README.md currency — compare what it says about the project's own features, commands and usage against the project itself; update if stale per `references/doc-spec.md` rules. In a doc-superpowers CI workflow, report it instead, as for CLAUDE.md
-7. Unless this is a doc-superpowers CI workflow (the installer is neither shipped nor granted there), run `"$ROOT/scripts/hooks/install.sh" status` and append a one-line summary: `Hooks: N/5 git, N/3 claude, N/9 ci` — with `docs/ledger/config.json`, plus the ledger sets from their own sections: `, ledger N/3 git, N/2 claude`
+7. Unless this is a doc-superpowers CI workflow (the installer is neither shipped nor granted there), run `"$ROOT/scripts/hooks/install.sh" status` and append a one-line summary: `Hooks: N/5 git, N/3 claude, N/10 ci` — with `docs/ledger/config.json`, plus the ledger sets from their own sections: `, ledger N/3 git, N/2 claude`
 
 ## Process: `setup` and `help`
 
