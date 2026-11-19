@@ -3441,7 +3441,7 @@ Exit status:
   0  rendered, or listed
   1  a diagram failed to render: its source is invalid, it requested an
      outside URL, or it has no PNG link; the other PNGs are still rendered
-  2  could not run: no Node 18 or later, no browser, the packages could not
+  2  could not run: no Node 22.12 or later, no browser, the packages could not
      be installed, no scripts/diagram/ beside this doc-tools.sh, no git or
      jq, or a run outside a work tree's top level
   3  usage error
@@ -4029,17 +4029,29 @@ _dg_renderer_files() {
   done
 }
 
-# Node 18 or later on PATH, or exit 2.
+# Node 22.12 or later on PATH (the pinned packages' engines.node), or exit 2.
 _dg_node() {
-  local v major
-  command -v node >/dev/null 2>&1 || _dg_cannot "needs Node 18 or later (no node on PATH)"
-  v=$(node --version 2>/dev/null) || _dg_cannot "needs Node 18 or later (node --version failed)"
+  local v major rest minor
+  command -v node >/dev/null 2>&1 || _dg_cannot "needs Node 22.12 or later (no node on PATH)"
+  v=$(node --version 2>/dev/null) || _dg_cannot "needs Node 22.12 or later (node --version failed)"
   v="${v#v}"
   major="${v%%.*}"
-  case "$major" in
-    ''|*[!0123456789]*) _dg_cannot "needs Node 18 or later (node --version printed '$v')" ;;
+  rest="${v#*.}"
+  minor="${rest%%.*}"
+  case "$v" in
+    *.*) ;;
+    *) minor="" ;;
   esac
-  [ "$major" -ge 18 ] || _dg_cannot "needs Node 18 or later (found $v)"
+  case "$major" in
+    ''|*[!0123456789]*) _dg_cannot "needs Node 22.12 or later (node --version printed '$v')" ;;
+  esac
+  case "$minor" in
+    ''|*[!0123456789]*) _dg_cannot "needs Node 22.12 or later (node --version printed '$v')" ;;
+  esac
+  # 10# keeps a leading zero from reading as octal.
+  if [ $((10#$major)) -lt 22 ] || { [ $((10#$major)) -eq 22 ] && [ $((10#$minor)) -lt 12 ]; }; then
+    _dg_cannot "needs Node 22.12 or later (found $v)"
+  fi
 }
 
 # The cache root into _DG_CACHE: ${XDG_CACHE_HOME:-$HOME/.cache}/doc-superpowers/diagram.

@@ -442,7 +442,7 @@ doc-superpowers/
 │   ├── leak-scan.sh              # Machine paths, emails and tokens in tracked files
 │   ├── ledger/                   # The work ledger's modules (lib.sh + sourced *.sh, *.jq, *.awk)
 │   ├── adapters/                 # Reference ledger adapters (ledger-pr-gh.sh, ledger-items-gh.sh; GitHub via gh)
-│   ├── diagram/                  # The local Mermaid renderer (Node 18+): pinned package.json + lock, render.mjs, browser.mjs
+│   ├── diagram/                  # The local Mermaid renderer (Node 22.12+): pinned package.json + lock, render.mjs, browser.mjs
 │   ├── writing/                  # The writing lint (python3 3.9+, standard library only): lint.py, anchors.py, config.py + defaults.json, markdown.py, and tests/ (its unittest suite)
 │   ├── search/launch.sh          # doc-search's launcher (POSIX sh), copied to .claude/doc-superpowers/search-mcp.sh by install --search
 │   ├── merge-doc-index.sh        # Custom git merge driver for .doc-index.json

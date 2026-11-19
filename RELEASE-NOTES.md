@@ -1,5 +1,28 @@
 # Release Notes
 
+## v3.18.0 (2026-11-18)
+
+This release clears every open security alert on the repository. The local Mermaid renderer moves to mermaid 12.3.0, @mermaid-js/layout-elk 1.0.2 and puppeteer-core 25.17.0, which drops two vulnerable transitive packages and updates two more. doc-search's lockfile takes the patched opentelemetry-api.
+
+### Upgrading from 3.17.x
+- **Rendering now needs Node 22.12 or later** (it was 18): the three pinned packages require it. With an older Node, `diagram render` exits 2 with "needs Node 22.12 or later", and the docs keep their inline Mermaid source. Nothing else in doc-superpowers needs Node.
+- **The first `diagram render` after the upgrade needs the network once**, because the lockfile changed: it installs the new packages with `npm ci --ignore-scripts` into a new `~/.cache/doc-superpowers/diagram/<lock hash>`. The old cache directory can be deleted.
+- **Diagrams look different once re-rendered.** Mermaid 12's default look has white nodes with dark borders, coloured actors and subgraphs, heavier edges and a larger font. Layout stays dagre: ELK is used only where a block or the config file asks for `layout: elk`. Existing PNGs are not touched until you render them again.
+
+### Security
+- **`scripts/diagram/package-lock.json`:** no `basic-ftp` (three advisories, among them a quadratic-time listing parser) and no `extract-zip` (two symlink path-traversal advisories, no patched release) are left; both came in through `@puppeteer/browsers` 2, and version 3 drops them. `zod` is 4.6.7 (the oversized-collection memory exhaustion) and `katex` 0.18.10 (a prototype-pollution trust bypass). `npm audit --package-lock-only` reports 0 vulnerabilities. Every one of the 142 entries resolves from registry.npmjs.org with its integrity hash.
+- **`search/uv.lock`:** `opentelemetry-api` 1.45.2 (a quadratic-time denial of service), the only package that moved.
+- The renderer's protections are unchanged: request interception, the Content-Security-Policy, the dead proxy and resolver, the config allowlist and `securityLevel: strict`.
+
+### Changed
+- `render.mjs` and `browser.mjs` load puppeteer-core and @puppeteer/browsers with `import()`; both are ES modules from these versions.
+- `render.mjs` sets `layout: 'dagre'` as its default, since Mermaid 12 otherwise lays every flowchart out with ELK and ignores `flowchart.curve`.
+- `doc-tools.sh diagram` compares Node's major and minor version against 22.12.
+- This repository's 11 flowchart, sequence and state diagrams are redrawn with mermaid 12.3.0; no Mermaid source changed. The two C4 diagrams render the same.
+
+### Other
+- Verified locally, since GitHub Actions does not run on this account. Under bash 5.x and `/bin/bash` 3.2: `test-doc-tools.sh` 2034, `test-hooks.sh` 4423, `test-spec-status-model.sh` 1078, `test-doc-pr-release.sh` 954, `test-merge-driver.sh` 927, `test-spec-claims.sh` 3269 and `test-ledger.sh` 3865 assertions passed, none failed. The writing suite passed under python3 3.13.3 and `/usr/bin/python3` 3.9.6, and the doc-search pytest suite passed (903, the 2 live tests skipped). So did `self-install`, `zizmor`, `gitleaks`, `dep-audit` (no known vulnerabilities in `search/uv.lock`) and `check-version`.
+
 ## v3.17.1 (2026-11-18)
 
 This release completes the index merge driver's record rule from 3.17.0. When two branches each re-recorded a doc against different code it cites, without changing the doc's text, the merged doc read stale.

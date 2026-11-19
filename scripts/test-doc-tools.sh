@@ -8791,20 +8791,23 @@ test_writing_verbs_write_no_bytecode() {
 _DG_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 test_diagram_packages_are_pinned() {
-  echo "test: diagram: package.json and its lock pin mermaid 11.17.2, layout-elk 0.2.3 and puppeteer-core 24.43.1 exactly, Node 18 or later; no node_modules is tracked"
+  echo "test: diagram: package.json and its lock pin mermaid 12.3.0, layout-elk 1.0.2 and puppeteer-core 25.17.0 exactly, Node 22.12 or later; no node_modules is tracked"
   local pkg="$SCRIPT_DIR/diagram/package.json" lock="$SCRIPT_DIR/diagram/package-lock.json" name want tracked
   assert_file_exists "$pkg" "scripts/diagram/package.json exists"
   assert_file_exists "$lock" "scripts/diagram/package-lock.json exists"
   [ -f "$pkg" ] && [ -f "$lock" ] || return 0
-  for name in mermaid@11.17.2 @mermaid-js/layout-elk@0.2.3 puppeteer-core@24.43.1; do
+  for name in mermaid@12.3.0 @mermaid-js/layout-elk@1.0.2 puppeteer-core@25.17.0; do
     want="${name##*@}"
     name="${name%@*}"
     assert_eq "$want" "$(jq -r --arg n "$name" '.dependencies[$n]' "$pkg")" "package.json pins $name to exactly $want"
     assert_eq "$want" "$(jq -r --arg n "$name" '.packages[""].dependencies[$n]' "$lock")" "the lock's root pins $name to exactly $want"
     assert_eq "$want" "$(jq -r --arg n "node_modules/$name" '.packages[$n].version' "$lock")" "the lock installs $name $want"
   done
-  assert_eq "2.13.2" "$(jq -r '.packages["node_modules/@puppeteer/browsers"].version' "$lock")" "the lock installs @puppeteer/browsers 2.13.2 (install-browser uses it)"
-  assert_eq ">=18" "$(jq -r '.engines.node' "$pkg")" "package.json names Node 18 or later"
+  assert_eq "3.2.7" "$(jq -r '.packages["node_modules/@puppeteer/browsers"].version' "$lock")" "the lock installs @puppeteer/browsers 3.2.7 (install-browser uses it)"
+  assert_eq ">=22.12.0" "$(jq -r '.engines.node' "$pkg")" "package.json names Node 22.12 or later"
+  # The security alerts this pin set closed: none of these may come back.
+  assert_eq "" "$(jq -r '.packages | keys[] | select(test("(^|/)(basic-ftp|extract-zip)$"))' "$lock")" "the lock installs no basic-ftp and no extract-zip"
+  assert_eq "0" "$(jq '[.packages | to_entries[] | select(.key != "") | select((.value.resolved // "" | startswith("https://registry.npmjs.org/") | not) or (.value.integrity == null))] | length' "$lock")" "every locked package resolves from registry.npmjs.org with an integrity hash"
   assert_eq "3" "$(jq -r '.lockfileVersion' "$lock")" "the lock is lockfileVersion 3 (npm 7 or later reads it)"
   assert_eq "0" "$(jq '[.dependencies | to_entries[] | select(.value | test("^[0-9]+\\.[0-9]+\\.[0-9]+$") | not)] | length' "$pkg")" "every dependency is an exact version, never a range"
   if git -C "$_DG_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -9045,7 +9048,7 @@ _dg_stubs() {
   cat > "$root/bin/node" <<'STUB'
 #!/bin/sh
 case "$1" in
-  --version) echo "${STUB_NODE_VERSION:-v20.19.2}"; exit 0 ;;
+  --version) echo "${STUB_NODE_VERSION:-v22.12.0}"; exit 0 ;;
 esac
 script=$(basename "$1")
 shift
@@ -9163,8 +9166,8 @@ test_diagram_render_installs_once_into_the_cache() {
   teardown
 }
 
-test_diagram_render_needs_node_18() {
-  echo "test: diagram render without Node 18 or later, without npm, or from a copy without scripts/diagram/ exits 2; with no blocks it exits 0 needing nothing"
+test_diagram_render_needs_node_22_12() {
+  echo "test: diagram render without Node 22.12 or later, without npm, or from a copy without scripts/diagram/ exits 2; with no blocks it exits 0 needing nothing"
   setup
   _dg_stubs
   _dg_fixture
@@ -9178,12 +9181,26 @@ test_diagram_render_needs_node_18() {
   rc=0
   out=$(PATH="$nonode" DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
   assert_eq "2" "$rc" "no node on PATH: exit 2"
-  assert_contains "$out" "Node 18 or later" "…naming what it needs"
+  assert_contains "$out" "Node 22.12 or later" "…naming what it needs"
   rc=0
   out=$(PATH="$DG_BIN:$PATH" STUB_NODE_VERSION=v16.20.2 DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
   assert_eq "2" "$rc" "Node 16: exit 2"
   assert_contains "$out" "16.20.2" "…naming the version found"
   assert_eq "old a|old b" "$(cat docs/diagrams/a.png)|$(cat docs/diagrams/b.png)" "…and the old PNGs as they were"
+  # The floor is a minor version: 22.11 is refused, a higher major with a
+  # lower minor is not, and a version without a minor is not read as one.
+  local nv
+  for nv in v18.20.8 v20.19.2 v22.11.0 v22.9.0 v22 vx.1.0; do
+    rc=0
+    out=$(PATH="$DG_BIN:$PATH" STUB_NODE_VERSION=$nv DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+    assert_eq "2" "$rc" "Node $nv: exit 2"
+    assert_contains "$out" "needs Node 22.12 or later" "…Node $nv: naming the floor"
+  done
+  for nv in v22.12.0 v22.12.1 v23.0.0 v24.1.0; do
+    rc=0
+    out=$(PATH="$DG_BIN:$PATH" STUB_NODE_VERSION=$nv DOC_SUPERPOWERS_CHROME="$DG_CHROME" "$DG_RUN" diagram render 2>&1) || rc=$?
+    assert_not_contains "$out" "needs Node" "Node $nv passes the floor"
+  done
 
   # A copy of doc-tools.sh without diagram/ beside it (a vendored copy).
   local vend
@@ -9474,16 +9491,23 @@ _dg_png_facts() {
   ' "$1"
 }
 
-# _dg_real_ready <label>: Node 18 or later, npm and a browser (into
+# _dg_real_ready <label>: Node 22.12 or later, npm and a browser (into
 # _DG_REAL_BROWSER), or a SKIP line naming what is missing and return 1.
 _dg_real_ready() {
-  local v
+  local v m
   v=$(node --version 2>/dev/null || true)
   v="${v#v}"
   case "${v%%.*}" in
     ''|*[!0123456789]*) record_skip "$1: no node on PATH"; return 1 ;;
   esac
-  if [ "${v%%.*}" -lt 18 ]; then record_skip "$1: node $v is older than 18"; return 1; fi
+  case "$v" in
+    *.*) m="${v#*.}"; m="${m%%.*}" ;;
+    *) m=0 ;;
+  esac
+  case "$m" in
+    ''|*[!0123456789]*) m=0 ;;
+  esac
+  if [ "${v%%.*}" -lt 22 ] || { [ "${v%%.*}" -eq 22 ] && [ "$m" -lt 12 ]; }; then record_skip "$1: node $v is older than 22.12"; return 1; fi
   if ! command -v npm >/dev/null 2>&1; then record_skip "$1: no npm on PATH"; return 1; fi
   if ! _dg_real_browser; then record_skip "$1: no Chrome or Chromium (set DOC_SUPERPOWERS_CHROME)"; return 1; fi
 }
@@ -9742,7 +9766,7 @@ test_diagram_render_nested_front_matter_for_real() {
     "under the default layout, curve linear reaches the edges: ten edges, no cubic C commands"
   n=$(_dg_svg_paths "$svg/db.svg" 2>/dev/null | grep -c C || true)
   assert_true "…and curve basis draws cubic C commands ($n)" test "${n:-0}" -gt 0
-  # Measured with the pinned Mermaid 11.17.2 and layout-elk 0.2.3: ELK routes
+  # Measured with the pinned Mermaid 12.3.0 and layout-elk 1.0.2: ELK routes
   # its own edges and does not read flowchart.curve. If a new pin changes
   # this, this assert is the one that says so.
   assert_eq "$(_dg_svg_paths "$svg/bk.svg" 2>/dev/null)" "$(_dg_svg_paths "$svg/eb.svg" 2>/dev/null)" \
@@ -10116,7 +10140,7 @@ run_tests() {
   test_diagram_list_finds_elk_nested_in_front_matter
   test_diagram_usage_errors_exit_3
   test_diagram_render_installs_once_into_the_cache
-  test_diagram_render_needs_node_18
+  test_diagram_render_needs_node_22_12
   test_diagram_render_finds_a_browser
   test_diagram_render_replaces_a_png_only_on_success
   test_diagram_render_keeps_pngs_inside_the_work_tree
