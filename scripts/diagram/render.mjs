@@ -145,7 +145,10 @@ function allowedConfig(file) {
 }
 
 // c4.wrap false: the setting every hand render before this renderer used.
-let mermaidConfig = { startOnLoad: false, securityLevel: 'strict', c4: { wrap: false } };
+// layout dagre: Mermaid 12 bundles ELK and makes it the default layout; this
+// renderer keeps dagre the default, so ELK stays what a block (or the config
+// file) asks for with `layout: elk`, and flowchart.curve keeps applying.
+let mermaidConfig = { startOnLoad: false, securityLevel: 'strict', layout: 'dagre', c4: { wrap: false } };
 if (args.config) {
   let file;
   try {
@@ -183,9 +186,12 @@ function fileAllowed(url) {
   return fileRoots.some((root) => real.startsWith(root + path.sep));
 }
 
+// puppeteer-core is an ES module (from 25): resolved from <node_modules>,
+// then imported, not required.
 let puppeteer;
 try {
-  puppeteer = createRequire(path.join(modules, 'noop.js'))('puppeteer-core');
+  const resolved = createRequire(path.join(modules, 'noop.js')).resolve('puppeteer-core');
+  puppeteer = (await import(pathToFileURL(resolved).href)).default;
 } catch (e) {
   fail(`cannot load puppeteer-core from ${modules}: ${e.message}`);
 }

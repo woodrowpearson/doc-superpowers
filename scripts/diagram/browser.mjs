@@ -12,6 +12,7 @@
 //     it could not.
 
 import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -27,12 +28,15 @@ if (!['path', 'install'].includes(command) || !modulesArg || !cacheArg) {
 const modules = path.resolve(modulesArg);
 const cacheDir = path.resolve(cacheArg);
 
+// Both packages are ES modules (@puppeteer/browsers 3, puppeteer-core 25):
+// each is resolved from <node_modules>, then imported, not required.
 let browsers;
 let buildId;
 try {
   const require = createRequire(path.join(modules, 'noop.js'));
-  browsers = require('@puppeteer/browsers');
-  buildId = require('puppeteer-core/internal/revisions.js').PUPPETEER_REVISIONS['chrome-headless-shell'];
+  const load = (name) => import(pathToFileURL(require.resolve(name)).href);
+  browsers = await load('@puppeteer/browsers');
+  buildId = (await load('puppeteer-core/internal/revisions.js')).PUPPETEER_REVISIONS['chrome-headless-shell'];
 } catch (e) {
   fail(2, `cannot load @puppeteer/browsers and puppeteer-core from ${modules}: ${e.message}`);
 }
