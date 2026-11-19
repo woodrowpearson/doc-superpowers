@@ -4324,6 +4324,10 @@ test_index_resolve_merges_an_index_only_conflict() {
   assert_contains "$body" "tests.yml" "…and the checks it started"
   assert_contains "$body" "other checks" "…and that the pull request's other checks wait for the next push"
   assert_contains "$body" "git pull" "…and the author's next step"
+  assert_eq "Merge branch 'main' into topic|Only the doc index (docs/.doc-index.json) conflicted; doc-superpowers' index merge driver merged it (doc-index-resolve)." \
+    "$(git -C "$IR_REMOTE" log -1 --format='%s|%b' "$tip" | sed '/^$/d')" "an index-only merge: the message is as before"
+  assert_eq "**doc-index-resolve merged \`main\` into this branch** (merge commit $tip). The only conflict was the doc index (\`docs/.doc-index.json\`), which doc-superpowers' index merge driver merged entry by entry." \
+    "$(sed -n 2p <<<"$body")" "…and so is the comment"
   assert_contains "$(cat "$out.summary" 2>/dev/null)" "#5" "the run's summary lists it"
   assert_eq "" "$(git -C "$IR_DIR" status --porcelain)" "the checkout is left clean (no merge in progress)"
   assert_eq "" "$(git -C "$IR_DIR" config --get merge.doc-index.driver || true)" "…and its config names no driver (a temporary one was used)"
@@ -4611,6 +4615,315 @@ test_index_resolve_one_bad_answer_stops_no_other() {
   assert_contains "$(tail -n 1 "$out.log")" "1 merged" "…and the run ends with its count line"
 }
 
+# --- cite line numbers (design 2026-11-18, R1, R5, R6) -------------------------
+
+# _ir_seq <word> <from> <to>: the lines "<word> <k>", one per k.
+_ir_seq() {
+  local k
+  for ((k = $2; k <= $3; k++)); do printf '%s %s\n' "$1" "$k"; done
+}
+
+# _ir_dt <args…>: the doc-tools.sh vendored in IR_DIR, run there.
+_ir_dt() {
+  (cd "$IR_DIR" && PATH="$BASH_PATH" "$BASH_BIN" .github/scripts/doc-tools.sh "$@")
+}
+
+# _ir_stamp <time>: docs/a.md's last_verified in IR_DIR's index set to <time>,
+# so the two sides of a merge order (the driver keeps the newer record).
+_ir_stamp() {
+  jq --arg t "$1" '.docs["docs/a.md"].last_verified = $t' "$IR_DIR/docs/.doc-index.json" > "$IR_DIR/docs/.x" \
+    && mv "$IR_DIR/docs/.x" "$IR_DIR/docs/.doc-index.json"
+}
+
+# _ir_cite_fixture: _ir_fixture, then a main whose index entries are real:
+# built and re-baselined with the vendored doc-tools.sh (content_hash,
+# code_oids, last_verified 2026-11-01). docs/a.md cites src/app/server.py
+# ("server 1" to "server 20"); docs/notes.md cites it too, unindexed.
+_ir_cite_fixture() {
+  _ir_fixture || return 1
+  (
+    cd "$IR_DIR"
+    mkdir -p src/app src/b src/c
+    _ir_seq server 1 20 > src/app/server.py
+    printf 'b\n' > src/b/b.txt
+    printf 'c\n' > src/c/c.txt
+    printf '%s\n' '# A' '' 'The handler is `src/app/server.py:5-7`, then `src/app/server.py:12`.' '' 'The end.' > docs/a.md
+    printf 'b\n' > docs/b.md
+    printf 'c\n' > docs/c.md
+    printf '%s\n' 'A note on `src/app/server.py:12`.' > docs/notes.md
+    git add -A && git commit -qm "docs and code"
+    printf '%s\n' docs/a.md:src/app/server.py:spec docs/b.md:src/b/:spec docs/c.md:src/c/:spec \
+      | _ir_dt build-index --force
+    _ir_dt update-index docs/a.md docs/b.md docs/c.md
+    _ir_stamp 2026-11-01T00:00:00Z
+    git add -A && git commit -qm "the index" && git push -q origin main
+  ) > /dev/null 2>&1
+}
+
+# _ir_cite_side <branch> <server.py> <a.md> <stamp | -> [<notes.md>]: a
+# commit on <branch> (new from main, or main itself) with these files,
+# docs/a.md re-baselined and stamped (-: not re-baselined); pushed.
+_ir_cite_side() {
+  (
+    cd "$IR_DIR"
+    if [ "$1" = main ]; then git checkout -q main; else git checkout -q -b "$1" main; fi
+    printf '%s\n' "$2" > src/app/server.py
+    printf '%s\n' "$3" > docs/a.md
+    [ -z "${5:-}" ] || printf '%s\n' "$5" > docs/notes.md
+    if [ "$4" != - ]; then
+      _ir_dt update-index docs/a.md
+      _ir_stamp "$4"
+    fi
+    git add -A && git commit -qm "$1: code and cites" && git push -q origin "$1"
+    git checkout -q main
+  ) > /dev/null 2>&1
+}
+
+# The moves: a branch adds three lines at the top of server.py, main two after
+# its line 8. Base line 5 is the branch's 8, main's 5 and the merge's 8; base
+# line 12 is the branch's 15, main's 14 and the merge's 17.
+IR_HEAD_CODE="$(_ir_seq head 1 3; _ir_seq server 1 20)"
+IR_MAIN_CODE="$(_ir_seq server 1 8; _ir_seq main 1 2; _ir_seq server 9 20)"
+_ir_doc() { printf '%s\n' '# A' '' "The handler is \`src/app/server.py:$1\`, then \`src/app/server.py:$2\`." '' 'The end.'; }
+
+test_index_resolve_recomputes_cite_lines() {
+  echo "Test: index-resolve.sh — the only other conflict is cite numbers in an indexed doc: merged and pushed with the lease, the doc at the merged lines, re-recorded current with the newer last_verified, every entry kept, the doc named in the message and comment"
+  _ir_cite_fixture || { assert_true "fixture" false; return 0; }
+  local out rc head tip body fresh
+  out="$(harness_mktemp_d ir)/out"
+  _ir_cite_side topic "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" 2026-11-05T00:00:00Z
+  _ir_cite_side main "$IR_MAIN_CODE" "$(_ir_doc 5-7 14)" 2026-11-10T00:00:00Z
+  head=$(git -C "$IR_REMOTE" rev-parse refs/heads/topic)
+  _ir_pr 5 topic false
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  assert_contains "$(grep 'PR #5' "$out.log")" "merged" "PR #5 is merged"
+  tip=$(git -C "$IR_REMOTE" rev-parse refs/heads/topic)
+  assert_eq "$head" "$(git -C "$IR_REMOTE" rev-parse "$tip^1")" "the merge's first parent is the head (pushed with the lease)"
+  assert_eq "$(git -C "$IR_REMOTE" rev-parse refs/heads/main)" "$(git -C "$IR_REMOTE" rev-parse "$tip^2")" "…its second parent the base"
+  assert_eq "$(_ir_doc 8-10 17)" "$(git -C "$IR_REMOTE" show "$tip:docs/a.md")" "docs/a.md cites the merged lines"
+  assert_eq "$(printf '%s\n' "$IR_HEAD_CODE" | sed -n 1,3p; _ir_seq server 1 8; _ir_seq main 1 2; _ir_seq server 9 20)" \
+    "$(git -C "$IR_REMOTE" show "$tip:src/app/server.py")" "…and the code is both sides' code"
+  fresh=$(_ir_dt check-freshness --tree "$tip" 2>/dev/null)
+  assert_eq "current|false" "$(jq -r '.docs["docs/a.md"] | "\(.status)|\(.doc_modified)"' <<<"$fresh")" \
+    "doc-freshness reads the re-recorded doc current on the pushed head"
+  assert_eq "2026-11-10T00:00:00Z" "$(git -C "$IR_REMOTE" show "$tip:docs/.doc-index.json" | jq -r '.docs["docs/a.md"].last_verified')" \
+    "…and its last_verified is the newer side's"
+  assert_eq "docs/a.md docs/b.md docs/c.md" "$(git -C "$IR_REMOTE" show "$tip:docs/.doc-index.json" | jq -r '.docs | keys | join(" ")')" \
+    "the merged index keeps every entry"
+  assert_contains "$(git -C "$IR_REMOTE" log -1 --format=%B "$tip")" "docs/a.md" "the merge commit's message names the doc"
+  assert_contains "$(git -C "$IR_REMOTE" log -1 --format=%B "$tip")" "2 cites" "…and the number of cites"
+  body=$(jq -r .body "$IR_GH/posted-5.json" 2>/dev/null || true)
+  assert_contains "$body" "docs/a.md" "the comment names the doc"
+  assert_contains "$body" "2 cites" "…and the number of cites"
+  assert_eq "" "$(git -C "$IR_DIR" status --porcelain)" "the checkout is left clean"
+  assert_eq "1" "$(git -C "$IR_DIR" worktree list | wc -l | tr -d ' ')" "…and no worktree is left"
+}
+
+test_index_resolve_recomputes_cite_lines_without_an_index_conflict() {
+  echo "Test: index-resolve.sh — only a doc conflicts, in cite numbers, and the index does not: merged with the recomputed lines and the re-record; the comment and message say only the docs conflicted"
+  _ir_cite_fixture || { assert_true "fixture" false; return 0; }
+  local out rc tip body fresh
+  out="$(harness_mktemp_d ir)/out"
+  # main's record is made against the files topic will hold: topic then
+  # leaves the index as it is, fresh, and only main writes it.
+  (
+    cd "$IR_DIR"
+    printf '%s\n' "$IR_HEAD_CODE" > src/app/server.py
+    _ir_doc 8-10 15 > docs/a.md
+    _ir_dt update-index docs/a.md
+    _ir_stamp 2026-11-05T00:00:00Z
+    git checkout -q -- src/app/server.py docs/a.md
+    git commit -qam "a record ahead of its files" && git push -q origin main
+  ) > /dev/null 2>&1
+  _ir_cite_side topic "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" -
+  _ir_cite_side main "$IR_MAIN_CODE" "$(_ir_doc 5-7 14)" 2026-11-10T00:00:00Z
+  assert_eq "" "$(git -C "$IR_DIR" diff main~1 topic -- docs/.doc-index.json)" "the fixture: topic leaves the index as it is"
+  _ir_pr 5 topic false
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  assert_contains "$(grep 'PR #5' "$out.log")" "merged" "PR #5 is merged"
+  tip=$(git -C "$IR_REMOTE" rev-parse refs/heads/topic)
+  assert_eq "$(_ir_doc 8-10 17)" "$(git -C "$IR_REMOTE" show "$tip:docs/a.md")" "docs/a.md cites the merged lines"
+  fresh=$(_ir_dt check-freshness --tree "$tip" 2>/dev/null)
+  assert_eq "current|false" "$(jq -r '.docs["docs/a.md"] | "\(.status)|\(.doc_modified)"' <<<"$fresh")" \
+    "the re-recorded doc reads current on the pushed head"
+  assert_eq "2026-11-10T00:00:00Z" "$(git -C "$IR_REMOTE" show "$tip:docs/.doc-index.json" | jq -r '.docs["docs/a.md"].last_verified')" \
+    "…with the newer side's last_verified"
+  assert_contains "$(git -C "$IR_REMOTE" log -1 --format=%B "$tip")" "Only the cite line numbers in docs/a.md conflicted" "the message names the doc as the only conflict"
+  body=$(jq -r .body "$IR_GH/posted-5.json" 2>/dev/null || true)
+  assert_contains "$body" 'The only conflicts were the cite line numbers in `docs/a.md`' "…and so does the comment"
+  assert_eq "1" "$(git -C "$IR_DIR" worktree list | wc -l | tr -d ' ')" "no worktree is left"
+}
+
+test_index_resolve_skips_docs_it_cannot_recompute() {
+  echo "Test: index-resolve.sh — a text conflict in a doc, a conflict in a doc the index does not key, a doc modified since its record: each skipped, one comment naming the doc, nothing pushed"
+  _ir_cite_fixture || { assert_true "fixture" false; return 0; }
+  local out rc l n body
+  out="$(harness_mktemp_d ir)/out"
+  # The wording changes too: a text difference.
+  _ir_cite_side text "$IR_HEAD_CODE" "$(_ir_doc 8-10 15 | sed 's/The handler is/The handlers are/')" 2026-11-05T00:00:00Z
+  # Only docs/notes.md, which the index does not key, conflicts.
+  _ir_cite_side notes "$IR_HEAD_CODE" "$(_ir_doc 5-7 12)" - 'A note on `src/app/server.py:15`.'
+  # Re-baselined, then edited: modified since its record on the head.
+  _ir_cite_side modified "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" 2026-11-05T00:00:00Z
+  (cd "$IR_DIR" && git checkout -q modified && printf 'More.\n' >> docs/a.md && git commit -qam "an edit" \
+    && git push -q origin modified && git checkout -q main)
+  _ir_cite_side main "$IR_MAIN_CODE" "$(_ir_doc 5-7 14)" 2026-11-10T00:00:00Z 'A note on `src/app/server.py:14`.'
+  _ir_pr 1 text false
+  _ir_pr 2 notes false
+  _ir_pr 3 modified false
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "skips are no failure: exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  l=$(cat "$out.log")
+  for n in 1 2 3; do
+    assert_contains "$(grep "PR #$n " <<<"$l")" "skipped" "PR #$n: skipped"
+  done
+  body=$(jq -r .body "$IR_GH/posted-1.json" 2>/dev/null || true)
+  assert_contains "$body" '`docs/a.md`' "a text conflict: the comment names the doc"
+  assert_contains "$body" "more than cite numbers" "…and why"
+  assert_contains "$body" "line 3 of the head's version" "…and the block's line in the head's version (R6)"
+  body=$(jq -r .body "$IR_GH/posted-2.json" 2>/dev/null || true)
+  assert_contains "$body" '`docs/notes.md`' "a doc the index does not key: the comment names it"
+  body=$(jq -r .body "$IR_GH/posted-3.json" 2>/dev/null || true)
+  assert_contains "$body" '`docs/a.md`' "a doc modified since its record: the comment names it"
+  assert_contains "$body" "current" "…and why"
+  for b in text notes modified; do
+    assert_eq "$(git -C "$IR_DIR" rev-parse "$b")" "$(git -C "$IR_REMOTE" rev-parse "refs/heads/$b")" "$b: nothing pushed"
+  done
+  assert_eq "1" "$(git -C "$IR_DIR" worktree list | wc -l | tr -d ' ')" "no worktree is left"
+}
+
+test_index_resolve_skips_a_doc_not_fresh_on_either_side() {
+  echo "Test: index-resolve.sh — a doc stale but not modified on the head, or modified since its record on the base: skipped, the comment naming the doc and the side"
+  _ir_cite_fixture || { assert_true "fixture" false; return 0; }
+  local out rc body
+  out="$(harness_mktemp_d ir)/out"
+  # The head re-baselines, then changes the code again: stale, not modified.
+  _ir_cite_side stale "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" 2026-11-05T00:00:00Z
+  (cd "$IR_DIR" && git checkout -q stale && printf 'head extra\n' >> src/app/server.py && git commit -qam "code after the record" \
+    && git push -q origin stale && git checkout -q main)
+  _ir_cite_side fresh "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" 2026-11-05T00:00:00Z
+  _ir_cite_side main "$IR_MAIN_CODE" "$(_ir_doc 5-7 14)" 2026-11-10T00:00:00Z
+  assert_eq "stale|false" "$(_ir_dt check-freshness --tree stale 2>/dev/null | jq -r '.docs["docs/a.md"] | "\(.status)|\(.doc_modified)"')" \
+    "the fixture: docs/a.md is stale and unmodified on the head"
+  _ir_pr 1 stale false
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  assert_contains "$(grep 'PR #1 ' "$out.log")" "skipped" "stale on the head: skipped"
+  body=$(jq -r .body "$IR_GH/posted-1.json" 2>/dev/null || true)
+  assert_contains "$body" '`docs/a.md` does not read current' "…the comment names the doc"
+  assert_contains "$body" "on the head" "…and the head"
+  assert_eq "$(git -C "$IR_DIR" rev-parse stale)" "$(git -C "$IR_REMOTE" rev-parse refs/heads/stale)" "…nothing pushed"
+  # main edits the doc after its record: modified on the base.
+  (cd "$IR_DIR" && printf 'More.\n' >> docs/a.md && git commit -qam "an edit after the record" && git push -q origin main)
+  rm -f "$IR_GH/pull-1.json"
+  _ir_pr 2 fresh false
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  assert_contains "$(grep 'PR #2 ' "$out.log")" "skipped" "modified on the base: skipped"
+  body=$(jq -r .body "$IR_GH/posted-2.json" 2>/dev/null || true)
+  assert_contains "$body" '`docs/a.md` does not read current' "…the comment names the doc"
+  assert_contains "$body" 'on `main`' "…and the base branch"
+  assert_eq "$(git -C "$IR_DIR" rev-parse fresh)" "$(git -C "$IR_REMOTE" rev-parse refs/heads/fresh)" "…nothing pushed"
+}
+
+test_index_resolve_update_index_fails_in_the_worktree() {
+  echo "Test: index-resolve.sh — update-index fails in the worktree: exit 1 is a skip with a comment, above 1 a failure (exit 2, no comment); the worktree goes either way, nothing pushed"
+  _ir_cite_fixture || { assert_true "fixture" false; return 0; }
+  local out rc code dt
+  out="$(harness_mktemp_d ir)/out"
+  _ir_cite_side topic "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" 2026-11-05T00:00:00Z
+  _ir_cite_side main "$IR_MAIN_CODE" "$(_ir_doc 5-7 14)" 2026-11-10T00:00:00Z
+  _ir_pr 1 topic false
+  # A shim for the step's doc-tools.sh: update-index exits <code>, the rest
+  # is the vendored copy.
+  dt="$IR_DIR/.github/scripts/doc-tools.sh"
+  cp "$dt" "$IR_DIR/.github/scripts/doc-tools.real.sh"
+  for code in 1 2; do
+    printf '%s\n' '#!/usr/bin/env bash' \
+      "if [ \"\$1\" = update-index ]; then echo 'update-index: refused (shim)' >&2; exit $code; fi" \
+      'exec bash "$(dirname "$0")/doc-tools.real.sh" "$@"' > "$dt"
+    rm -f "$IR_GH/posted-1.json"
+    rc=0; _ir_run "$out" || rc=$?
+    if [ "$code" = 1 ]; then
+      assert_eq "0" "$rc" "update-index exit 1: exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+      assert_contains "$(grep 'PR #1 ' "$out.log")" "skipped" "…skipped"
+      assert_contains "$(jq -r .body "$IR_GH/posted-1.json" 2>/dev/null)" "update-index could not re-record" "…the comment says why"
+    else
+      assert_eq "2" "$rc" "update-index exit 2: the step exits 2"
+      assert_contains "$(grep 'PR #1 ' "$out.log")" "failed" "…the pull request failed"
+      assert_true "…with no comment" test ! -e "$IR_GH/posted-1.json"
+    fi
+    assert_contains "$(cat "$out.log")" "update-index: refused (shim)" "…update-index ran (its output is in the log)"
+    assert_eq "1" "$(git -C "$IR_DIR" worktree list | wc -l | tr -d ' ')" "…and its worktree is gone"
+    assert_eq "$(git -C "$IR_DIR" rev-parse topic)" "$(git -C "$IR_REMOTE" rev-parse refs/heads/topic)" "…nothing pushed"
+  done
+  mv "$IR_DIR/.github/scripts/doc-tools.real.sh" "$dt"
+}
+
+test_index_resolve_worktree_git_cannot_remove() {
+  echo "Test: index-resolve.sh — git cannot remove the re-record's worktree: its directory goes, prune drops it, and the next pull request in the run adds its own"
+  _ir_cite_fixture || { assert_true "fixture" false; return 0; }
+  local out rc real l
+  out="$(harness_mktemp_d ir)/out"
+  _ir_cite_side one "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" 2026-11-05T00:00:00Z
+  _ir_cite_side two "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" 2026-11-05T00:00:00Z
+  _ir_cite_side main "$IR_MAIN_CODE" "$(_ir_doc 5-7 14)" 2026-11-10T00:00:00Z
+  _ir_pr 1 one false
+  _ir_pr 2 two false
+  # A git on the step's PATH that refuses only to remove a worktree.
+  real=$(command -v git)
+  printf '%s\n' '#!/usr/bin/env bash' '[ "$1" = worktree ] && [ "$2" = remove ] && exit 1' \
+    "exec \"$real\" \"\$@\"" > "$IR_GH/bin/git"
+  chmod +x "$IR_GH/bin/git"
+  rc=0; _ir_run "$out" || rc=$?
+  rm -f "$IR_GH/bin/git"
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  l=$(cat "$out.log")
+  assert_contains "$(grep 'PR #1 ' <<<"$l")" "merged" "PR #1 is merged"
+  assert_contains "$(grep 'PR #2 ' <<<"$l")" "merged" "PR #2 is merged too: its worktree add was not refused"
+  assert_eq "1" "$(git -C "$IR_DIR" worktree list | wc -l | tr -d ' ')" "no worktree is left registered"
+}
+
+test_index_resolve_doc_not_a_regular_file() {
+  echo "Test: index-resolve.sh — a cite-numbers doc that is executable on the head (mode 100755): not a doc it rewrites, skipped as another file"
+  _ir_cite_fixture || { assert_true "fixture" false; return 0; }
+  local out rc
+  out="$(harness_mktemp_d ir)/out"
+  _ir_cite_side topic "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" 2026-11-05T00:00:00Z
+  (cd "$IR_DIR" && git checkout -q topic && chmod +x docs/a.md && git update-index --chmod=+x docs/a.md && git commit -qm "an executable doc" \
+    && git push -q origin topic && git checkout -q main)
+  _ir_cite_side main "$IR_MAIN_CODE" "$(_ir_doc 5-7 14)" 2026-11-10T00:00:00Z
+  _ir_pr 1 topic false
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  assert_contains "$(grep 'PR #1 ' "$out.log")" "skipped" "skipped"
+  assert_contains "$(jq -r .body "$IR_GH/posted-1.json" 2>/dev/null)" 'Files other than the doc index conflict: `docs/a.md`' "…as another file"
+  assert_eq "$(git -C "$IR_DIR" rev-parse topic)" "$(git -C "$IR_REMOTE" rev-parse refs/heads/topic)" "…nothing pushed"
+}
+
+test_index_resolve_cite_lines_with_a_workflow_file() {
+  echo "Test: index-resolve.sh — a cite-numbers-only doc conflict in a merge that brings a workflow file: still skipped"
+  _ir_cite_fixture || { assert_true "fixture" false; return 0; }
+  local out rc
+  out="$(harness_mktemp_d ir)/out"
+  _ir_cite_side topic "$IR_HEAD_CODE" "$(_ir_doc 8-10 15)" 2026-11-05T00:00:00Z
+  _ir_cite_side main "$IR_MAIN_CODE" "$(_ir_doc 5-7 14)" 2026-11-10T00:00:00Z
+  (
+    cd "$IR_DIR"
+    mkdir -p .github/workflows
+    printf 'name: x\n' > .github/workflows/new.yml
+    git add .github/workflows/new.yml && git commit -qm "a workflow" && git push -q origin main
+  )
+  _ir_pr 1 topic false
+  rc=0; _ir_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(tail -n 3 "$out.log" | tr '\n' ' '))"
+  assert_contains "$(grep 'PR #1 ' "$out.log")" "skipped" "skipped"
+  assert_contains "$(jq -r .body "$IR_GH/posted-1.json" 2>/dev/null)" ".github/workflows/" "…the comment says why"
+  assert_eq "$(git -C "$IR_DIR" rev-parse topic)" "$(git -C "$IR_REMOTE" rev-parse refs/heads/topic)" "…nothing pushed"
+}
+
 test_index_resolve_listing_fails() {
   echo "Test: index-resolve.sh — the pull requests cannot be listed: ::error::, exit 2"
   _ir_fixture || { assert_true "fixture" false; return 0; }
@@ -4636,5 +4949,392 @@ test_index_resolve_one_pull_request
 test_index_resolve_dispatch_names_the_pull_request
 test_index_resolve_one_bad_answer_stops_no_other
 test_index_resolve_listing_fails
+test_index_resolve_recomputes_cite_lines
+test_index_resolve_recomputes_cite_lines_without_an_index_conflict
+test_index_resolve_skips_docs_it_cannot_recompute
+test_index_resolve_cite_lines_with_a_workflow_file
+test_index_resolve_skips_a_doc_not_fresh_on_either_side
+test_index_resolve_update_index_fails_in_the_worktree
+test_index_resolve_worktree_git_cannot_remove
+test_index_resolve_doc_not_a_regular_file
+
+
+# ============================================================================
+# cite-resolve.sh, which recomputes the cites of one doc whose conflict is
+# only cite line numbers (design 2026-11-18, R2–R4)
+# ============================================================================
+echo
+echo "=== cite-resolve ==="
+
+CR_SCRIPT="$(bash_bin_shim "$STEPS_DIR/cite-resolve.sh")"
+
+# _cr_seq <word> <from> <to>: the lines "<word> <k>", one per k.
+_cr_seq() {
+  local k
+  for ((k = $2; k <= $3; k++)); do printf '%s %s\n' "$1" "$k"; done
+}
+
+# _cr_repo <doc>: a repository (CR_DIR) whose main holds the merge base:
+# src/app/server.py ("server 1" to "server 20"), src/app/util.py ("util 1" to
+# "util 10") and docs/a.md holding <doc>. Branch pr, the pull request's head,
+# starts there too (a branch named head is HEAD on a case-insensitive disk).
+_cr_repo() {
+  CR_DIR=$(new_repo) || return 1
+  mkdir -p "$CR_DIR/src/app" "$CR_DIR/docs"
+  _cr_seq server 1 20 > "$CR_DIR/src/app/server.py"
+  _cr_seq util 1 10 > "$CR_DIR/src/app/util.py"
+  printf '%s\n' "$1" > "$CR_DIR/docs/a.md"
+  git -C "$CR_DIR" add -A && git -C "$CR_DIR" commit -q -m base && git -C "$CR_DIR" branch pr
+}
+
+# _cr_commit <branch> <path> <content>: a commit on <branch> in which <path>
+# holds <content> and a newline.
+_cr_commit() {
+  git -C "$CR_DIR" checkout -q "$1" && mkdir -p "$CR_DIR/$(dirname "$2")" \
+    && printf '%s\n' "$3" > "$CR_DIR/$2" && git -C "$CR_DIR" add -A && git -C "$CR_DIR" commit -q -m "$1: $2"
+}
+
+# _cr_run <out> [<arg>…]: merges pr and main with git merge-tree and runs
+# cite-resolve.sh on docs/a.md: the doc, pr, main, the merged tree and
+# the doc's stage 1, 2 and 3 blobs; or on the given arguments. Its stdout goes
+# to <out>, its stderr to <out>.err. Returns its exit code.
+_cr_run() {
+  local out="$1" mt rc=0
+  shift
+  if [ $# -eq 0 ]; then
+    mt=$(git -C "$CR_DIR" merge-tree --write-tree pr main) || true
+    set -- docs/a.md "$(git -C "$CR_DIR" rev-parse pr)" "$(git -C "$CR_DIR" rev-parse main)" "$(sed -n 1p <<<"$mt")" \
+      "$(_cr_stage 1 <<<"$mt")" "$(_cr_stage 2 <<<"$mt")" "$(_cr_stage 3 <<<"$mt")"
+  fi
+  (cd "$CR_DIR" && "$CR_SCRIPT" "$@") > "$out" 2> "$out.err" || rc=$?
+  return "$rc"
+}
+
+# _cr_stage <n>: docs/a.md's stage <n> blob in merge-tree's output (stdin).
+_cr_stage() {
+  awk -F'\t' -v n="$1" '$2 == "docs/a.md" { split($1, f, " "); if (f[3] == n) print f[2] }'
+}
+
+# The code moves of most cases: pr adds three lines at the top of
+# server.py, main two after its line 8. Base line 5 is pr's 8, main's 5 and
+# the merge's 8; base line 12 is pr's 15, main's 14 and the merge's 17.
+_cr_moves() {
+  _cr_commit pr src/app/server.py "$(_cr_seq head 1 3; _cr_seq server 1 20)"
+  _cr_commit main src/app/server.py "$(_cr_seq server 1 8; _cr_seq main 1 2; _cr_seq server 9 20)"
+}
+
+test_cite_resolve_moves_every_form() {
+  echo "Test: cite-resolve.sh — a full cite, a range, a list item and a continuation each move to the merged lines of their content; the rest of the doc is kept"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo '# A
+
+The handler is `src/app/server.py:5-7`, then `src/app/server.py:12`.
+Both: `src/app/server.py:5-7, 12`.
+Again: `src/app/server.py:5`, `:12`.
+
+The helper is `src/app/util.py:3`.' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit pr docs/a.md '# A
+
+The handler is `src/app/server.py:8-10`, then `src/app/server.py:15`.
+Both: `src/app/server.py:8-10, 15`.
+Again: `src/app/server.py:8`, `:15`.
+
+The helper is `src/app/util.py:3`.'
+  _cr_commit main docs/a.md '# A
+
+The handler is `src/app/server.py:5-7`, then `src/app/server.py:14`.
+Both: `src/app/server.py:5-7, 14`.
+Again: `src/app/server.py:5`, `:14`.
+
+The helper is `src/app/util.py:3`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(cat "$out.err"))"
+  assert_eq '# A
+
+The handler is `src/app/server.py:8-10`, then `src/app/server.py:17`.
+Both: `src/app/server.py:8-10, 17`.
+Again: `src/app/server.py:8`, `:17`.
+
+The helper is `src/app/util.py:3`.' "$(cat "$out")" "the doc, its cites at the merged lines"
+  assert_eq "6" "$(cat "$out.err")" "stderr: the number of cites recomputed"
+  # Bytes, not $(cat), which drops trailing newlines: the doc above plus
+  # exactly one final newline, as docs/a.md has.
+  printf '%s\n' "$(cat "$out")" > "$out.want"
+  assert_true "the output ends in the doc's one final newline" cmp -s "$out.want" "$out"
+}
+
+test_cite_resolve_path_on_an_earlier_line() {
+  echo "Test: cite-resolve.sh — a continuation takes its path from an earlier line of the same paragraph"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The writer lives in `src/app/server.py`
+(write at `:12`).' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit pr docs/a.md 'The writer lives in `src/app/server.py`
+(write at `:15`).'
+  _cr_commit main docs/a.md 'The writer lives in `src/app/server.py`
+(write at `:14`).'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(cat "$out.err"))"
+  assert_eq 'The writer lives in `src/app/server.py`
+(write at `:17`).' "$(cat "$out")" "the continuation names the merged line"
+}
+
+test_cite_resolve_bare_file_name() {
+  echo "Test: cite-resolve.sh — a bare file name resolves to the one tracked file with that name"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `server.py:12`.' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit pr docs/a.md 'The loop is `server.py:15`.'
+  _cr_commit main docs/a.md 'The loop is `server.py:14`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(cat "$out.err"))"
+  assert_eq 'The loop is `server.py:17`.' "$(cat "$out")" "server.py is src/app/server.py"
+}
+
+test_cite_resolve_digit_outside_a_cite() {
+  echo "Test: cite-resolve.sh — a digit difference outside a cite is a text difference: exit 1, naming the doc and the block's line in the head's version"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo '# A
+
+Intro.
+
+3 loops at `src/app/server.py:12`.' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit pr docs/a.md '# A
+
+Intro.
+
+3 loops at `src/app/server.py:15`.'
+  # main also adds two lines above the block, which pr does not have.
+  _cr_commit main docs/a.md '# A
+
+Intro.
+More.
+More still.
+
+4 loops at `src/app/server.py:14`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "1" "$rc" "exit 1"
+  assert_contains "$(cat "$out.err")" '`docs/a.md`' "the reason names the doc"
+  assert_contains "$(cat "$out.err")" "line 5 of the head's version" "…and the block's line in the head's version"
+  assert_eq "1" "$(wc -l < "$out.err" | tr -d ' ')" "…on one line"
+  assert_eq "" "$(cat "$out")" "nothing on stdout"
+}
+
+test_cite_resolve_ambiguous() {
+  echo "Test: cite-resolve.sh — code duplicated with equal context five lines out: exit 1, ambiguous"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The copy is `src/app/server.py:6-8`.' || { assert_true "fixture" false; return 0; }
+  _cr_commit main src/app/server.py "$(_cr_seq dup 1 13; _cr_seq server 1 10)"
+  git -C "$CR_DIR" branch -f pr main
+  _cr_commit pr src/app/server.py "$(_cr_seq head 1 3; _cr_seq dup 1 13; _cr_seq server 1 10)"
+  _cr_commit pr docs/a.md 'The copy is `src/app/server.py:9-11`.'
+  _cr_commit main src/app/server.py "$(_cr_seq dup 1 13; _cr_seq server 1 10; _cr_seq dup 1 13)"
+  _cr_commit main docs/a.md 'The copy is `src/app/server.py:29-31`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "1" "$rc" "exit 1"
+  assert_contains "$(cat "$out.err")" "more than once" "the reason: the lines match more than once"
+}
+
+test_cite_resolve_sides_land_apart() {
+  echo "Test: cite-resolve.sh — the two sides' cites land on different merged lines: exit 1"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `src/app/server.py:12`.' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit pr docs/a.md 'The loop is `src/app/server.py:15`.'
+  # main's 13 is "server 11": main moved the cite to another line.
+  _cr_commit main docs/a.md 'The loop is `src/app/server.py:13`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "1" "$rc" "exit 1"
+  assert_contains "$(cat "$out.err")" "different lines" "the reason: the sides land on different lines"
+}
+
+test_cite_resolve_unanchored_outside_the_blocks() {
+  echo "Test: cite-resolve.sh — a cite outside the blocks that no side anchors in the merged code: exit 1"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `src/app/server.py:12`.
+
+The start is `src/app/server.py:8`.' || { assert_true "fixture" false; return 0; }
+  # Both sides add lines above base line 8: its line 8 names other code on
+  # each side and in the merge.
+  _cr_commit pr src/app/server.py "$(_cr_seq server 1 2; _cr_seq head 1 3; _cr_seq server 3 20)"
+  _cr_commit main src/app/server.py "$(_cr_seq server 1 4; _cr_seq main 1 2; _cr_seq server 5 20)"
+  _cr_commit pr docs/a.md 'The loop is `src/app/server.py:15`.
+
+The start is `src/app/server.py:8`.'
+  _cr_commit main docs/a.md 'The loop is `src/app/server.py:14`.
+
+The start is `src/app/server.py:8`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "1" "$rc" "exit 1"
+  assert_contains "$(cat "$out.err")" '`src/app/server.py:8`' "the reason names the cite"
+  assert_contains "$(cat "$out.err")" "not anchored" "…as not anchored"
+  assert_contains "$(cat "$out.err")" "line 3 of the head's version" "…at its line in the head's version"
+}
+
+test_cite_resolve_range_past_the_end() {
+  echo "Test: cite-resolve.sh — a cite range past the end of its file: exit 1"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `src/app/server.py:12`.' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit pr docs/a.md 'The loop is `src/app/server.py:40-42`.'
+  _cr_commit main docs/a.md 'The loop is `src/app/server.py:14`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "1" "$rc" "exit 1"
+  assert_contains "$(cat "$out.err")" "past the end" "the reason: past the end of the file"
+}
+
+test_cite_resolve_prose_port_outside_the_blocks() {
+  echo "Test: cite-resolve.sh — outside the blocks, a bare :N with no path in its paragraph (on :8090) names no code: it is text"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `src/app/server.py:12`.
+
+It listens on :8090.' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit pr docs/a.md 'The loop is `src/app/server.py:15`.
+
+It listens on :8090.'
+  _cr_commit main docs/a.md 'The loop is `src/app/server.py:14`.
+
+It listens on :8090.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(cat "$out.err"))"
+  assert_eq 'The loop is `src/app/server.py:17`.
+
+It listens on :8090.' "$(cat "$out")" "the cite moves; the port is kept"
+}
+
+test_cite_resolve_widens_to_one_match() {
+  echo "Test: cite-resolve.sh — a cited line that appears twice, with other neighbours one line out: the widened search finds the one"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `src/app/server.py:12`.' || { assert_true "fixture" false; return 0; }
+  _cr_commit main src/app/server.py "$(_cr_seq server 1 2; echo dup; _cr_seq server 4 11; echo dup; _cr_seq server 13 20)"
+  git -C "$CR_DIR" branch -f pr main
+  _cr_moves
+  _cr_commit pr docs/a.md 'The loop is `src/app/server.py:15`.'
+  _cr_commit main docs/a.md 'The loop is `src/app/server.py:14`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(cat "$out.err"))"
+  assert_eq 'The loop is `src/app/server.py:17`.' "$(cat "$out")" "the second dup, by its neighbours"
+}
+
+test_cite_resolve_no_match() {
+  echo "Test: cite-resolve.sh — the head's cited line is not in the merged file: exit 1"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `src/app/server.py:12`.' || { assert_true "fixture" false; return 0; }
+  _cr_commit pr src/app/server.py "$(_cr_seq head 1 3; _cr_seq server 1 20)"
+  _cr_commit main src/app/server.py "$(_cr_seq server 1 11; _cr_seq server 13 20)"
+  _cr_commit pr docs/a.md 'The loop is `src/app/server.py:15`.'
+  _cr_commit main docs/a.md 'The loop is `src/app/server.py:11`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "1" "$rc" "exit 1"
+  assert_contains "$(cat "$out.err")" "not in the merged file" "the reason: no match"
+}
+
+test_cite_resolve_path_names_other_files() {
+  echo "Test: cite-resolve.sh — a bare name that is one file on the head but two on the base branch: exit 1"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `server.py:12`.' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit main lib/server.py "a second server.py"
+  _cr_commit pr docs/a.md 'The loop is `server.py:15`.'
+  _cr_commit main docs/a.md 'The loop is `server.py:14`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "1" "$rc" "exit 1"
+  assert_contains "$(cat "$out.err")" "does not resolve to one file" "the reason: the path"
+}
+
+test_cite_resolve_relative_to_the_doc() {
+  echo "Test: cite-resolve.sh — a path relative to the doc's directory (../src/…) resolves"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `../src/app/server.py:12`.' || { assert_true "fixture" false; return 0; }
+  _cr_moves
+  _cr_commit pr docs/a.md 'The loop is `../src/app/server.py:15`.'
+  _cr_commit main docs/a.md 'The loop is `../src/app/server.py:14`.'
+  rc=0; _cr_run "$out" || rc=$?
+  assert_eq "0" "$rc" "exit 0 ($(cat "$out.err"))"
+  assert_eq 'The loop is `../src/app/server.py:17`.' "$(cat "$out")" "resolved from docs/"
+}
+
+test_cite_resolve_continuation_stops_at_a_paragraph() {
+  echo "Test: cite-resolve.sh — a continuation's path search stops at a blank line and at a heading: exit 1"
+  local out rc sep
+  for sep in blank heading; do
+    out="$(harness_mktemp_d cr)/out"
+    if [ "$sep" = blank ]; then
+      _cr_repo 'The writer is `src/app/server.py`.
+
+(write at `:12`).' || { assert_true "fixture" false; return 0; }
+    else
+      _cr_repo '## `src/app/server.py`
+(write at `:12`).' || { assert_true "fixture" false; return 0; }
+    fi
+    _cr_moves
+    _cr_commit pr docs/a.md "$(git -C "$CR_DIR" show main:docs/a.md | sed 's/:12`/:15`/')"
+    _cr_commit main docs/a.md "$(git -C "$CR_DIR" show main:docs/a.md | sed 's/:12`/:14`/')"
+    rc=0; _cr_run "$out" || rc=$?
+    assert_eq "1" "$rc" "a $sep line before the continuation: exit 1"
+    assert_contains "$(cat "$out.err")" "does not resolve to one file" "…it finds no path"
+  done
+}
+
+test_cite_resolve_invalid_range() {
+  echo "Test: cite-resolve.sh — :0, or a range that ends before it starts: exit 1, an invalid range"
+  local out rc cite
+  for cite in 0 16-15; do
+    out="$(harness_mktemp_d cr)/out"
+    _cr_repo 'The loop is `src/app/server.py:12`.' || { assert_true "fixture" false; return 0; }
+    _cr_moves
+    _cr_commit pr docs/a.md "The loop is \`src/app/server.py:$cite\`."
+    _cr_commit main docs/a.md 'The loop is `src/app/server.py:14`.'
+    rc=0; _cr_run "$out" || rc=$?
+    assert_eq "1" "$rc" ":$cite: exit 1"
+    assert_contains "$(cat "$out.err")" "an invalid range" "…an invalid range"
+  done
+}
+
+test_cite_resolve_usage_and_cannot_run() {
+  echo "Test: cite-resolve.sh — a wrong argument count: exit 3; an object the repository does not hold: exit 2"
+  local out rc
+  out="$(harness_mktemp_d cr)/out"
+  _cr_repo 'The loop is `src/app/server.py:12`.' || { assert_true "fixture" false; return 0; }
+  rc=0; _cr_run "$out" docs/a.md pr || rc=$?
+  assert_eq "3" "$rc" "two arguments: exit 3"
+  rc=0; _cr_run "$out" docs/a.md pr main "pr^{tree}" 0123456789012345678901234567890123456789 \
+    0123456789012345678901234567890123456789 0123456789012345678901234567890123456789 || rc=$?
+  assert_eq "2" "$rc" "a blob the repository does not hold: exit 2"
+  assert_contains "$(cat "$out.err")" "cite-resolve.sh: cannot run" "…with a line saying so"
+}
+
+test_cite_resolve_moves_every_form
+test_cite_resolve_path_on_an_earlier_line
+test_cite_resolve_bare_file_name
+test_cite_resolve_digit_outside_a_cite
+test_cite_resolve_ambiguous
+test_cite_resolve_sides_land_apart
+test_cite_resolve_unanchored_outside_the_blocks
+test_cite_resolve_range_past_the_end
+test_cite_resolve_prose_port_outside_the_blocks
+test_cite_resolve_widens_to_one_match
+test_cite_resolve_no_match
+test_cite_resolve_path_names_other_files
+test_cite_resolve_relative_to_the_doc
+test_cite_resolve_continuation_stops_at_a_paragraph
+test_cite_resolve_invalid_range
+test_cite_resolve_usage_and_cannot_run
 
 print_summary

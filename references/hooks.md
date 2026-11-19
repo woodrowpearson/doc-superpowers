@@ -158,7 +158,7 @@ The git hooks are also scoped where scoping is exact: pre-commit (and the Claude
 | `doc-spec-verify` (AI) | PR open/sync touching indexed specs or their code; its `claims` job (no AI) on every same-repository PR | contents: read, pull-requests: write | PR comment only (its tools edit no file — see *What an AI job's agent can reach*); with `docs/spec-claims/`, the `claims` job fails the check on findings and, while `doc-pr-release` is installed, writes the PR's spec amendments into a `spec-claims` section at the top of the PR description |
 | `doc-pr-full-cycle` (AI) | PR open touching indexed docs or their code | contents + pull-requests: write | **a checked step commits `docs/` and indexed docs to the PR branch** |
 | `doc-pr-release` (AI) | PR pushes | contents + pull-requests: write | **a checked step commits the PR's fragment to the PR branch**, edits the PR body |
-| `doc-index-resolve` (no AI; by name only) | push to the base branch, and by hand (one PR, or all) | contents + pull-requests + actions: write | **pushes a merge of the base to each open same-repository PR branch whose only conflict is `docs/.doc-index.json`** (the index merged by the vendored merge driver; a lease push, so a branch that moved is left alone; never a fork's, or one labelled `no-index-resolve`), dispatches the `--resolve-test-workflow` workflow on it, and keeps one PR comment |
+| `doc-index-resolve` (no AI; by name only) | push to the base branch, and by hand (one PR, or all) | contents + pull-requests + actions: write | **pushes a merge of the base to each open same-repository PR branch whose only conflicts are `docs/.doc-index.json` and the cite line numbers of indexed docs** (the index merged by the vendored merge driver; those docs' cites recomputed against the merged code by `cite-resolve.sh` and their entries re-recorded; a lease push, so a branch that moved is left alone; never a fork's, or one labelled `no-index-resolve`), dispatches the `--resolve-test-workflow` workflow on it, and keeps one PR comment |
 | `doc-ledger-publish` (no AI) | every 30 minutes, and by hand | contents: write; pull-requests + issues: read | with `docs/ledger/config.json`, `ledger publish` pushes one commit to the views branch (`views.branch`, default `doc-ledger-views`) and, with in-flight awareness on, deletes stale in-flight refs; without it, nothing |
 
 How every workflow behaves (tell the user when they ask what they agree to):
@@ -241,7 +241,7 @@ others install only when named:
 | `doc-spec-verify.yml` | PR open/sync touching indexed specs; its `claims` job on every same-repository PR (never forks or Dependabot) | Verifies spec compliance against changed code; the `claims` job (no AI) checks the spec claims and posts the amendment batch |
 | `doc-pr-full-cycle.yml` | PR open touching indexed docs | Superset of review-pr — runs review + update + diagram + sync |
 | `doc-pr-release.yml` | PR open/sync/reopen | Drafts/maintains `RELEASE-NOTES.next/PR-<N>.md` fragments and the managed `<!-- doc-superpowers:start/end -->` section of the PR body |
-| `doc-index-resolve.yml` | Push to the base branch; `workflow_dispatch` (input `pr`: one pull request) | Merges the base into each open same-repository PR whose only conflict is the doc index, with the vendored merge driver (`index-resolve.sh`, `merge-doc-index.sh` beside it); no AI; pushes with a lease, dispatches `--resolve-test-workflow`, one marked PR comment; one run at a time (`concurrency: doc-index-resolve`, never cancelled); never installed by `--workflows=all` |
+| `doc-index-resolve.yml` | Push to the base branch; `workflow_dispatch` (input `pr`: one pull request) | Merges the base into each open same-repository PR whose only conflicts are the doc index and the cite line numbers of indexed docs, with the vendored merge driver (`index-resolve.sh`, `merge-doc-index.sh` and `cite-resolve.sh` beside it); no AI; pushes with a lease, dispatches `--resolve-test-workflow`, one marked PR comment; one run at a time (`concurrency: doc-index-resolve`, never cancelled); never installed by `--workflows=all` |
 | `doc-ledger-publish.yml` | Every 30 minutes (`*/30 * * * *`); `workflow_dispatch` | Publishes the work-ledger views (`ledger publish`, `references/ledger.md`); no AI; one run at a time (`concurrency: doc-ledger-publish`, never cancelled); on a ledger host, ships the ledger helper set; skipped by `--workflows=all` without `docs/ledger/config.json` |
 
 `doc-index-resolve.yml` runs `index-resolve.sh` once per push to the base branch, over every open
@@ -252,9 +252,12 @@ pull request against it (or the one `workflow_dispatch` names):
   lease refused the push. A comment there would overwrite an earlier notice and tells an author
   who is pushing nothing; the next run looks again.
   **Not touched**: one GitHub reports as mergeable.
-- **Merged**, when git without the driver finds `docs/.doc-index.json` the only conflict, the
-  driver merges it cleanly, no entry both sides keep is dropped, and the merge brings no file under
-  `.github/workflows/`. The merge (first parent: the head read) is pushed with
+- **Merged**, when every file git without the driver conflicts on is `docs/.doc-index.json` or a
+  *cite doc* (below), the driver merges the index cleanly, no entry both sides keep is dropped, and
+  the merge brings no file under `.github/workflows/`. The driver's record rule decides a doc's
+  entry that both sides re-recorded: when exactly one side's `content_hash` and `code_oids` equal
+  their three-way merge, that side's whole record is kept, even when it is the older one; when both
+  or neither do, the newer record wins. The merge (first parent: the head read) is pushed with
   `--force-with-lease=refs/heads/<branch>:<head>`, the `--resolve-test-workflow` workflow is
   dispatched on the branch, and the comment says so. The other `pull_request` checks wait for the
   author's next push; without a dispatch, the comment asks for one (an empty commit works) or a
@@ -271,6 +274,22 @@ pull request against it (or the one `workflow_dispatch` names):
   updated in place. The merge uses `git merge-tree --write-tree` with the driver given to git for that call
   alone (git 2.40 or later), so the checkout is never left mid-merge.
 
+A *cite doc* is a regular Markdown file keyed in both sides' indexes and changed on both sides
+since the merge base, whose conflict blocks (`git merge-file --diff3`) differ only in the line
+numbers of code cites (`path:12`, `path:12-14`, a list item `, 20`, a continuation `:20`). It
+conflicts after any merge to the base that moves the code it cites. Each one must read current,
+unmodified since its record, on the head and on the base. `cite-resolve.sh`, vendored beside the
+step, searches the merged code for the lines each side's cite names (a unique match, widening by
+up to five lines of context) and rewrites the block as the head's side with the new numbers. Both
+sides must land on the same range, and every cite outside the blocks must still name the same
+lines in the merged code. The step then re-records those docs with the vendored `doc-tools.sh
+update-index` in a temporary worktree at the head that holds the merged files and runs no hook,
+filter or file of the pull request. Each entry keeps the newer `last_verified` of the two sides,
+since the step only read the cites. `check-freshness` must then read each doc current on the final
+tree. Any doc that fails one of these is a skip, its comment naming the doc and the line. The
+merge commit's message and the comment name the docs and the number of cites recomputed. The index
+need not conflict for such a merge; an index-only merge is unchanged.
+
 The `doc-pr-release.yml` workflow uses shell helpers installed alongside
 it at `.github/scripts/doc-pr-release/`:
 - `extract-context.sh` — emits JSON context: PR body, the fragment and its computed hash state, and the PR's own commits (never base-branch or bot commits) since the checkout the last sync recorded
@@ -285,7 +304,7 @@ jobs' scope gate `freshness-check.sh`, the spec-claims check
 `docs/ledger/config.json` it fails before `doc-tools.sh` runs when the
 ledger helper set is not vendored; without it, the verb's inert line),
 the index resolver `index-resolve.sh` (with the merge driver
-`merge-doc-index.sh` beside it),
+`merge-doc-index.sh` and the cite relocator `cite-resolve.sh` beside it),
 auth selection, the pinned plugin
 fetch `prepare-agent.sh` (from the workflow's
 `DOC_SUPERPOWERS_MARKETPLACE_URL`, rendered at install: `--marketplace-url`),

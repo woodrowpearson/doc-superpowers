@@ -264,7 +264,7 @@ Install opt-in hooks for automated freshness monitoring. `setup` (*Set up a repo
 # Claude-powered workflows are opt-in by name
 /doc-superpowers hooks install --ci --workflows=doc-pr-release,doc-review-pr
 /doc-superpowers hooks install --ci --workflows=doc-ledger-publish  # the ledger views publisher (shell, no secret)
-/doc-superpowers hooks install --ci --workflows=doc-index-resolve --resolve-test-workflow=tests.yml  # merges the base into PRs that conflict only in the doc index (shell, no secret; by name only)
+/doc-superpowers hooks install --ci --workflows=doc-index-resolve --resolve-test-workflow=tests.yml  # merges the base into PRs that conflict only in the doc index and docs' cite line numbers (shell, no secret; by name only)
 /doc-superpowers hooks install --ci --workflows=all    # every template (doc-ledger-publish only with docs/ledger/config.json; never doc-index-resolve)
 /doc-superpowers hooks install --ci --workflows=none   # only vendor doc-tools.sh
 /doc-superpowers hooks install --ci --force            # also re-add workflows you removed on purpose

@@ -3358,7 +3358,7 @@ test_ci_index_resolve_vendors_the_driver() {
   setup
   inst install --ci --workflows=doc-index-resolve
   assert_eq "0" "$IRC" "install --ci --workflows=doc-index-resolve exits 0"
-  assert_eq "index-resolve.sh install-jq.sh merge-doc-index.sh" "$(_steps_vendored)" "its step, the jq pin and the driver its step runs, and no other"
+  assert_eq "cite-resolve.sh index-resolve.sh install-jq.sh merge-doc-index.sh" "$(_steps_vendored)" "its step, the jq pin, and the cite relocator and the driver its step runs, and no other"
   assert_true "the driver is a byte copy of scripts/merge-doc-index.sh" cmp -s "$SCRIPT_DIR/merge-doc-index.sh" .github/scripts/doc-superpowers-steps/merge-doc-index.sh
   assert_true "…and executable" test -x .github/scripts/doc-superpowers-steps/merge-doc-index.sh
   inst status --ci

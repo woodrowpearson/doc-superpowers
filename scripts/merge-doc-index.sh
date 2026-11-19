@@ -43,7 +43,17 @@
 #       * the verification record (content_hash, code_oids, code_commit,
 #         last_verified) is ONE field: update-index writes it as a unit, and a
 #         doc hash from one side beside code ids from the other would attest a
-#         doc/code pair nobody verified. Two different records with the same
+#         doc/code pair nobody verified. When both sides changed it and
+#         last_verified orders them, the record that describes the merged
+#         files wins: content_hash and code_oids are merged three-way
+#         (content_hash as any field, code_oids key by key, each value from
+#         the side that changed it), and if exactly one side's content_hash
+#         and code_oids both equal that result, that side's whole record is
+#         taken, even when it is the older one. So a branch that changed a
+#         doc or its code and re-recorded keeps its record against a later
+#         re-record that changed nothing. When both sides match, or neither
+#         does (the doc or its code changed on both sides, so the merged doc
+#         reads stale), the newer record wins. Two different records with the same
 #         last_verified are a conflict; two equal ones are not — except that
 #         when neither side re-verified the entry (last_verified is still the
 #         BASE's: update-index is its only writer), the two sides agree on
@@ -235,6 +245,17 @@ def oids3($b; $o; $t):
       | if any($r[]; .v == null) then null
         else [reduce ($r[] | select(.v != [])) as $x ({}; . + {($x.k): $x.v[0]})] end
     end;
+# Which side has the record that describes the merged files: "o" or "t" when
+# exactly that side has content_hash and code_oids equal to their three-way merge
+# (content_hash by pick3, code_oids key by key); null when both or neither do.
+def fits($b; $o; $t):
+  pick3(w($b; "content_hash"); w($o; "content_hash"); w($t; "content_hash")) as $h
+  | oids3(w($b; "code_oids"); w($o; "code_oids"); w($t; "code_oids")) as $oi
+  | if $h == null or $oi == null then null
+    else (w($o; "content_hash") == $h and w($o; "code_oids") == $oi) as $fo
+      | (w($t; "content_hash") == $h and w($t; "code_oids") == $oi) as $ft
+      | if $fo and ($ft | not) then "o" elif $ft and ($fo | not) then "t" else null end
+    end;
 # code_refs as in-place substitutions (plain lists in, merged list or null out).
 def strs: type == "array" and all(.[]; type == "string");
 # The substitutions that turn $b into $x ({old: new}), when $x kept the base length.
@@ -283,7 +304,11 @@ def merge_fields($b; $o; $t):
   order($o; $t) as $ord
   # A field both sides changed to different values: the newer side, or null.
   | def newer($x; $y): if $ord == "t" then $y elif $ord == "o" then $x else null end;
-  (pick3(vrec($b); vrec($o); vrec($t)) // newer(vrec($o); vrec($t))
+  (pick3(vrec($b); vrec($o); vrec($t))
+   // (if $ord == null then null
+       else (fits($b; $o; $t) as $fit
+             | if $fit == "o" then vrec($o) elif $fit == "t" then vrec($t)
+               else newer(vrec($o); vrec($t)) end) end)
    // (if $ord == null and vsame($b; $o; $t)
        then (oids3(w($b; "code_oids"); w($o; "code_oids"); w($t; "code_oids")) as $oi
              | if $oi == null then null
