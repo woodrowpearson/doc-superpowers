@@ -1,5 +1,28 @@
 # Release Notes
 
+## v3.17.0 (2026-11-18)
+
+This release lets `doc-index-resolve` settle the other conflict every merge to the base leaves behind, and fixes how the index merge driver picks between two re-recorded entries. A merge that changes code shifts the line numbers that docs cite (`path:12`, `path:12-14`). Every open pull request that also edited those docs then conflicts in their text. In 3.15.0 the step skipped such a pull request; now it recomputes the numbers and merges.
+
+### Upgrading from 3.16.x
+- **Projects with `doc-index-resolve` installed:** re-run `hooks install --ci` and commit what it writes. The step now runs `cite-resolve.sh`, which ships beside `index-resolve.sh` and `merge-doc-index.sh` in `.github/scripts/doc-superpowers-steps/`.
+- **The merge driver changed** (`scripts/merge-doc-index.sh`). A clone that registered it with `hooks install --git` finds the newest installed plugin version each time a merge runs, so updating the plugin is enough; the vendored CI copy updates with `install --ci`.
+
+### Added
+- **Cite-number merges in `doc-index-resolve`** (`references/hooks.md` → *doc-index-resolve*). Besides the doc index, a pull request may now conflict in *cite docs*: indexed Markdown docs changed on both sides whose conflict blocks differ only in the line numbers of code cites.
+  - `cite-resolve.sh` finds the lines each side's cite names in the merged code, needing a unique match and widening by up to five lines of context. It rewrites the block as the head's side with the new numbers.
+  - Both sides must land on the same range, and every cite outside the blocks must still name the same lines in the merged code.
+  - The step re-records those docs with `update-index` in a temporary worktree at the head that runs no hook, filter or file of the pull request. Each entry keeps the newer `last_verified`, since the step only read the cites.
+  - Anything else in a cite doc's conflict (prose, digits outside a cite, a cite that cannot be placed) is a skip, and the comment names the doc and the line.
+  - The merge commit's message and the comment name the docs and the number of cites recomputed. An index-only merge is unchanged.
+
+### Fixes
+- **The merge driver keeps the record that describes the merged files.** When both sides re-recorded a doc's index entry, the driver kept the newer side's whole record. A branch that changed a doc or its code then lost its record to a later re-record that changed nothing, and the merged doc read stale. Now `content_hash` and `code_oids` are merged three-way; when exactly one side's record equals that result, that side's record is kept, even when it is the older one. When both or neither do, the newer record wins, as before.
+
+### Other
+- Not run on GitHub: the cite merge is proven against a bare remote and a stubbed `gh`, as the index-only merge was.
+- Verified locally, since GitHub Actions does not run on this account. Under bash 5.x and `/bin/bash` 3.2: `test-doc-tools.sh` 2016, `test-hooks.sh` 4423, `test-spec-status-model.sh` 1078, `test-doc-pr-release.sh` 954, `test-merge-driver.sh` 919, `test-spec-claims.sh` 3269 and `test-ledger.sh` 3865 assertions passed, none failed. The writing suite passed under python3 3.13.3 and `/usr/bin/python3` 3.9.6, and the doc-search pytest suite passed (903, the 2 live tests skipped). So did `self-install`, `zizmor`, `gitleaks` and `check-version`. The driver's new tests failed on the 3.16.0 driver (23 of them) before the fix. Not run: `dep-audit`, which needs the network; `search/uv.lock` is unchanged.
+
 ## v3.16.0 (2026-11-18)
 
 This release renders Mermaid diagrams on your own machine. Until now the `diagram` action told agents to render through a Mermaid MCP tool, which hands back links to an outside rendering service, so each diagram's source left the machine. `doc-tools.sh diagram` replaces it: a pinned renderer runs in a local headless Chrome that refuses every outside request, and the skill, the docs and the evals no longer name the MCP tool.
