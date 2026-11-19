@@ -256,8 +256,9 @@ pull request against it (or the one `workflow_dispatch` names):
   *cite doc* (below), the driver merges the index cleanly, no entry both sides keep is dropped, and
   the merge brings no file under `.github/workflows/`. The driver's record rule decides a doc's
   entry that both sides re-recorded: when exactly one side's `content_hash` and `code_oids` equal
-  their three-way merge, that side's whole record is kept, even when it is the older one; when both
-  or neither do, the newer record wins. The merge (first parent: the head read) is pushed with
+  their three-way merge, that side's whole record is kept, even when it is the older one; when
+  neither does but both hold the same `content_hash`, `code_oids` merge key by key and the rest is
+  the newer side's; otherwise the newer record wins. The merge (first parent: the head read) is pushed with
   `--force-with-lease=refs/heads/<branch>:<head>`, the `--resolve-test-workflow` workflow is
   dispatched on the branch, and the comment says so. The other `pull_request` checks wait for the
   author's next push; without a dispatch, the comment asks for one (an empty commit works) or a

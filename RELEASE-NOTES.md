@@ -1,5 +1,18 @@
 # Release Notes
 
+## v3.17.1 (2026-11-18)
+
+This release completes the index merge driver's record rule from 3.17.0. When two branches each re-recorded a doc against different code it cites, without changing the doc's text, the merged doc read stale.
+
+### Upgrading from 3.17.0
+- **The merge driver changed** (`scripts/merge-doc-index.sh`). A clone that registered it with `hooks install --git` finds the newest installed plugin version each time a merge runs, so updating the plugin is enough. A project with `doc-index-resolve` installed re-runs `hooks install --ci` and commits what it writes, which updates the vendored copy.
+
+### Fixes
+- **Same doc text, different refs: `code_oids` merge key by key.** 3.17.0 keeps a side's whole record when exactly one side's `content_hash` and `code_oids` equal their three-way merge. When each side re-recorded the entry after changing a different code ref, neither record matches, so the newer record won whole and dropped the other side's code ids. Now, when both sides re-recorded the entry and hold the same `content_hash`, `code_oids` merge key by key (each id from the side that recorded it) and the rest of the record is the newer side's, so the merged doc reads current. When the doc text differs between the sides, the newer record still wins whole and the doc reads stale, as before.
+
+### Other
+- Verified locally, since GitHub Actions does not run on this account. Under bash 5.x and `/bin/bash` 3.2: `test-merge-driver.sh` 927, `test-doc-pr-release.sh` 954 and `test-hooks.sh` 4423 assertions passed, none failed; under bash 5.x also `test-doc-tools.sh` 2016 and `test-spec-status-model.sh` 1078, with `self-install`, `gitleaks` and `check-version`. The two new cases fail on 3.17.0's driver. The other suites were not re-run: this release changes only the merge driver, its tests and docs.
+
 ## v3.17.0 (2026-11-18)
 
 This release lets `doc-index-resolve` settle the other conflict every merge to the base leaves behind, and fixes how the index merge driver picks between two re-recorded entries. A merge that changes code shifts the line numbers that docs cite (`path:12`, `path:12-14`). Every open pull request that also edited those docs then conflicts in their text. In 3.15.0 the step skipped such a pull request; now it recomputes the numbers and merges.
