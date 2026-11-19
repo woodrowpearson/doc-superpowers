@@ -51,9 +51,13 @@
 #         and code_oids both equal that result, that side's whole record is
 #         taken, even when it is the older one. So a branch that changed a
 #         doc or its code and re-recorded keeps its record against a later
-#         re-record that changed nothing. When both sides match, or neither
-#         does (the doc or its code changed on both sides, so the merged doc
-#         reads stale), the newer record wins. Two different records with the same
+#         re-record that changed nothing. When neither matches but both sides
+#         re-verified and hold the same content_hash, each side changed other refs against the
+#         same doc text, so code_oids merge key by key (each value from the
+#         side that verified it) and the rest of the record is the newer
+#         side's. Otherwise, when both match or neither does (the doc changed
+#         on one side and its code on the other, so the merged doc reads
+#         stale), the newer record wins. Two different records with the same
 #         last_verified are a conflict; two equal ones are not — except that
 #         when neither side re-verified the entry (last_verified is still the
 #         BASE's: update-index is its only writer), the two sides agree on
@@ -308,6 +312,13 @@ def merge_fields($b; $o; $t):
    // (if $ord == null then null
        else (fits($b; $o; $t) as $fit
              | if $fit == "o" then vrec($o) elif $fit == "t" then vrec($t)
+               elif w($o; "content_hash") == w($t; "content_hash")
+                    and w($o; "last_verified") != w($b; "last_verified")
+                    and w($t; "last_verified") != w($b; "last_verified")
+               then (oids3(w($b; "code_oids"); w($o; "code_oids"); w($t; "code_oids")) as $oi
+                     | if $oi == null then newer(vrec($o); vrec($t))
+                       else newer(vrec($o); vrec($t)) as $n
+                         | [$n[0], $oi, $n[2], $n[3]] end)
                else newer(vrec($o); vrec($t)) end) end)
    // (if $ord == null and vsame($b; $o; $t)
        then (oids3(w($b; "code_oids"); w($o; "code_oids"); w($t; "code_oids")) as $oi

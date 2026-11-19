@@ -1202,6 +1202,26 @@ for way in drive drive_swapped; do
   assert_eq "0" "$DRV_RC" "R7 both match ($way): exit 0"
   assert_json_field "$DRV_OUT" "$REC" "sha256:h0 oid1 c2 2026-01-01T00:00:03Z" "R7 both match: the newer record wins ($way)"
 done
+# (f) same doc text, each side changed and re-recorded a different ref: neither
+# record matches, so code_oids merge key by key; the rest is the newer side's.
+REC2='.docs["docs/a.md"] | [.content_hash, .code_oids["src/a.js"], .code_oids["src/b.js"], .code_commit, .last_verified] | join(" ")'
+derive "$B" '.docs["docs/a.md"] += {code_oids: {"src/a.js": "oid0", "src/b.js": "bid0"}}'
+derive "$O" '.docs["docs/a.md"] += {code_oids: {"src/a.js": "oid1", "src/b.js": "bid0"}, code_commit: "c1", last_verified: "2026-01-01T00:00:02Z"}'
+derive "$T" '.docs["docs/a.md"] += {code_oids: {"src/a.js": "oid0", "src/b.js": "bid2"}, code_commit: "c2", last_verified: "2026-01-01T00:00:03Z"}'
+for way in drive drive_swapped; do
+  "$way"
+  assert_eq "0" "$DRV_RC" "R7 different refs, same doc ($way): exit 0"
+  assert_json_field "$DRV_OUT" "$REC2" "sha256:h0 oid1 bid2 c2 2026-01-01T00:00:03Z" "R7 different refs, same doc: ids merge key by key, the rest newer ($way)"
+done
+# (g) ours changed the doc text, theirs a ref: nobody verified that pair, so the
+# newer record wins and the merged doc reads stale.
+derive "$O" '.docs["docs/a.md"] += {content_hash: "sha256:h1", code_oids: {"src/a.js": "oid0", "src/b.js": "bid0"}, code_commit: "c1", last_verified: "2026-01-01T00:00:02Z"}'
+for way in drive drive_swapped; do
+  "$way"
+  assert_eq "0" "$DRV_RC" "R7 doc on one side, ref on the other ($way): exit 0"
+  assert_json_field "$DRV_OUT" "$REC2" "sha256:h0 oid0 bid2 c2 2026-01-01T00:00:03Z" "R7 doc vs ref: the newer record wins whole ($way)"
+done
+write_index "$B" "{\"docs/a.md\": $ENTRY}"
 # Unordered (equal last_verified) stays a conflict, even when one side matches.
 derive "$O" '.docs["docs/a.md"] += {code_oids: {"src/a.js": "oid1"}, code_commit: "c1", last_verified: "2026-01-01T00:00:03Z"}'
 derive "$T" '.docs["docs/a.md"] += {code_commit: "c2", last_verified: "2026-01-01T00:00:03Z"}'
