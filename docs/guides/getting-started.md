@@ -69,7 +69,7 @@ No configuration required for the doc suite: `setup` (below) turns on what you c
 
 | Enhancement | How to Add | What It Enables |
 |-------------|-----------|-----------------|
-| Diagram renderer | Node 18 or newer, `npm` and Chrome or Chromium (`DOC_SUPERPOWERS_CHROME` names one; `doc-tools.sh diagram install-browser` installs one) | PNG diagrams rendered on your machine (`doc-tools.sh diagram render`) instead of inline source. Their look comes from one Mermaid config file: `docs/diagrams/config.json`, `--config` or `DOC_SUPERPOWERS_DIAGRAM_CONFIG` |
+| Diagram renderer | Node 22.12 or newer, `npm` and Chrome or Chromium (`DOC_SUPERPOWERS_CHROME` names one; `doc-tools.sh diagram install-browser` installs one) | PNG diagrams rendered on your machine (`doc-tools.sh diagram render`) instead of inline source. Their look comes from one Mermaid config file: `docs/diagrams/config.json`, `--config` or `DOC_SUPERPOWERS_DIAGRAM_CONFIG` |
 
 Bundled: `scripts/doc-tools.sh` provides freshness tracking out of the box — content hashing for docs, content identity for code (the git object id of each code ref, recorded when a doc is indexed or re-baselined). No additional scripts needed.
 
