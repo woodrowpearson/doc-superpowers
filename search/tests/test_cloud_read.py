@@ -140,6 +140,12 @@ def test_vertex_retry_policy() -> None:
     assert VertexEmbedder(cloud_cfg(), client=genai, sleep=no_sleep).embed_query("q").shape == (DIMS,)
     assert len(genai.calls) == 3
 
+    # google-genai 3.x times out through httpx2 (2.x through httpx): its client-side timeout is retried too
+    http = pytest.importorskip("httpx2")
+    genai = FakeGenai(script=[http.ReadTimeout("read timed out")])
+    assert VertexEmbedder(cloud_cfg(), client=genai, sleep=no_sleep).embed_query("q").shape == (DIMS,)
+    assert len(genai.calls) == 2
+
     slept.clear()
     genai = FakeGenai(script=[api_error(400, "INVALID_ARGUMENT")])
     with pytest.raises(errors.ClientError):
