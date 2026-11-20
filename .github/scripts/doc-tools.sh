@@ -3081,20 +3081,21 @@ tools version|cmd_tools_version|none|
   Print the doc-superpowers version this doc-tools.sh belongs to: the
   first release heading of the plugin's RELEASE-NOTES.md (as check-version
   reads it). Exits 1 from a vendored copy, whose version is unknown.
-tools security-floor|cmd_tools_security_floor|none|floor=
-  [--floor X.Y.Z] <release-notes file>
+tools security-floor|cmd_tools_security_floor|none|floor= ceiling=
+  [--floor X.Y.Z] [--ceiling X.Y.Z] <release-notes file>
   Read a RELEASE-NOTES.md as data (its headings only; nothing in it runs;
   at most its first 2,000,000 bytes, cut on a line boundary). A release is
   a security release when its "## vX.Y.Z (YYYY-MM-DD)" section holds a
   "### Security" heading before the next "## " heading; nothing inside a
-  code fence counts. Prints "first <token>" for the first "## v<digit>"
-  heading (check-version's first release heading), "release X.Y.Z 1|0" per
-  release section in file order (1: a security release), then
-  "newest-security X.Y.Z", the newest security release no newer than the
-  first heading's (a release is never newer than the notes that carry it),
-  when there is one. With --floor, a last line "floor X.Y.Z below|meets"
+  code fence counts. Prints "first X.Y.Z" for the first release heading
+  (check-version's; a draft heading above it never counts), "release
+  X.Y.Z 1|0" per release section in file order (1: a security release),
+  then "newest-security X.Y.Z", the newest security release no newer than
+  the first release heading's (a release is never newer than the notes
+  that carry it) nor than --ceiling (the tag the notes came from), when
+  there is one. With --floor, a last line "floor X.Y.Z below|meets"
   and exit 1 when X.Y.Z is below that release; else exit 0. Exit 2 for a
-  file that cannot be read or a malformed --floor. Runs from a vendored
+  file that cannot be read or a malformed --floor or --ceiling. Runs from a vendored
   copy too: the doc-security-schedule workflow's step does.
 writing check|cmd_writing|none|
   [--profile terse|full] [--github] [--format text|json] [--name <label>] <file>...
@@ -8191,11 +8192,14 @@ _security_notes() {
 }
 
 cmd_tools_security_floor() {
-  local file out first ceiling="" v newest="" floor="${_OPT_floor:-}"
+  local file out first ceiling="" v newest="" floor="${_OPT_floor:-}" cap="${_OPT_ceiling:-}"
   [ $# -eq 1 ] || _usage_error "tools security-floor" "takes one release-notes file (got $#)"
   file=$1
   if [ -n "$floor" ] && ! [[ "$floor" =~ ^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$ ]]; then
     _usage_error "tools security-floor" "--floor takes a release version X.Y.Z (got '$floor')"
+  fi
+  if [ -n "$cap" ] && ! [[ "$cap" =~ ^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$ ]]; then
+    _usage_error "tools security-floor" "--ceiling takes a release version X.Y.Z (got '$cap')"
   fi
   if [ ! -f "$file" ] || [ ! -r "$file" ]; then
     echo "ERROR: tools security-floor: $file is not a file that can be read" >&2
@@ -8208,6 +8212,8 @@ cmd_tools_security_floor() {
   [ -z "$out" ] || printf '%s\n' "$out"
   first=$(printf '%s\n' "$out" | sed -n 's/^first //p')
   if [[ "$first" =~ ^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$ ]]; then ceiling=$first; fi
+  # The lower of the two (doc_search.release_cache: min(first, tag)).
+  if [ -n "$cap" ] && { [ -z "$ceiling" ] || _version_lt "$cap" "$ceiling"; }; then ceiling=$cap; fi
   while IFS=' ' read -r _ v _; do
     [ -n "$v" ] || continue
     if [ -n "$ceiling" ] && _version_lt "$ceiling" "$v"; then continue; fi

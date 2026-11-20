@@ -48,7 +48,11 @@ jobs:
       # Data only: the newest release tag's RELEASE-NOTES.md (one shallow
       # fetch of that tag, hooks off; at most 2,000,000 bytes) into $RUNNER_TEMP.
       - name: Fetch the newest release's notes
+        id: notes
         run: .github/scripts/doc-superpowers-steps/fetch-release-notes.sh "$DOC_SUPERPOWERS_MARKETPLACE_URL" "$RUNNER_TEMP/doc-superpowers-release-notes.md"
 
       - name: Check requires against the newest security release
+        env:
+          # The tag the notes came from, checked against their first heading.
+          DOC_SUPERPOWERS_RELEASE_TAG: ${{ steps.notes.outputs.tag }}
         run: .github/scripts/doc-superpowers-steps/security-floor.sh "$RUNNER_TEMP/doc-superpowers-release-notes.md" docs/search/config.json

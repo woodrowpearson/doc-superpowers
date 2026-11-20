@@ -7633,6 +7633,27 @@ test_tools_security_floor_ceiling_is_the_first_release() {
   teardown
 }
 
+test_tools_security_floor_ceiling_option() {
+  echo "test: tools security-floor --ceiling X.Y.Z — the ceiling is the lower of it and the first release heading (release_cache's min(first, tag)); a malformed one is a usage error"
+  setup
+  local fixture out rc
+  fixture="$SCRIPT_DIR/../search/tests/fixtures/release-notes-security.md"
+  out=$("$DOC_TOOLS" tools security-floor --ceiling 3.18.0 "$fixture" 2>&1) || true
+  assert_contains "$out" "newest-security 3.18.0" "--ceiling 3.18.0 under notes opening 3.19.0: 3.19.0's security section dropped"
+  assert_contains "$out" "first 3.19.0" "…the first heading still reported as it is"
+  out=$("$DOC_TOOLS" tools security-floor --ceiling 3.17.9 "$fixture" 2>&1) || true
+  assert_not_contains "$out" "newest-security" "--ceiling 3.17.9: no security release at or below it"
+  out=$("$DOC_TOOLS" tools security-floor --ceiling 9.0.0 "$fixture" 2>&1) || true
+  assert_contains "$out" "newest-security 3.19.0" "--ceiling 9.0.0: the first heading (3.19.0) is the lower, so 3.19.0"
+  rc=0
+  out=$("$DOC_TOOLS" tools security-floor --ceiling 3.18.0 --floor 3.18.0 "$fixture" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "--ceiling 3.18.0 --floor 3.18.0: meets, exit 0 ($out)"
+  rc=0
+  "$DOC_TOOLS" tools security-floor --ceiling v3.18 "$fixture" >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "a malformed --ceiling: usage error, exit 2"
+  teardown
+}
+
 test_i10_no_hidden_sed_or_ripgrep_dependency() {
   echo "test: no shipped script needs GNU sed or ripgrep; CI installs no GNU sed"
   local repo_root f hits=""
@@ -10156,6 +10177,7 @@ run_tests() {
   test_i10_tools_from_the_vendored_copy
   test_tools_security_floor_reads_the_marker
   test_tools_security_floor_ceiling_is_the_first_release
+  test_tools_security_floor_ceiling_option
   test_i10_no_hidden_sed_or_ripgrep_dependency
 
   # --- Work ledger: the vendored helper set (3.3.0 Task 17) ---

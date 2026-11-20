@@ -12,7 +12,9 @@
 # Usage: fetch-release-notes.sh <repository URL> <out file>
 #
 # Env:
-#   RUNNER_TEMP  where the scratch repository goes (default: a new mktemp -d)
+#   RUNNER_TEMP    where the scratch repository goes (default: a new mktemp -d)
+#   GITHUB_OUTPUT  when set, the step output tag=X.Y.Z (the tag chosen, which
+#                  security-floor.sh checks the notes' first heading against)
 #
 # Exit codes: 0 the notes written · 1 with an ::error:: when the URL is empty,
 # its tags cannot be listed, it has no release tag, the tag cannot be fetched
@@ -54,3 +56,6 @@ git -C "$repo" cat-file -e "refs/tags/v$tag:RELEASE-NOTES.md" 2>/dev/null \
 { git -C "$repo" show "refs/tags/v$tag:RELEASE-NOTES.md" 2>/dev/null || true; } \
   | head -c "$NOTES_MAX" > "$OUT"
 echo "doc-superpowers: release notes of v$tag from $URL"
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  echo "tag=$tag" >> "$GITHUB_OUTPUT"
+fi

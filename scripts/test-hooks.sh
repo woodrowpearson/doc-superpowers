@@ -13400,7 +13400,7 @@ sf_step() {
     printf '%s\n' "$1" > docs/search/config.json
   fi
   RUN_RC=0
-  RUN_OUT=$(env DOC_TOOLS="$DOC_TOOLS" PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/ci/doc-superpowers-steps/security-floor.sh" "$2" docs/search/config.json 2>&1) || RUN_RC=$?
+  RUN_OUT=$(env DOC_TOOLS="$DOC_TOOLS" DOC_SUPERPOWERS_RELEASE_TAG="${SF_TAG:-}" PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/ci/doc-superpowers-steps/security-floor.sh" "$2" docs/search/config.json 2>&1) || RUN_RC=$?
 }
 
 test_security_floor_step() {
@@ -13435,6 +13435,28 @@ test_security_floor_step() {
   teardown
 }
 
+test_security_floor_step_checks_the_tag() {
+  echo "test: security-floor.sh — DOC_SUPERPOWERS_RELEASE_TAG (the tag fetch-release-notes.sh chose): notes whose first release heading is another version warn and are clamped to the tag, as install.sh upgrade's upg_scan does; the same version, no warning; a malformed tag, exit 1"
+  setup
+  local fixture="$SCRIPT_DIR/../search/tests/fixtures/release-notes-security.md"
+  SF_TAG=3.19.0 sf_step '{"requires": ">=3.18.0"}' "$fixture"
+  assert_eq "1" "$RUN_RC" "tag 3.19.0, notes opening 3.19.0, requires >=3.18.0: exit 1 as before"
+  assert_not_contains "$RUN_OUT" "::warning::" "…no warning"
+  SF_TAG=3.18.0 sf_step '{"requires": ">=3.18.0"}' "$fixture"
+  assert_contains "$RUN_OUT" "::warning::" "tag 3.18.0, notes opening 3.19.0: a warning"
+  assert_contains "$RUN_OUT" "v3.18.0" "…naming the tag"
+  assert_contains "$RUN_OUT" "3.19.0" "…and the notes' first release heading"
+  assert_eq "0" "$RUN_RC" "…clamped to the tag: 3.19.0's security section dropped, requires >=3.18.0 meets 3.18.0 ($RUN_OUT)"
+  printf '# Release Notes\n\nno release heading\n' > bare.md
+  SF_TAG=3.19.0 sf_step '{"requires": ">=3.18.0"}' bare.md
+  assert_contains "$RUN_OUT" "::warning::" "notes with no release heading under tag 3.19.0: a warning"
+  assert_eq "0" "$RUN_RC" "…and no security release, exit 0"
+  SF_TAG='3.19.0;x' sf_step '{"requires": ">=3.19.0"}' "$fixture"
+  assert_eq "1" "$RUN_RC" "a tag that is not X.Y.Z (requires >=3.19.0, which meets): exit 1"
+  assert_contains "$RUN_OUT" "is not a release version" "…saying why"
+  teardown
+}
+
 # frn_tag <repo> <tag> [<notes text>]: commit (RELEASE-NOTES.md holding the
 # text, or no such file without one) and tag it.
 frn_tag() {
@@ -13448,7 +13470,8 @@ frn_tag() {
 frn_run() {
   rm -f notes.out
   RUN_RC=0
-  RUN_OUT=$(env RUNNER_TEMP="$PWD/runner-temp" PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/ci/doc-superpowers-steps/fetch-release-notes.sh" "$1" notes.out 2>&1) || RUN_RC=$?
+  rm -f gh-output
+  RUN_OUT=$(env RUNNER_TEMP="$PWD/runner-temp" GITHUB_OUTPUT="$PWD/gh-output" PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/ci/doc-superpowers-steps/fetch-release-notes.sh" "$1" notes.out 2>&1) || RUN_RC=$?
 }
 
 test_fetch_release_notes_step() {
@@ -13468,6 +13491,7 @@ test_fetch_release_notes_step() {
   assert_contains "$RUN_OUT" "v3.10.0" "…naming the tag"
   assert_true "…fetched shallow" test -f runner-temp/doc-superpowers-releases.git/shallow
   assert_eq "1" "$(git -C runner-temp/doc-superpowers-releases.git for-each-ref --format='%(refname)' | grep -c . || true)" "…that tag alone"
+  assert_eq "tag=3.10.0" "$(cat gh-output 2>/dev/null || true)" "…and the chosen tag recorded as the step output tag (GITHUB_OUTPUT)"
   # Over the cap: the first 2,000,000 bytes.
   frn_tag "$rel" v3.11.0 "$(head -c 2100000 /dev/zero | tr '\0' 'x')"
   frn_run "$url"
@@ -13505,6 +13529,7 @@ test_security_schedule_is_opt_in() {
   assert_contains "$body" "contents: read" "…contents: read"
   assert_eq "" "$(grep -E '^[[:space:]]*-?[[:space:]]*uses:' "$tpl" | grep -vE '@[0-9a-f]{40}( |$)' || true)" "…every action pinned by commit"
   assert_contains "$body" ".github/scripts/doc-superpowers-steps/fetch-release-notes.sh \"\$DOC_SUPERPOWERS_MARKETPLACE_URL\"" "…its fetch is fetch-release-notes.sh, on the rendered URL"
+  assert_contains "$body" 'DOC_SUPERPOWERS_RELEASE_TAG: ${{ steps.notes.outputs.tag }}' "…and the check reads the tag it chose"
   setup
   inst install --ci
   assert_eq "0" "$IRC" "install --ci: exit 0"
@@ -13530,6 +13555,7 @@ test_security_schedule_is_opt_in() {
 echo ""
 echo "=== doc-security-schedule ==="
 test_security_floor_step
+test_security_floor_step_checks_the_tag
 test_fetch_release_notes_step
 test_security_schedule_is_opt_in
 
