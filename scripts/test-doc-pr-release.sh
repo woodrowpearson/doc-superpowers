@@ -1468,7 +1468,7 @@ test_i8_every_job_has_a_timeout() {
   done
   [ -z "$bad" ] || printf '%s' "$bad"
   assert_eq "" "$bad" "no job without timeout-minutes"
-  assert_eq "10" "$n" "10 installed workflows checked"
+  assert_eq "11" "$n" "11 installed workflows checked"
 }
 
 test_i8_pins_carry_exact_versions() {

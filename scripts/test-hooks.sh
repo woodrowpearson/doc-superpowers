@@ -13435,6 +13435,63 @@ test_security_floor_step() {
   teardown
 }
 
+# frn_tag <repo> <tag> [<notes text>]: commit (RELEASE-NOTES.md holding the
+# text, or no such file without one) and tag it.
+frn_tag() {
+  if [ "$#" -ge 3 ]; then printf '%s' "$3" > "$1/RELEASE-NOTES.md"; else rm -f "$1/RELEASE-NOTES.md"; printf '%s\n' "$2" > "$1/other.txt"; fi
+  git -C "$1" add -A >/dev/null
+  git -C "$1" -c user.name=t -c user.email=t@example.invalid commit -q -m "$2"
+  git -C "$1" tag "$2"
+}
+
+# frn_run <URL>: run fetch-release-notes.sh into notes.out. Sets RUN_RC, RUN_OUT.
+frn_run() {
+  rm -f notes.out
+  RUN_RC=0
+  RUN_OUT=$(env RUNNER_TEMP="$PWD/runner-temp" PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/ci/doc-superpowers-steps/fetch-release-notes.sh" "$1" notes.out 2>&1) || RUN_RC=$?
+}
+
+test_fetch_release_notes_step() {
+  echo "test: fetch-release-notes.sh — the highest vX.Y.Z tag (numeric order, other names ignored), fetched alone and shallow; its RELEASE-NOTES.md, capped at 2,000,000 bytes; an empty URL, no release tag, a tag without notes: exit 1"
+  setup
+  local rel="$PWD/releases" url
+  mkdir -p "$rel" runner-temp
+  git init -q "$rel"
+  url="file://$rel"
+  frn_tag "$rel" v3.9.0 "notes of 3.9.0"
+  frn_tag "$rel" v3.10.0 "notes of 3.10.0"
+  frn_tag "$rel" v4.0.0-rc1 "notes of an rc"
+  frn_tag "$rel" latest "notes of a moving tag"
+  frn_run "$url"
+  assert_eq "0" "$RUN_RC" "a repository with release tags: exit 0 ($RUN_OUT)"
+  assert_eq "notes of 3.10.0" "$(cat notes.out 2>/dev/null || true)" "…v3.10.0's notes (3.10 above 3.9; v4.0.0-rc1 and latest ignored)"
+  assert_contains "$RUN_OUT" "v3.10.0" "…naming the tag"
+  assert_true "…fetched shallow" test -f runner-temp/doc-superpowers-releases.git/shallow
+  assert_eq "1" "$(git -C runner-temp/doc-superpowers-releases.git for-each-ref --format='%(refname)' | grep -c . || true)" "…that tag alone"
+  # Over the cap: the first 2,000,000 bytes.
+  frn_tag "$rel" v3.11.0 "$(head -c 2100000 /dev/zero | tr '\0' 'x')"
+  frn_run "$url"
+  assert_eq "0" "$RUN_RC" "notes over 2,000,000 bytes: exit 0"
+  assert_eq "2000000" "$(wc -c < notes.out | tr -d ' ')" "…cut to 2,000,000 bytes"
+  frn_tag "$rel" v3.12.0
+  frn_run "$url"
+  assert_eq "1" "$RUN_RC" "the newest tag holds no RELEASE-NOTES.md: exit 1"
+  assert_contains "$RUN_OUT" "::error::" "…an error annotation"
+  assert_contains "$RUN_OUT" "v3.12.0" "…naming the tag"
+  frn_run ""
+  assert_eq "1" "$RUN_RC" "an empty URL: exit 1"
+  assert_contains "$RUN_OUT" "--marketplace-url" "…saying how to set one"
+  frn_run "file://$PWD/no-such-repository"
+  assert_eq "1" "$RUN_RC" "a URL that cannot be listed: exit 1"
+  local bare="$PWD/untagged"
+  git init -q "$bare"
+  frn_tag "$bare" latest "notes"
+  frn_run "file://$bare"
+  assert_eq "1" "$RUN_RC" "no vX.Y.Z tag: exit 1"
+  assert_contains "$RUN_OUT" "no release tag" "…saying so"
+  teardown
+}
+
 test_security_schedule_is_opt_in() {
   echo "test: doc-security-schedule — not in the default set; installed by name (and by --workflows=all), with its step script and install-jq.sh vendored; read-only, no secret, pinned actions; it fetches only RELEASE-NOTES.md and runs nothing it fetched"
   local tpl="$HOOKS_DIR/ci/doc-security-schedule.yml" body
@@ -13447,8 +13504,7 @@ test_security_schedule_is_opt_in() {
   assert_eq "" "$(grep -E ':[[:space:]]*write' "$tpl" || true)" "…grants no write permission"
   assert_contains "$body" "contents: read" "…contents: read"
   assert_eq "" "$(grep -E '^[[:space:]]*-?[[:space:]]*uses:' "$tpl" | grep -vE '@[0-9a-f]{40}( |$)' || true)" "…every action pinned by commit"
-  assert_contains "$body" "--depth 1" "…a shallow fetch"
-  assert_contains "$body" "RELEASE-NOTES.md" "…of the release notes"
+  assert_contains "$body" ".github/scripts/doc-superpowers-steps/fetch-release-notes.sh \"\$DOC_SUPERPOWERS_MARKETPLACE_URL\"" "…its fetch is fetch-release-notes.sh, on the rendered URL"
   setup
   inst install --ci
   assert_eq "0" "$IRC" "install --ci: exit 0"
@@ -13458,6 +13514,7 @@ test_security_schedule_is_opt_in() {
   assert_file_exists ".github/workflows/doc-security-schedule.yml" "the named workflow is installed"
   assert_true "its step script is vendored executable" test -x .github/scripts/doc-superpowers-steps/security-floor.sh
   assert_true "…and install-jq.sh" test -x .github/scripts/doc-superpowers-steps/install-jq.sh
+  assert_true "…and fetch-release-notes.sh" test -x .github/scripts/doc-superpowers-steps/fetch-release-notes.sh
   assert_contains "$(cat .github/workflows/doc-security-schedule.yml)" '"https://github.com/woodrowpearson/doc-superpowers.git"' "the release notes' repository: the marketplace URL, plugin.json's by default"
   _assert_installed_workflows_wired "install --ci --workflows=doc-security-schedule"
   inst status --check --ci
@@ -13473,6 +13530,7 @@ test_security_schedule_is_opt_in() {
 echo ""
 echo "=== doc-security-schedule ==="
 test_security_floor_step
+test_fetch_release_notes_step
 test_security_schedule_is_opt_in
 
 # --- install.sh upgrade ---------------------------------------------------------

@@ -538,7 +538,7 @@ Update is the **write counterpart** to audit's analysis (audit edits no doc; its
 4. Update `docs/specs/README.md` and `docs/adr/README.md` indexes.
 5. **Check CLAUDE.md currency** — Compare CLAUDE.md sections against actual filesystem. If stale, update per `references/doc-spec.md` CLAUDE.md update rules. Sync is the natural place to catch CLAUDE.md drift that accumulated across multiple doc changes. In a doc-superpowers CI workflow, report what it needs instead of editing it (the commit step accepts only `docs/` and the indexed docs).
 6. **Check README.md currency** — Compare what README.md says the project does (features, commands, usage examples) against the project itself. If stale, update per `references/doc-spec.md` README.md update rules. Sync is the natural place to catch README.md drift alongside CLAUDE.md. In a doc-superpowers CI workflow, report it instead, as for CLAUDE.md.
-7. Unless this is a doc-superpowers CI workflow (the installer is neither shipped nor granted there — skip this step), run `"$ROOT/scripts/hooks/install.sh" status` and append a one-line summary: `Hooks: N/5 git, N/3 claude, N/10 ci` — with `docs/ledger/config.json`, add the ledger sets from their own sections: `, ledger N/3 git, N/2 claude`
+7. Unless this is a doc-superpowers CI workflow (the installer is neither shipped nor granted there — skip this step), run `"$ROOT/scripts/hooks/install.sh" status` and append a one-line summary: `Hooks: N/5 git, N/3 claude, N/11 ci` — with `docs/ledger/config.json`, add the ledger sets from their own sections: `, ledger N/3 git, N/2 claude`
 
 ### `release` — Draft Release Notes Entry
 
