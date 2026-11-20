@@ -8,6 +8,7 @@ deadline is retried 3 times with exponential backoff and jitter.
 
 from __future__ import annotations
 
+import importlib
 import random
 import time
 from collections.abc import Callable, Sequence
@@ -132,11 +133,15 @@ def _transient(err: BaseException) -> bool:
     if isinstance(err, errors.APIError):
         code = err.code
         return isinstance(code, int) and (code == 429 or code >= 500)
-    try:
-        import httpx  # a dependency of google-genai
-    except ImportError:
-        return False
-    return isinstance(err, httpx.TimeoutException)
+    # google-genai's HTTP client: httpx2 from 3.x, httpx before (and in 3.x's optional `httpx` extra)
+    for name in ("httpx2", "httpx"):
+        try:
+            http = importlib.import_module(name)
+        except ImportError:
+            continue
+        if isinstance(err, http.TimeoutException):
+            return True
+    return False
 
 
 def rejected(err: BaseException) -> bool:
