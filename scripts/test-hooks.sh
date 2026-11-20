@@ -13625,6 +13625,27 @@ test_upgrade_caps_oversized_notes_before_writing() {
   teardown
 }
 
+test_upgrade_notes_parity_with_releases_py() {
+  echo "test: the shared fixture search/tests/fixtures/release-notes-security.md, as a tag's RELEASE-NOTES.md — latest 3.19.0, newest security 3.19.0, what doc_search.releases reads (test_releases.py pins the same two)"
+  setup
+  upg_origin
+  local work
+  work="$TEST_DIR/work"
+  git clone -q "$UPG_ORIGIN" "$work"
+  git -C "$work" reset -q --hard v3.18.0
+  cp "$SCRIPT_DIR/../search/tests/fixtures/release-notes-security.md" "$work/RELEASE-NOTES.md"
+  git -C "$work" commit -qam "release v3.19.0, the shared fixture's notes"
+  git -C "$work" tag -f v3.19.0 >/dev/null
+  upg_bare_copy fixture
+  git -C "$work" push -q -f --tags "$UPG_BARE"
+  upg_release_root "$UPG_BARE"
+  upg_run -- --check --json
+  assert_eq "1" "$RUN_RC" "--check: behind, exit 1 (stderr: $RUN_ERR)"
+  assert_eq "3.19.0|3.19.0" "$(jq -r '"\(.latest)|\(.newest_security)"' <<<"$RUN_OUT" 2>/dev/null)" "…latest 3.19.0 and newest security 3.19.0: the fenced v9.9.9 and v9.9.8, the fenced v3.17.1 Security and the non-release section's are not counted"
+  assert_true "…the fixture is what was cached" cmp -s "$SCRIPT_DIR/../search/tests/fixtures/release-notes-security.md" "$UPG_CACHE/release-notes.md"
+  teardown
+}
+
 test_upgrade_codex_root_in_place() {
   echo "test: the Codex root (\$CODEX_HOME/doc-superpowers) upgrades in place, a clean branch checkout allowed (git checkout --detach <tag>); dirty: refused; ignored files do not count"
   setup
@@ -13766,6 +13787,7 @@ test_upgrade_ignores_hostile_and_mismatched_tags
 test_upgrade_orders_versions_per_field
 test_upgrade_ignores_a_security_release_newer_than_its_tag
 test_upgrade_caps_oversized_notes_before_writing
+test_upgrade_notes_parity_with_releases_py
 test_upgrade_codex_root_in_place
 test_upgrade_cache_and_fetch_failures
 test_upgrade_env_write_failure_names_the_new_root
