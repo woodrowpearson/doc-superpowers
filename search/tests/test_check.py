@@ -829,17 +829,21 @@ def test_a_newer_source_does_not_hide_an_older_sources_security_release(
     assert payload["fix"] == PLUGIN_FIX
 
 
-NETWORK_GIT = {"fetch", "ls-remote", "pull", "clone"}
+NETWORK_GIT = {"fetch", "ls-remote", "pull", "clone", "remote", "submodule"}
+"""The git verbs that reach a remote or name one (`remote update`, `submodule update`); `check`'s own git calls are
+local reads (`rev-parse`, `ls-files`, …), which stay allowed."""
 
 
 def test_check_never_fetches(gated, run, tmp_path: Path, monkeypatch) -> None:
-    """`check` reads only what is on disk: no socket reaches the network, and no git verb that would."""
+    """`check` reads only what is on disk: no socket reaches the network (connect, connect_ex, create_connection,
+    or even a name lookup), and no git verb that would."""
     fake_root(tmp_path / "ds-checkout", monkeypatch)
     assert run("index").code == 0
     release_notes(tmp_path / "notes", monkeypatch)
     blocked: list[str] = []
     real_init = subprocess.Popen.__init__
     real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
 
     def popen(self, args, *rest, **kwargs):
         argv = [str(a) for a in args] if isinstance(args, (list, tuple)) else str(args).split()
@@ -854,13 +858,25 @@ def test_check_never_fetches(gated, run, tmp_path: Path, monkeypatch) -> None:
             raise AssertionError(f"check opened a network connection: {address}")
         return real_connect(self, address)
 
+    def connect_ex(self, address):
+        if self.family in (socket.AF_INET, socket.AF_INET6):
+            blocked.append(f"connect_ex {address}")
+            raise AssertionError(f"check opened a network connection: {address}")
+        return real_connect_ex(self, address)
+
     def create_connection(address, *args, **kwargs):
         blocked.append(f"create_connection {address}")
         raise AssertionError(f"check opened a network connection: {address}")
 
+    def getaddrinfo(host, *args, **kwargs):
+        blocked.append(f"getaddrinfo {host}")
+        raise AssertionError(f"check looked up a host name: {host}")
+
     monkeypatch.setattr(subprocess.Popen, "__init__", popen)
     monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
     monkeypatch.setattr(socket, "create_connection", create_connection)
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
 
     code, payload = check(run)
 
