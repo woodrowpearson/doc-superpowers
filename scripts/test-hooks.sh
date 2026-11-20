@@ -13645,6 +13645,12 @@ test_upgrade_cache_and_fetch_failures() {
   assert_eq "4" "$RUN_RC" "…upgrade too"
   assert_true "…no worktree" test ! -e "$UPG_NEW"
   assert_true "…no cache" test ! -e "$UPG_CACHE/release-notes.json"
+  # A credential in the origin URL never reaches a message (port 9: refused).
+  git -C "$UPG_BASE/doc-superpowers" remote set-url origin "https://someone:s3cr3t-token@127.0.0.1:9/doc-superpowers.git"
+  upg_run -- --check
+  assert_eq "4" "$RUN_RC" "an origin with a credential that cannot be fetched: exit 4"
+  assert_contains "$RUN_ERR" "https://127.0.0.1:9/doc-superpowers.git" "…the message names the origin"
+  assert_not_contains "$RUN_ERR" "s3cr3t-token" "…without its credential"
   teardown
 }
 

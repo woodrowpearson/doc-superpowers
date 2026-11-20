@@ -3446,14 +3446,33 @@ upg_env_preflight() {
   [ "${n:-0}" -le 1 ] || upg_refuse "$UPG_ENV assigns DOC_SUPERPOWERS_ROOT on $n lines: keep one, then run upgrade again"
 }
 
+# upg_strip_url <url>: <url> without a user and password
+# (https://user:token@host/… → https://host/…), for messages and the cache.
+upg_strip_url() {
+  local src=$1 scheme rest auth
+  case $src in
+    *://*)
+      scheme=${src%%://*}
+      rest=${src#*://}
+      auth=${rest%%/*}
+      case $auth in
+        *@*) src="$scheme://${auth##*@}${rest#"$auth"}" ;;
+      esac
+      ;;
+  esac
+  printf '%s' "$src"
+}
+
 # upg_fetch: the release versions (UPG_VERSIONS, sorted) and where they came
-# from (UPG_SOURCE); UPG_GIT is the git that reads their notes.
+# from (UPG_SOURCE, and UPG_SHOWN: it without a credential, the only form any
+# message or the cache names); UPG_GIT is the git that reads their notes.
 upg_fetch() {
   local mkt url="" top tags
   if [ "$UPG_KIND" != plugin ]; then
     UPG_SOURCE=$(git -C "$UPG_ROOT" remote get-url origin 2>/dev/null) || upg_fetch_failed "$UPG_ROOT has no origin remote to fetch the release tags from"
+    UPG_SHOWN=$(upg_strip_url "$UPG_SOURCE")
     GIT_TERMINAL_PROMPT=0 git -C "$UPG_ROOT" -c core.hooksPath=/dev/null fetch --quiet --tags origin </dev/null \
-      || upg_fetch_failed "cannot fetch the release tags from $UPG_SOURCE (git -C $(sh_squote "$UPG_ROOT") fetch --tags origin)"
+      || upg_fetch_failed "cannot fetch the release tags from $UPG_SHOWN (git -C $(sh_squote "$UPG_ROOT") fetch --tags origin)"
     UPG_GIT=(git -C "$UPG_ROOT" -c core.hooksPath=/dev/null)
     UPG_VERSIONS=$(git -C "$UPG_ROOT" tag --list | upg_versions)
     return 0
@@ -3467,10 +3486,11 @@ upg_fetch() {
   [ -n "$url" ] || url=$(plugin_marketplace_url)
   [ -n "$url" ] || upg_fetch_failed "no repository to fetch the release tags from: no marketplace clone with an origin, and plugin.json names none"
   UPG_SOURCE=$url
+  UPG_SHOWN=$(upg_strip_url "$url")
   git init -q --bare --template= "$UPG_SCRATCH/tags.git" || upg_fetch_failed "cannot create a scratch repository in $UPG_SCRATCH"
   UPG_GIT=(git --git-dir="$UPG_SCRATCH/tags.git" -c core.hooksPath=/dev/null)
   tags=$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags --refs -- "$url" </dev/null) \
-    || upg_fetch_failed "cannot list the release tags at $url (git ls-remote --tags)"
+    || upg_fetch_failed "cannot list the release tags at $UPG_SHOWN (git ls-remote --tags)"
   UPG_VERSIONS=$(printf '%s\n' "$tags" | awk '{ sub(/^refs\/tags\//, "", $2); print $2 }' | upg_versions)
 }
 
@@ -3479,7 +3499,7 @@ upg_fetch() {
 upg_notes() {
   if [ "$UPG_KIND" = plugin ]; then
     GIT_TERMINAL_PROMPT=0 "${UPG_GIT[@]}" fetch --quiet --depth 1 -- "$UPG_SOURCE" "refs/tags/v$1:refs/tags/v$1" </dev/null \
-      || upg_fetch_failed "cannot fetch tag v$1 from $UPG_SOURCE"
+      || upg_fetch_failed "cannot fetch tag v$1 from $UPG_SHOWN"
   fi
   "${UPG_GIT[@]}" show "refs/tags/v$1:RELEASE-NOTES.md" >"$2.raw" 2>/dev/null \
     || upg_refuse "tag v$1 has no RELEASE-NOTES.md: it is not a release commit"
@@ -3500,7 +3520,7 @@ upg_scan() {
 # upg_store_cache <notes file> <tag>: the release-notes cache doc-search check
 # reads, each file written beside it and moved into place.
 upg_store_cache() {
-  local src scheme rest auth fetched tn tj
+  local fetched tn tj
   if [ -z "${XDG_CACHE_HOME:-}" ] && [ -z "${HOME:-}" ]; then
     upg_refuse "neither XDG_CACHE_HOME nor HOME is set: no place for the release-notes cache"
   fi
@@ -3508,19 +3528,7 @@ upg_store_cache() {
   [ ! -L "$UPG_CACHE_DIR" ] || upg_refuse "$UPG_CACHE_DIR is a symbolic link, and the release-notes cache is never written through one: remove it, then run upgrade again"
   mkdir -p "$UPG_CACHE_DIR" || upg_die "cannot create $UPG_CACHE_DIR"
   [ -O "$UPG_CACHE_DIR" ] || upg_refuse "$UPG_CACHE_DIR is not your own directory: the release-notes cache must be"
-  # The source without a user and password (https://user:token@host/…).
-  src=$UPG_SOURCE
-  case $src in
-    *://*)
-      scheme=${src%%://*}
-      rest=${src#*://}
-      auth=${rest%%/*}
-      case $auth in
-        *@*) src="$scheme://${auth##*@}${rest#"$auth"}" ;;
-      esac
-      ;;
-  esac
-  UPG_CACHE_SOURCE=$src
+  UPG_CACHE_SOURCE=$UPG_SHOWN
   fetched=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   tn=$(mktemp "$UPG_CACHE_DIR/.release-notes.md.XXXXXX") || upg_die "cannot create a temp file in $UPG_CACHE_DIR"
   _TMPS+=("$tn")
@@ -3528,7 +3536,7 @@ upg_store_cache() {
   _TMPS+=("$tj")
   cat "$1" >"$tn" || upg_die "cannot write $tn"
   printf '{"tag": %s, "fetched": %s, "source": %s}\n' "$(upg_json_str "$2")" "$(upg_json_str "$fetched")" \
-    "$(upg_json_str "$src")" >"$tj" || upg_die "cannot write $tj"
+    "$(upg_json_str "$UPG_SHOWN")" >"$tj" || upg_die "cannot write $tj"
   chmod 644 "$tn" "$tj" || upg_die "cannot chmod the release-notes cache"
   mv -f "$tn" "$UPG_CACHE_DIR/release-notes.md" || upg_die "cannot write $UPG_CACHE_DIR/release-notes.md"
   mv -f "$tj" "$UPG_CACHE_DIR/release-notes.json" || upg_die "cannot write $UPG_CACHE_DIR/release-notes.json"
@@ -3640,14 +3648,14 @@ cmd_upgrade() {
   UPG_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/doc-superpowers-upgrade.XXXXXX") || upg_die "cannot create a scratch directory"
   _TMPDIRS+=("$UPG_SCRATCH")
   upg_fetch
-  [ -n "$UPG_VERSIONS" ] || upg_refuse "$UPG_SOURCE has no release tag (vX.Y.Z)"
+  [ -n "$UPG_VERSIONS" ] || upg_refuse "$UPG_SHOWN has no release tag (vX.Y.Z)"
   UPG_LATEST=${UPG_VERSIONS##*$'\n'}
   UPG_TARGET=$UPG_LATEST
   if [ -n "$UPG_TO" ]; then
     UPG_TARGET=${UPG_TO#v}
     case $'\n'"$UPG_VERSIONS"$'\n' in
       *$'\n'"$UPG_TARGET"$'\n'*) ;;
-      *) upg_refuse "$UPG_TO is not a release tag at $UPG_SOURCE" ;;
+      *) upg_refuse "$UPG_TO is not a release tag at $UPG_SHOWN" ;;
     esac
   fi
   # The newest tag's notes: the cache, and the newest security release.
