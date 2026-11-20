@@ -162,7 +162,8 @@ def test_the_shared_fixture() -> None:
 
 def test_parity_with_install_sh() -> None:
     # scripts/test-hooks.sh test_upgrade_notes_parity_with_releases_py feeds the
-    # same fixture to install.sh's awk reader and pins the same two values.
+    # same fixture to install.sh upgrade, whose upg_scan reads it with
+    # doc-tools.sh tools security-floor, and pins the same two values.
     rs = parse_releases(FIXTURE.read_text(encoding="utf-8"))
     assert rs[0].version == (3, 19, 0)  # latest
     assert newest_security(rs) == (3, 19, 0)
