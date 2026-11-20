@@ -54,7 +54,7 @@ MAX_SIDECAR_BYTES = 4096
 """A sidecar is three short fields; a longer one is not read."""
 
 MAX_SHOWN = 200
-"""The most characters of one field a reason shows."""
+"""The most characters of one field a reason shows; a longer one keeps its tail (`safe`)."""
 
 _TAG = re.compile(r"v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})")
 _FETCHED = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|\+00:00)")
@@ -62,7 +62,9 @@ _SOURCE = re.compile(r"[A-Za-z0-9._~:/@%+=,][A-Za-z0-9._~:/@%+=,-]*")
 """`install.sh`'s `valid_marketplace_url`: what `git clone` takes, with no space, quote, backslash or `$`."""
 
 _ANSI = re.compile(r"\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)?|[@-Z\\-_])")
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")
+_CONTROL = re.compile(r"[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+"""C0 and C1 controls; the zero-width and direction marks (U+200B to U+200F); the line and paragraph
+separators (U+2028, U+2029); the bidi embeddings, overrides and isolates (U+202A to U+202E, U+2066 to U+2069)."""
 
 
 @dataclass(frozen=True)
@@ -77,8 +79,19 @@ class Source:
 
 
 def safe(text: str) -> str:
-    """`text` with its ANSI escape sequences and control characters dropped, at most MAX_SHOWN characters."""
-    return _CONTROL.sub("", _ANSI.sub("", text))[:MAX_SHOWN]
+    """`text` with its ANSI escape sequences and `_CONTROL` characters dropped, at most MAX_SHOWN characters:
+    a longer text is cut from the front, behind a `…`, so its tail (a path's file and nearest directories, a
+    URL's repository) survives."""
+    clean = _CONTROL.sub("", _ANSI.sub("", text))
+    return clean if len(clean) <= MAX_SHOWN else "…" + clean[-(MAX_SHOWN - 1) :]
+
+
+def _shown(path: Path, home: Path) -> str:
+    """`path` as a label shows it: from `~/` when it is under `home`."""
+    try:
+        return "~/" + str(path.relative_to(home)) if path != home else "~"
+    except ValueError:
+        return str(path)
 
 
 def cache_dir(env: Mapping[str, str]) -> Path:
@@ -197,22 +210,24 @@ def plugin_install(env: Mapping[str, str], root: Path) -> tuple[bool, str | None
 
 def _sources(env: Mapping[str, str], plugin: Path) -> list[Source]:
     found: list[Source] = []
+    home = Path(env.get("HOME") or Path.home())
     named = (env.get(ENV_VAR) or "").strip()
     if named:
         notes = Path(named)
-        _add(found, notes, _sidecar(notes.with_suffix(".json")), str(notes))
+        _add(found, notes, _sidecar(notes.with_suffix(".json")), _shown(notes, home))
     where = cache_dir(env)
     if _private_dir(where):
         notes = where / NOTES_NAME
-        _add(found, notes, _sidecar(where / SIDECAR_NAME, own=True), str(notes), own=True)
+        _add(found, notes, _sidecar(where / SIDECAR_NAME, own=True), _shown(notes, home), own=True)
     is_plugin, market = plugin_install(env, plugin)
     if is_plugin and market is not None:
-        clone = Path(env.get("HOME") or Path.home()) / ".claude" / "plugins" / "marketplaces" / market
+        clone = home / ".claude" / "plugins" / "marketplaces" / market
         version = _manifest_version(clone)
         if version is not None:
-            _add(found, clone / "RELEASE-NOTES.md", {}, f"the marketplace clone {clone}", limit=version)
+            label = f"the marketplace clone {_shown(clone, home)}"
+            _add(found, clone / "RELEASE-NOTES.md", {}, label, limit=version)
     own = Path(plugin) / "RELEASE-NOTES.md"
-    _add(found, own, {}, f"the plugin's own {own}", limit=plugin_version(Path(plugin)))
+    _add(found, own, {}, f"the plugin's own {_shown(own, home)}", limit=plugin_version(Path(plugin)))
     return found
 
 

@@ -521,6 +521,71 @@ def test_a_hostile_path_reaches_the_reason_stripped(gated, run, tmp_path: Path, 
     assert not any(ch in reason for ch in "\n\x1b "), reason
 
 
+def test_safe_drops_ansi_control_bidi_and_zero_width() -> None:
+    hostile = "a\x1b[31mb\x07c\u202ed\u2066e\u2069f\u200bg\u200fh\u2028i\u2029j\x85k"
+    assert release_cache.safe(hostile) == "abcdefghijk"
+    for ch in [*map(chr, range(0x202A, 0x202F)), *map(chr, range(0x2066, 0x206A)), *map(chr, range(0x200B, 0x2010))]:
+        assert release_cache.safe(f"x{ch}y") == "xy", hex(ord(ch))
+
+
+def test_safe_keeps_the_tail_of_a_long_text() -> None:
+    shown = release_cache.safe("x" * 500 + "/the-tail")
+    assert len(shown) == release_cache.MAX_SHOWN and shown.startswith("…") and shown.endswith("/the-tail")
+
+
+def test_a_bidi_override_in_the_sidecar_source_never_reaches_the_reason(
+    gated, run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_root(tmp_path / "ds-checkout", monkeypatch)
+    release_notes(tmp_path / "notes", monkeypatch, source="https://example.test/\u202eexe.git")
+    configure(gated, security_floor=True)
+
+    reason = check(run)[1]["reason"]
+
+    assert BELOW in reason and "\u202e" not in reason and "unknown" in reason
+
+
+def test_a_bidi_override_in_a_path_is_stripped(gated, run, tmp_path: Path, monkeypatch) -> None:
+    fake_root(tmp_path / "ds-checkout", monkeypatch)
+    where = tmp_path / "evil\u202eknil\u200bdir"
+    where.mkdir()
+    (where / "notes.md").write_text(SECURITY_NOTES)
+    monkeypatch.setenv("DOC_SEARCH_RELEASE_NOTES", str(where / "notes.md"))
+    configure(gated, security_floor=True)
+
+    reason = check(run)[1]["reason"]
+
+    assert BELOW in reason and "evilknildir" in reason
+    assert not any(ch in reason for ch in "\u202e\u200b"), reason
+
+
+def test_a_label_under_home_is_shown_from_the_tilde(gated, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A label is a path: under HOME it reads `~/…`, so the marketplace's name stays in view."""
+    home = Path(os.environ["HOME"])
+    plugin_install(home, monkeypatch)
+    marketplace(home, "dsp-market", "doc-superpowers", SECURITY_NOTES, version="3.19.0")
+    configure(gated, security_floor=True)
+
+    reason = check(run)[1]["reason"]
+
+    assert "from the marketplace clone ~/.claude/plugins/marketplaces/dsp-market," in reason, reason
+    assert str(home) not in reason
+
+
+def test_a_long_label_keeps_its_tail(gated, run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A path too long to show is cut from the front: the file and the directories nearest it survive."""
+    fake_root(tmp_path / "ds-checkout", monkeypatch)
+    where = tmp_path.joinpath(*(["d" * 40] * 6), "the-named-dir")
+    where.mkdir(parents=True)
+    (where / "notes.md").write_text(SECURITY_NOTES)
+    monkeypatch.setenv("DOC_SEARCH_RELEASE_NOTES", str(where / "notes.md"))
+    configure(gated, security_floor=True)
+
+    reason = check(run)[1]["reason"]
+
+    assert BELOW in reason and "…" in reason and "the-named-dir/notes.md," in reason, reason
+
+
 @pytest.mark.parametrize("content", ["not json", "[1, 2]", "{" + '"source": "x", ' * 2000 + '"tag": "v3.19.0"}'])
 def test_unreadable_sidecar_shows_unknown(tmp_path: Path, content: str) -> None:
     notes = release_notes(tmp_path / "notes")
