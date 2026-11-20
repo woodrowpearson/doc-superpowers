@@ -12611,8 +12611,8 @@ test_setup_prompt_items() {
   assert_not_contains "$RUN_OUT" "harness=claude-code" "…and no --list catalog"
   run_setup_prompt 'c\n5\n1\n010\n0\n99999999999999999999\nx\n\n\n\nq\n' --
   assert_eq "0" "$RUN_RC" "the CI multi: 010, 0, a huge number, a word, then q: exit 0 (stderr: $RUN_ERR)"
-  assert_contains "$RUN_OUT" "  10) [x] doc-spec-verify" "…010 ticked the 10th workflow (decimal, not octal 8)"
-  assert_eq "3" "$(grep -c 'answer a number from 1 to 10, or an empty line' <<<"$RUN_OUT")" "…0, the huge number and the word asked again"
+  assert_contains "$RUN_OUT" "  10) [x] doc-review-pr" "…010 ticked the 10th workflow (decimal, not octal 8)"
+  assert_eq "3" "$(grep -c 'answer a number from 1 to 11, or an empty line' <<<"$RUN_OUT")" "…0, the huge number and the word asked again"
   assert_eq "" "$RUN_ERR" "…nothing on stderr (no integer expression error)"
   assert_contains "$RUN_OUT" "Quit: nothing was written." "…q quit"
   assert_not_contains "$RUN_OUT" "harness=claude-code" "…and no --list catalog"
@@ -12921,9 +12921,9 @@ test_setup_tui_same_plan() {
   assert_eq "$yes" "$tui" "…the same files as --yes --set search=on"
   teardown
   # Git hooks opened (row 2): merge-driver (row 5) chosen; CI workflows (row 8)
-  # opened: the cron (row 21) edited, doc-spec-verify (row 19) ticked.
+  # opened: the cron (row 22) edited, doc-spec-verify (row 20) ticked.
   setup
-  run_setup_tui "\\033[B\\n$(tui_downs 2)\\n$(tui_downs 3)\\n$(tui_downs 3)\\n$(tui_downs 13)e0 6 * * 1\\n\\033[A\\033[A \\033\\n\\n" --
+  run_setup_tui "\\033[B\\n$(tui_downs 2)\\n$(tui_downs 3)\\n$(tui_downs 3)\\n$(tui_downs 14)e0 6 * * 1\\n\\033[A\\033[A \\033\\n\\n" --
   assert_eq "0" "$RUN_RC" "git, the cron, a workflow: exit 0 (stderr: $RUN_ERR)"
   assert_contains "$RUN_OUT" "(*) merge-driver" "the choice's options shown, merge-driver chosen"
   assert_contains "$RUN_OUT" "Schedule (cron): 0 6 * * 1 (changed)" "the value edited"
@@ -12936,7 +12936,7 @@ test_setup_tui_same_plan() {
   yes=$(tui_state_untimed)
   assert_eq "$yes" "$tui" "…the same files as --yes with those --set values (the CI record's install times aside)"
   # An invalid value says why and changes nothing; ? shows the item's help.
-  run_setup_tui "\\033[B\\n$(tui_downs 4)\\n$(tui_downs 13)enot a cron\\n?" --
+  run_setup_tui "\\033[B\\n$(tui_downs 4)\\n$(tui_downs 14)enot a cron\\n?" --
   assert_contains "$RUN_OUT" "ci.cron takes" "an invalid cron: the reason"
   assert_contains "$(tui_frame last)" "Undo: " "?: the item's help, its undo"
   # A locked item says why.
