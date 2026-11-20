@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-11-20T10:47:11Z",
+  "generated_at": "2026-11-20T10:48:40Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -14,16 +14,16 @@
         ".github/workflows/tests.yml",
         "search/"
       ],
-      "code_commit": "98a9c9fbd910c08afb9eb188492ca666f0d121e4",
+      "code_commit": "42f4dff0b9b593f22a65c00aeec5d2de7b2a20f1",
       "doc_type": "architecture",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-11-20T07:36:47Z",
+      "last_verified": "2026-11-20T10:48:40Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "fbbd699a6dd2ce7c513709388687a9414a84de4c",
-        "scripts/": "a99e4c9f722cdb1d5b4f09fcbdf8e8979fc11c84",
-        "references/": "115e796d4d1ad738b420c15d796fdbb5a726f383",
+        "scripts/": "32d5295ac986f111a1d070d82cde89dc5f3f8997",
+        "references/": "dc5b9cb49839c87ab79cd3c3ea29f15cc1977e6d",
         "evals/": "dd9b4491d9e2c66f8c170ed20e749fe3d61d608f",
         ".github/workflows/tests.yml": "e052ad3e7fa45a71df1c5e9a22681e271c9d0d56",
         "search/": "7e3c3e5cfcca4d4fe7f7b43e39cc2e746f167fea"
@@ -39,16 +39,16 @@
         ".github/workflows/tests.yml",
         "search/"
       ],
-      "code_commit": "98a9c9fbd910c08afb9eb188492ca666f0d121e4",
+      "code_commit": "42f4dff0b9b593f22a65c00aeec5d2de7b2a20f1",
       "doc_type": "codebase-guide",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-11-20T07:36:47Z",
+      "last_verified": "2026-11-20T10:48:40Z",
       "implementation": [],
       "code_oids": {
         "skills/doc-superpowers/SKILL.md": "fbbd699a6dd2ce7c513709388687a9414a84de4c",
-        "scripts/": "a99e4c9f722cdb1d5b4f09fcbdf8e8979fc11c84",
-        "references/": "115e796d4d1ad738b420c15d796fdbb5a726f383",
+        "scripts/": "32d5295ac986f111a1d070d82cde89dc5f3f8997",
+        "references/": "dc5b9cb49839c87ab79cd3c3ea29f15cc1977e6d",
         "evals/": "dd9b4491d9e2c66f8c170ed20e749fe3d61d608f",
         ".github/workflows/tests.yml": "e052ad3e7fa45a71df1c5e9a22681e271c9d0d56",
         "search/": "7e3c3e5cfcca4d4fe7f7b43e39cc2e746f167fea"
@@ -885,13 +885,13 @@
       "code_oids": {
         "scripts/setup/": "7c0314e5e30555a3ab8287c05ddeecbed03906d0",
         "scripts/doc-superpowers": "1b7215de5914c609e961371fad3c511696327495",
-        "scripts/help/": "01f19e465a532c9fbed4381b7fc95a38dc7c55d2"
+        "scripts/help/": "3731a1e920073c87178f71dfb994f1670a208e71"
       },
-      "code_commit": "5d076286532da51ec853883f284e9d53230e4f91",
+      "code_commit": "42f4dff0b9b593f22a65c00aeec5d2de7b2a20f1",
       "doc_type": "reference",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-11-20T07:36:47Z",
+      "last_verified": "2026-11-20T10:48:40Z",
       "implementation": []
     },
     "docs/superpowers/specs/2026-10-27-doc-search-readiness-gate-design.md": {
