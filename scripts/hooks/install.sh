@@ -237,7 +237,7 @@ workflow_desc() {
     doc-pr-release) echo "PR pushes: AI release-notes fragment, a checked step commits it to the PR branch; PR body edited (contents + pull-requests: write)" ;;
     doc-index-resolve) echo "push to the base, and by hand: merges the base into each open same-repository PR whose only conflict is docs/.doc-index.json, with the vendored index merge driver; pushes with a lease, dispatches --resolve-test-workflow, one PR comment (contents + pull-requests + actions: write; by name only)" ;;
     doc-ledger-publish) echo "every 30 minutes and by hand: with docs/ledger/config.json, doc-tools.sh ledger publish renders the work-ledger views from the base and pushes them to views.branch; with the config, ships the ledger helper set (contents: write; pull-requests + issues: read, for the adapters)" ;;
-    doc-security-schedule) echo "weekly cron, and by hand: reads the newest release's RELEASE-NOTES.md (one shallow tag fetch from the marketplace URL; nothing fetched runs) and fails when the requires of docs/search/config.json is below the newest security release; no config or no requires: a warning (contents: read)" ;;
+    doc-security-schedule) echo "weekly cron, and by hand: reads the newest release's notes (one shallow tag fetch from the marketplace URL; nothing fetched runs) and fails when the requires of docs/search/config.json is below the newest security release; no config or no requires: a warning (contents: read)" ;;
     *) echo "(no description)" ;;
   esac
 }

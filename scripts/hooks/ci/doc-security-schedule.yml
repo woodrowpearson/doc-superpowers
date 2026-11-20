@@ -24,6 +24,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # Where the release tags and notes are read from (--marketplace-url, else
+  # the plugin's own repository).
+  DOC_SUPERPOWERS_MARKETPLACE_URL: "__MARKETPLACE_URL__"
+
 jobs:
   security-floor:
     runs-on: ubuntu-latest
@@ -42,10 +47,9 @@ jobs:
       # Data only: the newest release tag's RELEASE-NOTES.md, at most
       # 2,000,000 bytes, into $RUNNER_TEMP. Tag names are read as vX.Y.Z only.
       - name: Fetch the newest release's notes
-        env:
-          RELEASES_URL: "__MARKETPLACE_URL__"
         run: |
           set -euo pipefail
+          RELEASES_URL=$DOC_SUPERPOWERS_MARKETPLACE_URL
           if [ -z "$RELEASES_URL" ]; then
             echo "::error::doc-superpowers: no repository to read the release notes from: re-run install --ci with --marketplace-url <git URL>"
             exit 1
