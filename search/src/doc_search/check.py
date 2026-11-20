@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Literal
 
 from . import release_cache
-from .config import CONFIG_REL, Config, ConfigError, load_config, parse_version
+from .config import CONFIG_REL, Config, ConfigError, load_config
 from .engines import Building, IndexPool
 from .progress import read_progress
 from .releases import newest_security, parse_releases
@@ -308,27 +308,24 @@ def _launcher(top: Path, floor: tuple[int, int, int] | None) -> tuple[LauncherSt
 
 def _security(version: tuple[int, int, int] | None, env: Mapping[str, str]) -> str | None:
     """Row 3b: why the plugin is below the newest security release in the release notes on disk, naming where
-    the notes came from; None when it is not (or its version is unknown, or no notes are found). Never fetches."""
+    the notes came from; None when it is not (or its version is unknown, or no notes are found). Each source's
+    newest security release is taken under that source's own ceiling, and the highest of them wins (the first
+    source on a tie), so one source can never hide another's. Never fetches."""
     if version is None:
         return None
-    found = release_cache.load(env, plugin_root())
-    if found is None:
+    best: tuple[tuple[int, int, int], release_cache.Source] | None = None
+    for source in release_cache.load(env, plugin_root()):
+        found = newest_security(parse_releases(source.text), ceiling=source.ceiling)
+        if found is not None and (best is None or found > best[0]):
+            best = (found, source)
+    if best is None or version >= best[0]:
         return None
-    text, meta = found
-    tag = meta["tag"]
-    newest = newest_security(parse_releases(text), ceiling=_tag_version(tag))
-    if newest is None or version >= newest:
-        return None
-    shown = release_cache.safe
+    newest, source = best
+    meta, shown = source.meta, release_cache.safe
     return (
         f"doc-superpowers {_dotted(version)} is below security release {_dotted(newest)}"
-        f" (release notes {shown(tag)} from {shown(meta['source'])}, fetched {shown(meta['fetched'])})"
+        f" (release notes {shown(meta['tag'])} from {shown(meta['source'])}, fetched {shown(meta['fetched'])})"
     )
-
-
-def _tag_version(tag: str) -> tuple[int, int, int] | None:
-    """`vX.Y.Z` as a tuple (the source's ceiling, as `release_cache.load` names it)."""
-    return parse_version(tag[1:]) if tag.startswith("v") else None
 
 
 def _plugin_fix(env: Mapping[str, str]) -> str:

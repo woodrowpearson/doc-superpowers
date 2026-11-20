@@ -1,6 +1,7 @@
 """The release notes `check` reads for the security floor, from disk only: nothing here fetches.
 
-Four sources, and the one whose own release is newest wins (the first of them on a tie):
+Four sources, each read on its own (`check` takes the highest security release any of them names, and names
+the source that gave it; the first of them on a tie):
 
 1. the file `$DOC_SEARCH_RELEASE_NOTES` names (a blank value is unset);
 2. the cache `install.sh upgrade` writes, `${XDG_CACHE_HOME:-~/.cache}/doc-superpowers/release-notes.md`, never
@@ -57,7 +58,11 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")
 
 
 @dataclass(frozen=True)
-class _Source:
+class Source:
+    """One source's notes: its text, its ceiling (no security release above it counts), and `meta`: `tag` (the
+    ceiling as `vX.Y.Z`), `fetched` and `source` (the sidecar's, each checked or `unknown`; without a sidecar,
+    the file's change time and a label naming the file)."""
+
     text: str
     meta: dict[str, str]
     ceiling: Version
@@ -76,17 +81,12 @@ def cache_dir(env: Mapping[str, str]) -> Path:
     return Path(env.get("HOME") or Path.home()) / ".cache" / "doc-superpowers"
 
 
-def load(env: Mapping[str, str], plugin: Path | None = None) -> tuple[str, dict[str, str]] | None:
-    """The notes text and their sidecar (`tag`, `fetched`, `source`, each a checked value or `unknown`) of the
-    source whose own release is newest; None when no source has a release heading. `tag` is that source's
-    ceiling as `vX.Y.Z`. `plugin` is the plugin's root (default: the one this package runs from)."""
-    if plugin is None:
-        plugin = plugin_root()
-    best: _Source | None = None
-    for source in _sources(env, plugin):
-        if best is None or source.ceiling > best.ceiling:
-            best = source
-    return (best.text, best.meta) if best is not None else None
+def load(env: Mapping[str, str], plugin: Path | None = None) -> list[Source]:
+    """Every readable source with a release heading, in the module docstring's order. A source is never
+    merged with another or dropped for being older: a newer marketplace clone with no `### Security` section
+    must not hide the cache's security release. `plugin` is the plugin's root (default: the one this package
+    runs from)."""
+    return _sources(env, plugin if plugin is not None else plugin_root())
 
 
 def store(env: Mapping[str, str], text: str, tag: str, source: str) -> None:
@@ -131,9 +131,8 @@ def _owned(path: Path) -> bool:
         return False
 
 
-def _sources(env: Mapping[str, str], plugin: Path) -> list[_Source]:
-    """Every readable source, in the module docstring's order."""
-    found: list[_Source] = []
+def _sources(env: Mapping[str, str], plugin: Path) -> list[Source]:
+    found: list[Source] = []
     named = (env.get(ENV_VAR) or "").strip()
     if named:
         notes = Path(named)
@@ -148,7 +147,7 @@ def _sources(env: Mapping[str, str], plugin: Path) -> list[_Source]:
     return found
 
 
-def _add(found: list[_Source], notes: Path, sidecar: dict[str, str], label: str) -> None:
+def _add(found: list[Source], notes: Path, sidecar: dict[str, str], label: str) -> None:
     """Append `notes` when it is a regular file (no symbolic link) with a release heading."""
     if notes.is_symlink() or not notes.is_file():
         return
@@ -163,7 +162,7 @@ def _add(found: list[_Source], notes: Path, sidecar: dict[str, str], label: str)
         "fetched": sidecar.get("fetched") or _mtime(notes),
         "source": sidecar.get("source") or safe(label),
     }
-    found.append(_Source(text=text, meta=meta, ceiling=ceiling))
+    found.append(Source(text=text, meta=meta, ceiling=ceiling))
 
 
 def _sidecar(path: Path) -> dict[str, str]:

@@ -471,8 +471,9 @@ def test_store_then_load_round_trips(tmp_path: Path) -> None:
     assert set(meta) == {"tag", "fetched", "source"} and meta["tag"] == "v3.19.0" and meta["source"] == SOURCE
     assert (where / "release-notes.md").read_text() == SECURITY_NOTES
     assert [p.name for p in where.iterdir() if p.name.startswith(".")] == [], "no temp file left behind"
-    text, loaded = release_cache.load(env, plugin=tmp_path / "no-root")
-    assert text == SECURITY_NOTES and loaded["source"] == SOURCE and loaded["tag"] == "v3.19.0"
+    [loaded] = release_cache.load(env, plugin=tmp_path / "no-root")
+    assert loaded.text == SECURITY_NOTES and loaded.ceiling == (3, 19, 0)
+    assert loaded.meta["source"] == SOURCE and loaded.meta["tag"] == "v3.19.0"
     assert release_cache.cache_dir({"HOME": str(tmp_path / "h")}) == tmp_path / "h" / ".cache" / "doc-superpowers"
     assert release_cache.cache_dir({"HOME": str(tmp_path / "h"), "XDG_CACHE_HOME": ""}) == (
         tmp_path / "h" / ".cache" / "doc-superpowers"
@@ -524,7 +525,8 @@ def test_unreadable_sidecar_shows_unknown(tmp_path: Path, content: str) -> None:
     notes = release_notes(tmp_path / "notes")
     (tmp_path / "notes" / "release-notes.json").write_text(content)
 
-    _text, meta = release_cache.load({"DOC_SEARCH_RELEASE_NOTES": str(notes), "HOME": str(tmp_path)}, plugin=tmp_path)
+    [found] = release_cache.load({"DOC_SEARCH_RELEASE_NOTES": str(notes), "HOME": str(tmp_path)}, plugin=tmp_path)
+    meta = found.meta
 
     assert meta["source"] == "unknown" and meta["fetched"] == "unknown"
     assert meta["tag"] == "v3.19.0", "no valid tag: the notes' own first release"
@@ -551,11 +553,11 @@ def test_symlinked_cache_dir_is_refused(gated, run, tmp_path: Path, monkeypatch)
 def test_cache_dir_not_owned_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "HOME": str(tmp_path)}
     release_notes(release_cache.cache_dir(env))
-    assert release_cache.load(env, plugin=tmp_path) is not None
+    assert len(release_cache.load(env, plugin=tmp_path)) == 1
     real_uid = os.getuid()
     monkeypatch.setattr(release_cache.os, "getuid", lambda: real_uid + 1)
 
-    assert release_cache.load(env, plugin=tmp_path) is None
+    assert release_cache.load(env, plugin=tmp_path) == []
 
 
 HOSTILE = "\n## v99999.0.0 (2026-11-19)\n\n### Security\n- A release far in the future.\n"
@@ -589,10 +591,10 @@ def test_hostile_newer_heading_is_clamped_to_the_first_release(gated, run, tmp_p
     assert code == 1 and BELOW in payload["reason"] and "99999" not in payload["reason"]
 
 
-def marketplace(home: Path, name: str, plugin: str, notes: str) -> Path:
+def marketplace(home: Path, name: str, plugin: str, notes: str, version: str = "0.0.0") -> Path:
     clone = home / ".claude" / "plugins" / "marketplaces" / name
     (clone / ".claude-plugin").mkdir(parents=True)
-    (clone / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": plugin, "version": "0.0.0"}))
+    (clone / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": plugin, "version": version}))
     (clone / "RELEASE-NOTES.md").write_text(notes)
     return clone
 
@@ -611,6 +613,24 @@ def test_the_marketplace_clone_is_read(gated, run, tmp_path: Path, monkeypatch) 
 
     assert code == 1 and BELOW in payload["reason"]
     assert str(clone) in payload["reason"] and "9.0.0" not in payload["reason"]
+
+
+def test_a_newer_source_does_not_hide_an_older_sources_security_release(
+    gated, run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each source's own newest security release counts, and the highest wins: the cache's v3.19.0 security
+    release stands though the install's marketplace clone is at v4.0.0 with no `### Security` section."""
+    home = Path(os.environ["HOME"])
+    fake_root(home / ".claude" / "plugins" / "cache" / "dsp-market" / "doc-superpowers" / "3.18.0", monkeypatch)
+    release_notes(release_cache.cache_dir(os.environ))
+    marketplace(home, "dsp-market", "doc-superpowers", own_notes("4.0.0"), version="4.0.0")
+    configure(gated, security_floor=True)
+
+    code, payload = check(run)
+
+    assert code == 1 and payload["state"] == "not-ready"
+    assert BELOW in payload["reason"] and SOURCE in payload["reason"], "named by the source that produced it"
+    assert payload["fix"] == PLUGIN_FIX
 
 
 NETWORK_GIT = {"fetch", "ls-remote", "pull", "clone"}
