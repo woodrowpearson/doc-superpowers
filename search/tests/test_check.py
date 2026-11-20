@@ -591,6 +591,19 @@ def test_hostile_newer_heading_is_clamped_to_the_first_release(gated, run, tmp_p
     assert code == 1 and BELOW in payload["reason"] and "99999" not in payload["reason"]
 
 
+def test_the_plugins_own_notes_are_clamped_to_its_version(gated, run, tmp_path: Path, monkeypatch) -> None:
+    """The plugin's own notes never put it below a security release: their ceiling is `package.json`'s version
+    as well as their first heading, so notes that run ahead of the version (a checkout between a release's
+    notes and its bump) cannot."""
+    fake_root(tmp_path / "ds-checkout", monkeypatch, version="3.18.0", notes=SECURITY_NOTES)
+    configure(gated, security_floor=True)
+    assert run("index").code == 0
+
+    code, payload = check(run)
+
+    assert code == 0 and payload["state"] == "ready", payload["reason"]
+
+
 def marketplace(home: Path, name: str, plugin: str, notes: str, version: str = "0.0.0") -> Path:
     clone = home / ".claude" / "plugins" / "marketplaces" / name
     (clone / ".claude-plugin").mkdir(parents=True)

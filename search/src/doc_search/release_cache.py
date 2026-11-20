@@ -12,7 +12,8 @@ the source that gave it; the first of them on a tie):
    names doc-superpowers, and never above that manifest's `version`. Another marketplace, a fork's say, could
    name a release `claude plugin update` never installs, so no other clone is read; a checkout or the Codex
    root reads none;
-4. the plugin's own `RELEASE-NOTES.md`, which can never show a release past its own.
+4. the plugin's own `RELEASE-NOTES.md`, never above its `package.json` version, so it can never show a
+   release past its own.
 
 A notes file may have a sidecar beside it, the same name with `.json`: `{"tag": "vX.Y.Z", "fetched": "<ISO-8601
 UTC>", "source": "<remote URL>"}`, as `install.sh upgrade` writes for the cache. A source's own release, its
@@ -39,7 +40,7 @@ from pathlib import Path
 
 from .config import parse_version
 from .releases import Version, first_release, read_notes
-from .version import plugin_root
+from .version import plugin_root, plugin_version
 
 ENV_VAR = "DOC_SEARCH_RELEASE_NOTES"
 NOTES_NAME = "release-notes.md"
@@ -171,7 +172,8 @@ def _sources(env: Mapping[str, str], plugin: Path) -> list[Source]:
         version = _manifest_version(clone)
         if version is not None:
             _add(found, clone / "RELEASE-NOTES.md", {}, f"the marketplace clone {clone}", limit=version)
-    _add(found, Path(plugin) / "RELEASE-NOTES.md", {}, f"the plugin's own {Path(plugin) / 'RELEASE-NOTES.md'}")
+    own = Path(plugin) / "RELEASE-NOTES.md"
+    _add(found, own, {}, f"the plugin's own {own}", limit=plugin_version(Path(plugin)))
     return found
 
 
