@@ -54,6 +54,13 @@
 # for doc-search alone. UV_OFFLINE is neither set nor cleared: uv reads the
 # caller's value, or the env hook's.
 #
+# A half-installed environment: before doc-search runs, a package in the venv
+# ($UV_PROJECT_ENVIRONMENT, else <root>/search/.venv) whose dist-info has no
+# INSTALLER file was cut off mid-install, and uv never repairs it on its own.
+# The launcher names those packages on stderr and runs uv sync with the same
+# extras and --reinstall-package for each; a sync that fails is exit 2 with
+# the command to run by hand.
+#
 # The client's working directory (serve only): an MCP client may start the
 # server outside the worktree its session works in. The Claude desktop app, for
 # one, starts project servers in the main checkout (--project-config-root)
@@ -515,6 +522,34 @@ elif grep -Eq '"model"[^",]*:[^",]*"transformer:' "${TOP:-.}/docs/search/config.
   EXTRAS="--all-extras"
 else
   EXTRAS="--all-extras --no-extra local-transformer"
+fi
+
+# A half-installed environment (#64): uv writes a package's INSTALLER last, so
+# a dist-info without one is a copy something killed midway (an MCP client's
+# connect timeout during the first sync). uv counts the dist-info as installed
+# and never repairs it, so doc-search would fail at import on every start:
+# reinstall those packages first. Output to stderr: stdout is the MCP stream.
+VENV=${UV_PROJECT_ENVIRONMENT:-$ROOT/search/.venv}
+case $VENV in
+  /*) ;;
+  *) VENV=$ROOT/search/$VENV ;; # uv resolves a relative one against the project
+esac
+BROKEN=""
+REINSTALL=""
+for dist in "$VENV"/lib/python*/site-packages/*.dist-info; do
+  [ -d "$dist" ] || continue
+  [ -f "$dist/INSTALLER" ] && continue
+  pkg=${dist##*/}
+  pkg=${pkg%.dist-info}
+  pkg=${pkg%-*}
+  BROKEN="${BROKEN:+$BROKEN }$pkg"
+  REINSTALL="$REINSTALL --reinstall-package $pkg"
+done
+if [ -n "$BROKEN" ]; then
+  echo "doc-search: repairing a half-installed environment ($VENV): $BROKEN" >&2
+  # shellcheck disable=SC2086  # $EXTRAS as below; $REINSTALL is --reinstall-package <name> pairs (dist-info names hold no blanks)
+  uv sync --project "$ROOT/search" --frozen --no-dev $EXTRAS$REINSTALL >&2 ||
+    fail "could not repair $VENV; run: uv sync --project $ROOT/search --frozen --no-dev${EXTRAS:+ $EXTRAS}$REINSTALL"
 fi
 
 # shellcheck disable=SC2086  # $EXTRAS is a fixed flag list: empty, up to two --extra pairs, or --all-extras [--no-extra local-transformer]

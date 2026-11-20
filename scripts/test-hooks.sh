@@ -6455,6 +6455,60 @@ test_launcher_cloud_extra() {
   teardown
 }
 
+# srl_dist <venv> <name-version> [installer]: a site-packages dist-info under
+# <venv>; with "installer", its INSTALLER file (what uv writes last).
+srl_dist() {
+  local d="$1/lib/python3.12/site-packages/$2.dist-info"
+  mkdir -p "$d"
+  : > "$d/METADATA"
+  if [ "${3:-}" = installer ]; then echo uv > "$d/INSTALLER"; fi
+}
+
+test_launcher_repairs_half_installed_venv() {
+  echo "test: #64 launcher: a dist-info without INSTALLER (an interrupted first sync) is reinstalled with uv sync --reinstall-package before doc-search runs, with the same extras, its output on stderr; a whole venv, or none, runs no sync; a failed repair exits 2 naming the command; UV_PROJECT_ENVIRONMENT from the env hook is the venv scanned"
+  srh_fixture '{"cloud":{"project":"p"}}'
+  local envroot venv out err rc failbin hook other
+  envroot=$(harness_mktemp_d envroot)
+  srl_root "$envroot"
+  venv="$envroot/search/.venv"
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "uv run --project $envroot/search --frozen --no-dev --extra cloud doc-search serve" "$RUN_OUT" "no venv yet: no sync, uv run builds it"
+  srl_dist "$venv" mcp-2.3.0 installer
+  srl_dist "$venv" google_genai-3.6.1 installer
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- serve
+  assert_eq "uv run --project $envroot/search --frozen --no-dev --extra cloud doc-search serve" "$RUN_OUT" "every dist-info has INSTALLER: no sync"
+  srl_dist "$venv" numpy-2.5.4
+  srl_dist "$venv" protobuf-7.36.2
+  rc=0
+  out=$(env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= CODEX_HOME= PATH="$SRL_BIN:$REAL_PATH" \
+    /bin/sh "$SCRIPT_DIR/search/launch.sh" serve 2>"$envroot/err") || rc=$?
+  err=$(cat "$envroot/err")
+  assert_eq "0" "$rc" "half-installed: exit 0 (repaired, then run)"
+  assert_eq "uv run --project $envroot/search --frozen --no-dev --extra cloud doc-search serve" "$out" "…stdout holds only doc-search's run (it is the MCP stream)"
+  assert_contains "$err" "doc-search: repairing a half-installed environment ($venv): numpy protobuf" "…stderr names the venv and the packages"
+  assert_contains "$err" "uv sync --project $envroot/search --frozen --no-dev --extra cloud --reinstall-package numpy --reinstall-package protobuf" "…the sync, with the run's extras, on stderr"
+  assert_not_contains "$err" "reinstall-package mcp" "…a whole package is not reinstalled"
+  # The repair fails: exit 2, the command to run by hand, doc-search not run.
+  failbin=$(harness_mktemp_d failuv)
+  printf '#!/bin/sh\ncase "$1" in sync) exit 1 ;; esac\nprintf "uv %%s\\n" "$*"\n' > "$failbin/uv"
+  chmod +x "$failbin/uv"
+  rc=0
+  out=$(env DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= CODEX_HOME= PATH="$failbin:$REAL_PATH" \
+    /bin/sh "$SCRIPT_DIR/search/launch.sh" serve 2>&1) || rc=$?
+  assert_eq "2" "$rc" "a failed repair: exit 2"
+  assert_contains "$out" "doc-search: could not repair $venv; run: uv sync --project $envroot/search --frozen --no-dev --extra cloud --reinstall-package numpy --reinstall-package protobuf" "…naming the command"
+  assert_not_contains "$out" "uv run" "…and doc-search is not run"
+  # The env hook's UV_PROJECT_ENVIRONMENT is the venv uv uses, so it is the one scanned.
+  other=$(harness_mktemp_d othervenv)
+  srl_dist "$other" semble-0.7.3
+  hook="$envroot/env.sh"
+  printf "UV_PROJECT_ENVIRONMENT='%s'\nexport UV_PROJECT_ENVIRONMENT\n" "$other" > "$hook"
+  srl_run DOC_SUPERPOWERS_ROOT="$envroot" DOC_SEARCH_ENV_FILE="$hook" -- serve
+  assert_contains "$RUN_OUT" "repairing a half-installed environment ($other): semble" "UV_PROJECT_ENVIRONMENT: that venv is scanned"
+  assert_not_contains "$RUN_OUT" "numpy" "…not the project's own .venv"
+  teardown
+}
+
 test_launcher_transformer_extra() {
   echo "test: launcher: --extra local-transformer when docs.model starts with transformer:, after --extra cloud when both; nothing extra for another or a non-string model; without jq, --all-extras only when grep finds a transformer: model"
   srh_fixture '{"docs":{"model":"transformer:gte-modernbert-base"}}'
@@ -8230,6 +8284,7 @@ test_launcher_no_root_message
 test_launcher_codex_root
 test_launcher_cloud_extra
 test_launcher_transformer_extra
+test_launcher_repairs_half_installed_venv
 test_launcher_without_uv
 test_launcher_is_posix_sh
 test_launcher_env_hook
