@@ -8127,9 +8127,11 @@ cmd_tools_version() {
 
 # tools security-floor: the security-release marker (doc_search.releases
 # applies the same rule, and install.sh upgrade runs this verb). The awk
-# program prints "first <token>", then "release <X.Y.Z> <0|1>" per release
-# section; a version field over 9 digits is not a release (install.sh's tag
-# rule).
+# program prints "first <X.Y.Z>" for the first release heading (a whole
+# "## vX.Y.Z (YYYY-MM-DD)" line, as releases.first_release reads it: a draft
+# or suffixed heading above it never counts), then "release <X.Y.Z> <0|1>"
+# per release section; a version field over 9 digits is not a release
+# (install.sh's tag rule).
 # shellcheck disable=SC2016  # awk program, not shell expansion
 _AWK_SECURITY="$_AWK_FENCE"'
 function short_fields(v,    p, k, i) {
@@ -8139,17 +8141,15 @@ function short_fields(v,    p, k, i) {
 }
 { sub(/\r$/, "") }
 blk_fence($0) || fence_c != "" { next }
-first == "" && /^## v[0-9]/ {
-  first = substr($0, 5)
-  sub(/[[:space:]].*$/, "", first)
-  print "first " first
-}
 $0 == "##" || /^## / {
   cur = 0
   if ($0 ~ /^## v[0-9]+\.[0-9]+\.[0-9]+ \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)$/) {
     v = substr($0, 5)
     sub(/ .*$/, "", v)
-    if (short_fields(v)) { n++; ver[n] = v; sec[n] = 0; cur = n }
+    if (short_fields(v)) {
+      n++; ver[n] = v; sec[n] = 0; cur = n
+      if (n == 1) print "first " v
+    }
   }
   next
 }

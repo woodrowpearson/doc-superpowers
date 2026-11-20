@@ -3635,8 +3635,8 @@ upg_notes() {
 upg_scan() {
   local out first v
   # The security-release marker is doc-tools.sh's (tools security-floor, the
-  # rule doc_search.releases applies): "first <token>" for the first release
-  # heading, then "release <X.Y.Z> <0|1>" per release section.
+  # rule doc_search.releases applies): "first <X.Y.Z>" for the first release
+  # heading (none when there is none), then "release <X.Y.Z> <0|1>" per release section.
   out=$("$BASH" "$DOC_TOOLS" tools security-floor "$1" 2>/dev/null) || upg_die "cannot read $1 (doc-tools.sh tools security-floor)"
   first=$(printf '%s\n' "$out" | sed -n 's/^first //p')
   first=${first%%$'\n'*}

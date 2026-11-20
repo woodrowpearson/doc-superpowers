@@ -7614,6 +7614,25 @@ newest-security 3.19.0" "$out" "…the first heading, each release with its mark
   teardown
 }
 
+test_tools_security_floor_ceiling_is_the_first_release() {
+  echo "test: tools security-floor — the ceiling is the first RELEASE heading (## vX.Y.Z (YYYY-MM-DD)), never a draft heading above it (search/tests/test_releases.py test_ceiling_is_the_first_release_heading_not_a_draft pins the same three)"
+  setup
+  local out
+  printf '## v3.20.0 (draft)\n### Security\n- not out\n\n## v3.20.0 (2026-11-20)\n### Security\n- fix\n\n## v3.19.0 (2026-11-19)\n### Changed\n' > same.md
+  printf '## v3.18.0 (draft)\n\n## v3.20.0 (2026-11-20)\n### Security\n- fix\n' > low.md
+  printf '## v9.9.9 (draft)\n\n## v3.19.0 (2026-11-19)\n### Changed\n\n## v9.0.0 (2026-11-19)\n### Security\n- hostile\n' > high.md
+  out=$("$DOC_TOOLS" tools security-floor same.md 2>&1) || true
+  assert_contains "$out" "first 3.20.0" "a (draft) heading of the same version, then the release: first 3.20.0"
+  assert_contains "$out" "newest-security 3.20.0" "…newest security 3.20.0"
+  out=$("$DOC_TOOLS" tools security-floor low.md 2>&1) || true
+  assert_contains "$out" "first 3.20.0" "a lower (draft) heading above the release: first 3.20.0, not 3.18.0"
+  assert_contains "$out" "newest-security 3.20.0" "…so 3.20.0's security release counts"
+  out=$("$DOC_TOOLS" tools security-floor high.md 2>&1) || true
+  assert_contains "$out" "first 3.19.0" "a higher (draft) heading above the release: first 3.19.0, not 9.9.9"
+  assert_not_contains "$out" "newest-security" "…so a v9.0.0 security section below it is dropped"
+  teardown
+}
+
 test_i10_no_hidden_sed_or_ripgrep_dependency() {
   echo "test: no shipped script needs GNU sed or ripgrep; CI installs no GNU sed"
   local repo_root f hits=""
@@ -10136,6 +10155,7 @@ run_tests() {
   test_i10_tools_status_counts_user_added_helpers_apart
   test_i10_tools_from_the_vendored_copy
   test_tools_security_floor_reads_the_marker
+  test_tools_security_floor_ceiling_is_the_first_release
   test_i10_no_hidden_sed_or_ripgrep_dependency
 
   # --- Work ledger: the vendored helper set (3.3.0 Task 17) ---

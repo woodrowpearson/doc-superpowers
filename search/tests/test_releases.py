@@ -239,3 +239,20 @@ def test_first_release_is_in_file_order() -> None:
     assert first_release(NOTES) == (3, 18, 0)
     assert first_release(FIXTURE.read_text()) == (3, 19, 0), "fenced headings are not releases"
     assert first_release("hello") is None and first_release(None) is None
+
+
+# A heading that is not a release (no date, a suffix) above the first real one
+# never sets the ceiling: the first release heading does. scripts/test-doc-tools.sh
+# test_tools_security_floor_ceiling_is_the_first_release pins the same three.
+DRAFT_SAME = "## v3.20.0 (draft)\n### Security\n- not out\n\n## v3.20.0 (2026-11-20)\n### Security\n- fix\n\n## v3.19.0 (2026-11-19)\n### Changed\n"
+DRAFT_LOW = "## v3.18.0 (draft)\n\n## v3.20.0 (2026-11-20)\n### Security\n- fix\n"
+DRAFT_HIGH = "## v9.9.9 (draft)\n\n## v3.19.0 (2026-11-19)\n### Changed\n\n## v9.0.0 (2026-11-19)\n### Security\n- hostile\n"
+
+
+def test_ceiling_is_the_first_release_heading_not_a_draft() -> None:
+    def newest(text: str):
+        return newest_security(parse_releases(text), ceiling=first_release(text))
+
+    assert first_release(DRAFT_SAME) == (3, 20, 0) and newest(DRAFT_SAME) == (3, 20, 0)
+    assert first_release(DRAFT_LOW) == (3, 20, 0) and newest(DRAFT_LOW) == (3, 20, 0)
+    assert first_release(DRAFT_HIGH) == (3, 19, 0) and newest(DRAFT_HIGH) is None
