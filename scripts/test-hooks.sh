@@ -13597,6 +13597,34 @@ test_upgrade_ignores_a_security_release_newer_than_its_tag() {
   teardown
 }
 
+test_upgrade_caps_oversized_notes_before_writing() {
+  echo "test: a tag whose RELEASE-NOTES.md is far over the cap — only the capped prefix is ever written (a 3 MB file-size limit holds), the cache is at most 2,000,000 bytes"
+  setup
+  upg_origin
+  local work errf rc=0 size
+  work="$TEST_DIR/work"
+  git clone -q "$UPG_ORIGIN" "$work"
+  printf '# Release Notes\n\n## v3.20.0 (2026-11-20)\n\n### Security\n- A fix.\n\n' > "$work/RELEASE-NOTES.md"
+  # About 10 MB of filler lines after the heading.
+  awk 'BEGIN { for (i = 0; i < 160000; i++) print "filler line, filler line, filler line, filler line, " i }' >> "$work/RELEASE-NOTES.md"
+  git -C "$work" commit -qam "release v3.20.0"
+  git -C "$work" tag v3.20.0
+  upg_bare_copy big-notes
+  git -C "$work" push -q --tags "$UPG_BARE"
+  upg_release_root "$UPG_BARE"
+  errf=$(harness_mktemp upg.err)
+  # ulimit -f counts 512-byte blocks: 6000 is about 3 MB, under the notes' size.
+  RUN_OUT=$( (ulimit -f 6000; env PATH="$REAL_PATH" CLAUDE_PLUGIN_CACHE= CODEX_HOME= XDG_CACHE_HOME= DOC_SEARCH_ENV_FILE= DOC_SUPERPOWERS_ROOT= \
+    "$BASH_BIN" "$UPG_ROOT/scripts/hooks/install.sh" upgrade --check </dev/null 2>"$errf") ) || rc=$?
+  RUN_ERR=$(cat "$errf")
+  assert_eq "1" "$rc" "--check under a 3 MB file-size limit: behind, exit 1 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "newest security 3.20.0" "…the security heading near the top is read"
+  size=0
+  [ ! -f "$UPG_CACHE/release-notes.md" ] || size=$(wc -c < "$UPG_CACHE/release-notes.md" | tr -d ' ')
+  assert_true "…the cached notes are at most 2,000,000 bytes (${size:-none})" test "${size:-0}" -gt 0 -a "${size:-0}" -le 2000000
+  teardown
+}
+
 test_upgrade_codex_root_in_place() {
   echo "test: the Codex root (\$CODEX_HOME/doc-superpowers) upgrades in place, a clean branch checkout allowed (git checkout --detach <tag>); dirty: refused; ignored files do not count"
   setup
@@ -13737,6 +13765,7 @@ test_upgrade_to_and_usage
 test_upgrade_ignores_hostile_and_mismatched_tags
 test_upgrade_orders_versions_per_field
 test_upgrade_ignores_a_security_release_newer_than_its_tag
+test_upgrade_caps_oversized_notes_before_writing
 test_upgrade_codex_root_in_place
 test_upgrade_cache_and_fetch_failures
 test_upgrade_env_write_failure_names_the_new_root

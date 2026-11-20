@@ -3497,15 +3497,24 @@ upg_fetch() {
 }
 
 # upg_notes <version> <out>: RELEASE-NOTES.md at tag v<version>, at most
-# UPG_MAX_NOTES bytes of it.
+# UPG_MAX_NOTES bytes of it. The blob's size is read first, so a larger one is
+# only ever read through head: no more than the capped prefix is written.
 upg_notes() {
+  local size
   if [ "$UPG_KIND" = plugin ]; then
     GIT_TERMINAL_PROMPT=0 "${UPG_GIT[@]}" fetch --quiet --depth 1 -- "$UPG_SOURCE" "refs/tags/v$1:refs/tags/v$1" </dev/null \
       || upg_fetch_failed "cannot fetch tag v$1 from $UPG_SHOWN"
   fi
-  "${UPG_GIT[@]}" show "refs/tags/v$1:RELEASE-NOTES.md" >"$2.raw" 2>/dev/null \
+  size=$("${UPG_GIT[@]}" cat-file -s "refs/tags/v$1:RELEASE-NOTES.md" 2>/dev/null) && [[ "$size" =~ ^[0-9]+$ ]] \
     || upg_refuse "tag v$1 has no RELEASE-NOTES.md: it is not a release commit"
-  head -c "$UPG_MAX_NOTES" <"$2.raw" >"$2" || upg_die "cannot read the notes of v$1"
+  if [ "$size" -le "$UPG_MAX_NOTES" ]; then
+    "${UPG_GIT[@]}" cat-file blob "refs/tags/v$1:RELEASE-NOTES.md" >"$2" 2>/dev/null \
+      || upg_die "cannot read the notes of v$1"
+  else
+    # git stops on the closed pipe once head has its bytes; only head's status counts.
+    { "${UPG_GIT[@]}" cat-file blob "refs/tags/v$1:RELEASE-NOTES.md" 2>/dev/null || true; } \
+      | head -c "$UPG_MAX_NOTES" >"$2" || upg_die "cannot read the notes of v$1"
+  fi
 }
 
 # upg_scan <notes file> <version>: refuse notes that do not open with
