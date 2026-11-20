@@ -333,13 +333,8 @@ def _plugin_fix(env: Mapping[str, str]) -> str:
     `${CLAUDE_PLUGIN_CACHE:-~/.claude/plugins/cache}`) by Claude Code; any other root, a checkout or the Codex
     root, by its own `install.sh upgrade` (UPGRADE_FIX), which moves it to the newest release tag. launch.sh's
     `plugin_fix` is the shell twin."""
-    home = Path(env.get("HOME") or Path.home())
     root = plugin_root()
-    plugin_dirs = (
-        home / ".claude" / "plugins",
-        Path(env.get("CLAUDE_PLUGIN_CACHE") or home / ".claude" / "plugins" / "cache"),
-    )
-    if any(root.is_relative_to(where.resolve()) for where in plugin_dirs):
+    if release_cache.plugin_install(env, root)[0]:
         return PLUGIN_FIX
     return UPGRADE_FIX.format(install_sh=_sh_quote(str(root / "scripts" / "hooks" / "install.sh")))
 

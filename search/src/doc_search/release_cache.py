@@ -6,8 +6,12 @@ the source that gave it; the first of them on a tie):
 1. the file `$DOC_SEARCH_RELEASE_NOTES` names (a blank value is unset);
 2. the cache `install.sh upgrade` writes, `${XDG_CACHE_HOME:-~/.cache}/doc-superpowers/release-notes.md`, never
    read through a symbolic link or from a directory that is not the user's own;
-3. Claude Code's marketplace clone of doc-superpowers, `~/.claude/plugins/marketplaces/<name>/RELEASE-NOTES.md`,
-   known by its `.claude-plugin/plugin.json` `name` (Claude Code keeps that clone fresh by itself);
+3. for a Claude Code plugin install only, the clone of the marketplace this install came from,
+   `~/.claude/plugins/marketplaces/<mkt>/RELEASE-NOTES.md` (`<mkt>` read from the root's path as `install.sh`'s
+   `upg_kind` reads `UPG_MKT`; Claude Code keeps that clone fresh by itself), when its `.claude-plugin/plugin.json`
+   names doc-superpowers, and never above that manifest's `version`. Another marketplace, a fork's say, could
+   name a release `claude plugin update` never installs, so no other clone is read; a checkout or the Codex
+   root reads none;
 4. the plugin's own `RELEASE-NOTES.md`, which can never show a release past its own.
 
 A notes file may have a sidecar beside it, the same name with `.json`: `{"tag": "vX.Y.Z", "fetched": "<ISO-8601
@@ -33,6 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .config import parse_version
 from .releases import Version, first_release, read_notes
 from .version import plugin_root
 
@@ -131,6 +136,26 @@ def _owned(path: Path) -> bool:
         return False
 
 
+def plugin_install(env: Mapping[str, str], root: Path) -> tuple[bool, str | None]:
+    """Whether `root` is a Claude Code plugin install, and the name of the marketplace it came from (None when
+    the path does not say), as `install.sh`'s `upg_kind` decides `UPG_KIND=plugin` and `UPG_MKT`: a root under
+    `~/.claude/plugins/` (its marketplace the directory after `marketplaces/` or `cache/`), or under
+    `${CLAUDE_PLUGIN_CACHE:-~/.claude/plugins/cache}` (the directory after the cache)."""
+    home = Path(env.get("HOME") or Path.home())
+    real = Path(root).resolve()
+    plugins = (home / ".claude" / "plugins").resolve()
+    cache = Path(env.get("CLAUDE_PLUGIN_CACHE") or home / ".claude" / "plugins" / "cache").resolve()
+    if real.is_relative_to(plugins):
+        parts = real.relative_to(plugins).parts
+        if len(parts) >= 2 and parts[0] in ("marketplaces", "cache"):
+            return True, parts[1]
+        return True, None
+    if real.is_relative_to(cache):
+        parts = real.relative_to(cache).parts
+        return True, parts[0] if parts else None
+    return False, None
+
+
 def _sources(env: Mapping[str, str], plugin: Path) -> list[Source]:
     found: list[Source] = []
     named = (env.get(ENV_VAR) or "").strip()
@@ -140,23 +165,28 @@ def _sources(env: Mapping[str, str], plugin: Path) -> list[Source]:
     where = cache_dir(env)
     if not where.is_symlink() and where.is_dir() and _owned(where):
         _add(found, where / NOTES_NAME, _sidecar(where / SIDECAR_NAME), str(where / NOTES_NAME))
-    home = env.get("HOME") or str(Path.home())
-    for clone in _marketplace_clones(Path(home) / ".claude" / "plugins" / "marketplaces"):
-        _add(found, clone / "RELEASE-NOTES.md", {}, f"the marketplace clone {clone}")
+    is_plugin, market = plugin_install(env, plugin)
+    if is_plugin and market is not None:
+        clone = Path(env.get("HOME") or Path.home()) / ".claude" / "plugins" / "marketplaces" / market
+        version = _manifest_version(clone)
+        if version is not None:
+            _add(found, clone / "RELEASE-NOTES.md", {}, f"the marketplace clone {clone}", limit=version)
     _add(found, Path(plugin) / "RELEASE-NOTES.md", {}, f"the plugin's own {Path(plugin) / 'RELEASE-NOTES.md'}")
     return found
 
 
-def _add(found: list[Source], notes: Path, sidecar: dict[str, str], label: str) -> None:
-    """Append `notes` when it is a regular file (no symbolic link) with a release heading."""
+def _add(
+    found: list[Source], notes: Path, sidecar: dict[str, str], label: str, limit: Version | None = None
+) -> None:
+    """Append `notes` when it is a regular file (no symbolic link) with a release heading. Its ceiling is its
+    first release heading, lowered to a valid sidecar `tag` and to `limit` when they are lower."""
     if notes.is_symlink() or not notes.is_file():
         return
     text = read_notes(notes)
     first = first_release(text)
     if text is None or first is None:
         return
-    tag = _parse_tag(sidecar.get("tag"))
-    ceiling = first if tag is None else min(first, tag)
+    ceiling = min(v for v in (first, _parse_tag(sidecar.get("tag")), limit) if v is not None)
     meta = {
         "tag": "v" + ".".join(str(part) for part in ceiling),
         "fetched": sidecar.get("fetched") or _mtime(notes),
@@ -202,23 +232,19 @@ def _mtime(path: Path) -> str:
     return datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _marketplace_clones(root: Path) -> list[Path]:
-    """The marketplace clones whose `.claude-plugin/plugin.json` names doc-superpowers, by directory name."""
+def _manifest_version(clone: Path) -> Version | None:
+    """The `version` of a marketplace clone's `.claude-plugin/plugin.json` when its `name` is doc-superpowers;
+    None otherwise (no manifest, another plugin's, no valid version: the clone is not read)."""
+    manifest = clone / ".claude-plugin" / "plugin.json"
     try:
-        entries = sorted(root.iterdir())
-    except OSError:
-        return []
-    clones = []
-    for clone in entries:
-        manifest = clone / ".claude-plugin" / "plugin.json"
-        try:
-            with manifest.open("rb") as handle:
-                data = handle.read(MAX_SIDECAR_BYTES * 16 + 1)
-            if len(data) > MAX_SIDECAR_BYTES * 16:
-                continue
-            name = json.loads(data.decode("utf-8")).get("name")
-        except (OSError, ValueError, AttributeError):
-            continue
-        if name == PLUGIN_NAME:
-            clones.append(clone)
-    return clones
+        with manifest.open("rb") as handle:
+            data = handle.read(MAX_SIDECAR_BYTES * 16 + 1)
+        if len(data) > MAX_SIDECAR_BYTES * 16:
+            return None
+        fields = json.loads(data.decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(fields, dict) or fields.get("name") != PLUGIN_NAME:
+        return None
+    version = fields.get("version")
+    return parse_version(version) if isinstance(version, str) else None

@@ -599,20 +599,86 @@ def marketplace(home: Path, name: str, plugin: str, notes: str, version: str = "
     return clone
 
 
-def test_the_marketplace_clone_is_read(gated, run, tmp_path: Path, monkeypatch) -> None:
-    """Claude Code keeps its marketplace clone fresh: the doc-superpowers one counts, by its plugin.json name, and
-    the newest release across all sources wins."""
-    fake_root(tmp_path / "ds-checkout", monkeypatch)
+def plugin_install(home: Path, monkeypatch: pytest.MonkeyPatch, market: str = "dsp-market") -> Path:
+    """A Claude Code plugin install of the test's own at 3.18.0, from the marketplace `market`, in the default
+    plugin cache (`~/.claude/plugins/cache/<market>/doc-superpowers/<version>`)."""
+    cached = home / ".claude" / "plugins" / "cache" / market / "doc-superpowers" / "3.18.0"
+    return fake_root(cached, monkeypatch)
+
+
+def test_plugin_install_names_its_marketplace(tmp_path: Path) -> None:
+    """`upg_kind`'s UPG_KIND=plugin and UPG_MKT, from the root's path."""
+    home = tmp_path / "h"
+    env = {"HOME": str(home)}
+    plugins = home / ".claude" / "plugins"
+    other = tmp_path / "other-cache"
+    cached = plugins / "cache" / "mk" / "doc-superpowers" / "1.0.0"
+    for where in (cached, plugins / "marketplaces" / "mk", other / "mk2" / "x"):
+        where.mkdir(parents=True)
+
+    assert release_cache.plugin_install(env, cached) == (True, "mk")
+    assert release_cache.plugin_install(env, plugins / "marketplaces" / "mk") == (True, "mk")
+    assert release_cache.plugin_install(env, plugins) == (True, None)
+    in_other = {**env, "CLAUDE_PLUGIN_CACHE": str(other)}
+    assert release_cache.plugin_install(in_other, other / "mk2" / "x") == (True, "mk2")
+    assert release_cache.plugin_install(env, other / "mk2" / "x") == (False, None)
+
+
+def test_the_installs_own_marketplace_clone_is_read(gated, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Claude Code keeps the install's marketplace clone fresh: it counts, named in the reason."""
     home = Path(os.environ["HOME"])
-    release_notes(tmp_path / "older", monkeypatch, text=own_notes("3.18.0"), tag="v3.18.0")
-    marketplace(home, "some-other", "other-plugin", SECURITY_NOTES.replace("3.19.0", "9.0.0"))
-    clone = marketplace(home, "renamed-market", "doc-superpowers", SECURITY_NOTES)
+    plugin_install(home, monkeypatch)
+    clone = marketplace(home, "dsp-market", "doc-superpowers", SECURITY_NOTES, version="3.19.0")
     configure(gated, security_floor=True)
 
     code, payload = check(run)
 
-    assert code == 1 and BELOW in payload["reason"]
-    assert str(clone) in payload["reason"] and "9.0.0" not in payload["reason"]
+    assert code == 1 and BELOW in payload["reason"] and "dsp-market" in payload["reason"]
+    assert payload["fix"] == PLUGIN_FIX
+    assert clone.is_dir()
+
+
+def test_the_marketplace_clone_is_clamped_to_its_plugin_json_version(
+    gated, run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The clone's notes may run ahead of the release it holds; its `.claude-plugin/plugin.json` `version` is
+    its ceiling, so a security section above that version does not count."""
+    home = Path(os.environ["HOME"])
+    plugin_install(home, monkeypatch)
+    marketplace(home, "dsp-market", "doc-superpowers", SECURITY_NOTES, version="3.18.5")
+    configure(gated, security_floor=True)
+    assert run("index").code == 0
+
+    code, payload = check(run)
+
+    assert code == 0 and payload["state"] == "ready", payload["reason"]
+
+
+def test_another_doc_superpowers_marketplace_is_ignored(gated, run, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the marketplace this install came from counts: a fork's marketplace that also calls its plugin
+    doc-superpowers could halt the gate with a release `claude plugin update` can never install."""
+    home = Path(os.environ["HOME"])
+    plugin_install(home, monkeypatch)
+    marketplace(home, "dsp-market", "doc-superpowers", own_notes("3.18.0"), version="3.18.0")
+    marketplace(home, "a-fork", "doc-superpowers", SECURITY_NOTES.replace("3.19.0", "9.0.0"), version="9.0.0")
+    configure(gated, security_floor=True)
+    assert run("index").code == 0
+
+    code, payload = check(run)
+
+    assert code == 0 and payload["state"] == "ready", payload["reason"]
+
+
+def test_a_checkout_reads_no_marketplace_clone(gated, run, tmp_path: Path, monkeypatch) -> None:
+    """A checkout or the Codex root is not updated from any marketplace, so no clone counts for it."""
+    fake_root(tmp_path / "ds-checkout", monkeypatch)
+    marketplace(Path(os.environ["HOME"]), "doc-superpowers", "doc-superpowers", SECURITY_NOTES, version="3.19.0")
+    configure(gated, security_floor=True)
+    assert run("index").code == 0
+
+    code, payload = check(run)
+
+    assert code == 0 and payload["state"] == "ready", payload["reason"]
 
 
 def test_a_newer_source_does_not_hide_an_older_sources_security_release(
