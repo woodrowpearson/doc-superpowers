@@ -13744,6 +13744,45 @@ test_upgrade_cache_and_fetch_failures() {
   teardown
 }
 
+# upg_mode <path>: the permission bits of <path>, octal (stat on Linux or macOS).
+upg_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+}
+
+test_upgrade_refuses_a_writable_cache_dir() {
+  echo "test: upgrade makes the cache directory 0700, and refuses one that its group or others can write (exit 4 under --check, 1 without; nothing written), as doc_search.release_cache reads only such a directory"
+  setup
+  upg_origin
+  upg_release_root
+  upg_run -- --check
+  assert_eq "1" "$RUN_RC" "a new cache directory: behind, exit 1"
+  assert_eq "700" "$(upg_mode "$UPG_CACHE")" "…made with mode 700"
+  /bin/rm -rf "$UPG_CACHE"
+  mkdir -p "$UPG_CACHE"
+  chmod 755 "$UPG_CACHE"
+  upg_run -- --check
+  assert_eq "1" "$RUN_RC" "an existing 755 cache directory: accepted, exit 1 (behind)"
+  assert_eq "755" "$(upg_mode "$UPG_CACHE")" "…its mode left as it was"
+  /bin/rm -f "$UPG_CACHE/release-notes.md" "$UPG_CACHE/release-notes.json"
+  chmod 775 "$UPG_CACHE"
+  upg_run -- --check
+  assert_eq "4" "$RUN_RC" "a group-writable cache directory: refused under --check (exit 4)"
+  assert_contains "$RUN_ERR" "writable by its group or others" "…the message says why"
+  assert_contains "$RUN_ERR" "$UPG_CACHE" "…and names the directory"
+  assert_eq "" "$(ls -A "$UPG_CACHE")" "…nothing written into it"
+  chmod 757 "$UPG_CACHE"
+  upg_run -- --check
+  assert_eq "4" "$RUN_RC" "a world-writable cache directory: refused (exit 4)"
+  assert_eq "" "$(ls -A "$UPG_CACHE")" "…nothing written into it"
+  upg_run --
+  assert_eq "1" "$RUN_RC" "upgrade (no --check): refused, exit 1"
+  assert_true "…no worktree is made" test ! -e "$UPG_NEW"
+  assert_true "…no env hook is written" test ! -e "$UPG_ENV"
+  assert_eq "" "$(ls -A "$UPG_CACHE")" "…nothing written into the cache directory"
+  chmod 755 "$UPG_CACHE"
+  teardown
+}
+
 test_upgrade_env_write_failure_names_the_new_root() {
   echo "test: an env hook that cannot be rewritten after the new worktree is made — exit 1, the message names the new root and that DOC_SUPERPOWERS_ROOT is unchanged"
   setup
@@ -13812,6 +13851,7 @@ test_upgrade_caps_oversized_notes_before_writing
 test_upgrade_notes_parity_with_releases_py
 test_upgrade_codex_root_in_place
 test_upgrade_cache_and_fetch_failures
+test_upgrade_refuses_a_writable_cache_dir
 test_upgrade_env_write_failure_names_the_new_root
 test_upgrade_never_runs_git_hooks
 

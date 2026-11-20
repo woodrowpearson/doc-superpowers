@@ -3540,14 +3540,25 @@ UPG_SCAN
 # upg_store_cache <notes file> <tag>: the release-notes cache doc-search check
 # reads, each file written beside it and moved into place.
 upg_store_cache() {
-  local fetched tn tj
+  local fetched tn tj mode
   if [ -z "${XDG_CACHE_HOME:-}" ] && [ -z "${HOME:-}" ]; then
     upg_refuse "neither XDG_CACHE_HOME nor HOME is set: no place for the release-notes cache"
   fi
   UPG_CACHE_DIR="${XDG_CACHE_HOME:-${HOME:-}/.cache}/doc-superpowers"
   [ ! -L "$UPG_CACHE_DIR" ] || upg_refuse "$UPG_CACHE_DIR is a symbolic link, and the release-notes cache is never written through one: remove it, then run upgrade again"
-  mkdir -p "$UPG_CACHE_DIR" || upg_die "cannot create $UPG_CACHE_DIR"
+  # A new cache directory is 0700; an existing one keeps its mode (checked below).
+  if [ ! -d "$UPG_CACHE_DIR" ]; then
+    { mkdir -p "$(dirname "$UPG_CACHE_DIR")" && mkdir -m 700 "$UPG_CACHE_DIR"; } || upg_die "cannot create $UPG_CACHE_DIR"
+  fi
   [ -O "$UPG_CACHE_DIR" ] || upg_refuse "$UPG_CACHE_DIR is not your own directory: the release-notes cache must be"
+  # doc_search.release_cache reads only a directory no one else can write (no
+  # 0o022 bit), so an upgrade never writes a cache that check would refuse.
+  mode=$(file_mode "$UPG_CACHE_DIR") || upg_die "cannot read the mode of $UPG_CACHE_DIR"
+  [ "${#mode}" -eq 3 ] || mode=${mode#?}
+  case ${mode#?} in
+    [0145][0145]) ;;
+    *) upg_die "$UPG_CACHE_DIR is writable by its group or others (mode $mode), and doc-search check reads the release-notes cache only from a directory no one else can write: chmod go-w $(sh_squote "$UPG_CACHE_DIR"), then run upgrade again. Nothing was changed." ;;
+  esac
   UPG_CACHE_SOURCE=$UPG_SHOWN
   fetched=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   tn=$(mktemp "$UPG_CACHE_DIR/.release-notes.md.XXXXXX") || upg_die "cannot create a temp file in $UPG_CACHE_DIR"
