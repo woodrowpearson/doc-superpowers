@@ -13648,6 +13648,39 @@ test_upgrade_cache_and_fetch_failures() {
   teardown
 }
 
+test_upgrade_never_runs_git_hooks() {
+  echo "test: upgrade --check runs no git hook: not the root's own on its tag fetch, not a template's in the plugin path's scratch repository"
+  setup
+  upg_origin
+  upg_bare_copy hooked
+  upg_release_root "$UPG_BARE"
+  local hooks tmpl
+  hooks="$(cd "$UPG_ROOT" && cd "$(git rev-parse --git-common-dir)" && pwd)/hooks"
+  mkdir -p "$hooks"
+  printf '#!/bin/sh\ntouch "%s/root-hook-ran"\n' "$TEST_DIR" > "$hooks/reference-transaction"
+  chmod +x "$hooks/reference-transaction"
+  # A new tag, so the fetch has a ref to write.
+  git -C "$UPG_BARE" tag x-new v3.19.0
+  upg_run -- --check
+  assert_eq "1" "$RUN_RC" "--check: behind, exit 1"
+  assert_true "…the root's reference-transaction hook did not run on the fetch" test ! -e "$TEST_DIR/root-hook-ran"
+  # The plugin path: a template's hook never reaches the scratch repository.
+  tmpl="$TEST_DIR/template"
+  mkdir -p "$tmpl/hooks"
+  printf '#!/bin/sh\ntouch "%s/template-hook-ran"\n' "$TEST_DIR" > "$tmpl/hooks/reference-transaction"
+  chmod +x "$tmpl/hooks/reference-transaction"
+  printf '[init]\n\ttemplateDir = %s\n' "$tmpl" > "$TEST_DIR/gitconfig"
+  local proot="$HOME/.claude/plugins/cache/mkt/doc-superpowers/3.18.0"
+  mkdir -p "$proot"
+  git -C "$UPG_ORIGIN" archive v3.18.0 | tar -x -C "$proot"
+  git clone -q "$UPG_ORIGIN" "$HOME/.claude/plugins/marketplaces/mkt"
+  UPG_ROOT=$proot
+  upg_run GIT_CONFIG_GLOBAL="$TEST_DIR/gitconfig" -- --check
+  assert_eq "1" "$RUN_RC" "plugin --check with a hook template configured: exit 1"
+  assert_true "…the template's hook did not run" test ! -e "$TEST_DIR/template-hook-ran"
+  teardown
+}
+
 echo ""
 echo "=== install.sh upgrade ==="
 test_upgrade_check_reports_and_caches
@@ -13661,6 +13694,7 @@ test_upgrade_ignores_hostile_and_mismatched_tags
 test_upgrade_orders_versions_per_field
 test_upgrade_codex_root_in_place
 test_upgrade_cache_and_fetch_failures
+test_upgrade_never_runs_git_hooks
 
 test_claude_hook_contract_held() {
   echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"

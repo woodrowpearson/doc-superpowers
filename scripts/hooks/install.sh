@@ -3452,9 +3452,9 @@ upg_fetch() {
   local mkt url="" top tags
   if [ "$UPG_KIND" != plugin ]; then
     UPG_SOURCE=$(git -C "$UPG_ROOT" remote get-url origin 2>/dev/null) || upg_fetch_failed "$UPG_ROOT has no origin remote to fetch the release tags from"
-    GIT_TERMINAL_PROMPT=0 git -C "$UPG_ROOT" fetch --quiet --tags origin </dev/null \
+    GIT_TERMINAL_PROMPT=0 git -C "$UPG_ROOT" -c core.hooksPath=/dev/null fetch --quiet --tags origin </dev/null \
       || upg_fetch_failed "cannot fetch the release tags from $UPG_SOURCE (git -C $(sh_squote "$UPG_ROOT") fetch --tags origin)"
-    UPG_GIT=(git -C "$UPG_ROOT")
+    UPG_GIT=(git -C "$UPG_ROOT" -c core.hooksPath=/dev/null)
     UPG_VERSIONS=$(git -C "$UPG_ROOT" tag --list | upg_versions)
     return 0
   fi
@@ -3467,8 +3467,8 @@ upg_fetch() {
   [ -n "$url" ] || url=$(plugin_marketplace_url)
   [ -n "$url" ] || upg_fetch_failed "no repository to fetch the release tags from: no marketplace clone with an origin, and plugin.json names none"
   UPG_SOURCE=$url
-  git init -q --bare "$UPG_SCRATCH/tags.git" || upg_fetch_failed "cannot create a scratch repository in $UPG_SCRATCH"
-  UPG_GIT=(git --git-dir="$UPG_SCRATCH/tags.git")
+  git init -q --bare --template= "$UPG_SCRATCH/tags.git" || upg_fetch_failed "cannot create a scratch repository in $UPG_SCRATCH"
+  UPG_GIT=(git --git-dir="$UPG_SCRATCH/tags.git" -c core.hooksPath=/dev/null)
   tags=$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags --refs -- "$url" </dev/null) \
     || upg_fetch_failed "cannot list the release tags at $url (git ls-remote --tags)"
   UPG_VERSIONS=$(printf '%s\n' "$tags" | awk '{ sub(/^refs\/tags\//, "", $2); print $2 }' | upg_versions)
