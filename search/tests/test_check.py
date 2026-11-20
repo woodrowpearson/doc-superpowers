@@ -2,8 +2,8 @@
 
 The CLI is driven in-process through `main(argv)`, as in test_cli.py, whose fixtures and helpers these
 tests reuse. Every test has its own HOME and CODEX_HOME, so a developer's own Codex config never counts as
-an MCP registration, and DOC_SEARCH_MCP is unset. Its own XDG_CACHE_HOME and no DOC_SEARCH_RELEASE_NOTES or
-CLAUDE_PLUGIN_CACHE keep the developer's release-notes cache and plugin installs out of the security floor.
+an MCP registration, and DOC_SEARCH_MCP is unset. conftest's `release_notes_isolated` keeps the developer's
+release-notes cache and plugin installs out of the security floor.
 """
 
 from __future__ import annotations
@@ -45,9 +45,6 @@ def own_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.delenv("DOC_SEARCH_MCP", raising=False)
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
-    monkeypatch.delenv("DOC_SEARCH_RELEASE_NOTES", raising=False)
-    monkeypatch.delenv("CLAUDE_PLUGIN_CACHE", raising=False)
     return home
 
 
