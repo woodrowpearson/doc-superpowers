@@ -2,13 +2,17 @@
 
 The CLI is driven in-process through `main(argv)`, as in test_cli.py, whose fixtures and helpers these
 tests reuse. Every test has its own HOME and CODEX_HOME, so a developer's own Codex config never counts as
-an MCP registration, and DOC_SEARCH_MCP is unset.
+an MCP registration, and DOC_SEARCH_MCP is unset. Its own XDG_CACHE_HOME and no DOC_SEARCH_RELEASE_NOTES or
+CLAUDE_PLUGIN_CACHE keep the developer's release-notes cache and plugin installs out of the security floor.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import socket
+import subprocess
 import threading
 from dataclasses import fields
 from pathlib import Path
@@ -18,7 +22,8 @@ import pytest
 from semble import ContentType, SembleIndex
 from semble.cache import find_index_from_cache_folder
 
-from doc_search.check import LAUNCHER_REL, Verdict, config_says_required, mcp_state
+from doc_search import release_cache
+from doc_search.check import LAUNCHER_REL, PLUGIN_FIX, Verdict, config_says_required, mcp_state
 from doc_search.config import CONFIG_REL
 from doc_search.engines import IndexPool
 from doc_search.transformer import TransformerSpec
@@ -40,6 +45,9 @@ def own_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     monkeypatch.delenv("DOC_SEARCH_MCP", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    monkeypatch.delenv("DOC_SEARCH_RELEASE_NOTES", raising=False)
+    monkeypatch.delenv("CLAUDE_PLUGIN_CACHE", raising=False)
     return home
 
 
@@ -266,31 +274,382 @@ def test_check_transformer_nothing_built_is_not_ready(tx_gated, run) -> None:
 # --- the versions and the launcher ------------------------------------------------------------------------
 
 
-def test_check_plugin_below_floor(gated, run) -> None:
+def fake_root(where: Path, monkeypatch: pytest.MonkeyPatch, version: str = "3.18.0", notes: str | None = None) -> Path:
+    """A doc-superpowers root of the test's own at `version`, never the real one: the plugin's own launcher (so
+    the committed copy stays current) and release notes whose first release is `version`."""
+    (where / "scripts" / "search").mkdir(parents=True)
+    shutil.copyfile(plugin_root() / "scripts" / "search" / "launch.sh", where / "scripts" / "search" / "launch.sh")
+    (where / "package.json").write_text(json.dumps({"version": version}))
+    (where / "RELEASE-NOTES.md").write_text(notes if notes is not None else own_notes(version))
+    monkeypatch.setattr("doc_search.check.plugin_root", lambda: where.resolve())
+    return where.resolve()
+
+
+def own_notes(version: str) -> str:
+    """A root's own release notes: `version` first, and an older security release under it."""
+    return (
+        f"# Release Notes\n\n## v{version} (2026-11-18)\n### Changed\n- x\n\n"
+        "## v0.1.0 (2026-01-01)\n### Security\n- old\n"
+    )
+
+
+def upgrade_fix(root: Path) -> str:
+    return f"bash {root}/scripts/hooks/install.sh upgrade"
+
+
+def test_check_plugin_below_floor_in_a_plugin_install(gated, run, tmp_path: Path, monkeypatch) -> None:
+    cache = tmp_path / "plugin-cache"
+    monkeypatch.setenv("CLAUDE_PLUGIN_CACHE", str(cache))
+    fake_root(cache / "doc-superpowers" / "doc-superpowers" / "3.18.0", monkeypatch)
     configure(gated, requires=">=99.0.0")
 
     code, payload = check(run)
 
     assert code == 1 and payload["state"] == "not-ready"
-    assert payload["reason"] == f"doc-superpowers {PLUGIN} is below requires >=99.0.0"
-    assert payload["fix"] == "claude plugin update doc-superpowers"
-    assert payload["requires"] == ">=99.0.0" and payload["version"] == PLUGIN
+    assert payload["reason"] == "doc-superpowers 3.18.0 is below requires >=99.0.0"
+    assert payload["fix"] == PLUGIN_FIX == "claude plugin update doc-superpowers"
+    assert payload["requires"] == ">=99.0.0" and payload["version"] == "3.18.0"
 
 
-def test_check_plugin_below_floor_in_the_codex_root_is_pulled(
+def test_check_plugin_below_floor_in_a_checkout_is_upgraded(gated, run, tmp_path: Path, monkeypatch) -> None:
+    root = fake_root(tmp_path / "ds-checkout", monkeypatch)
+    configure(gated, requires=">=99.0.0")
+
+    code, payload = check(run)
+
+    assert code == 1 and payload["reason"] == "doc-superpowers 3.18.0 is below requires >=99.0.0"
+    assert payload["fix"] == upgrade_fix(root)
+
+
+def test_check_plugin_below_floor_in_the_codex_root_is_upgraded(
     gated, run, own_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = own_home / ".codex" / "doc-superpowers"
-    root.mkdir()
-    (root / "package.json").write_text('{"version": "1.0.0"}')
-    monkeypatch.setattr("doc_search.check.plugin_root", lambda: root.resolve())
+    """The Codex root is a git checkout that `install.sh upgrade` moves in place, as any other checkout."""
+    root = fake_root(own_home / ".codex" / "doc-superpowers", monkeypatch, version="1.0.0")
     monkeypatch.setenv("HOME", str(own_home))  # git_repo's HOME came after this file's
     configure(gated, requires=">=2.0.0")
 
     code, payload = check(run)
 
     assert code == 1 and payload["reason"] == "doc-superpowers 1.0.0 is below requires >=2.0.0"
-    assert payload["fix"] == "git -C ~/.codex/doc-superpowers pull"
+    assert payload["fix"] == upgrade_fix(root)
+
+
+def test_plugin_fix_by_install_kind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from doc_search.check import _plugin_fix
+
+    home = tmp_path / "fix-home"
+    env = {"HOME": str(home)}
+    marketplace = home / ".claude" / "plugins" / "marketplaces" / "doc-superpowers"
+    cached = home / ".claude" / "plugins" / "cache" / "doc-superpowers" / "doc-superpowers" / "3.18.0"
+    elsewhere = tmp_path / "elsewhere" / "doc-superpowers" / "3.18.0"
+    spaced = tmp_path / "a dir" / "doc-superpowers"
+    for root in (marketplace, cached, elsewhere, spaced):
+        root.mkdir(parents=True)
+
+    def fix(root: Path, env: dict[str, str]) -> str:
+        monkeypatch.setattr("doc_search.check.plugin_root", lambda: root.resolve())
+        return _plugin_fix(env)
+
+    assert fix(marketplace, env) == PLUGIN_FIX, "under ~/.claude/plugins/"
+    assert fix(cached, env) == PLUGIN_FIX, "under the default plugin cache"
+    assert fix(elsewhere, env) == upgrade_fix(elsewhere.resolve()), "a plain checkout"
+    in_cache = {**env, "CLAUDE_PLUGIN_CACHE": str(tmp_path / "elsewhere")}
+    assert fix(elsewhere, in_cache) == PLUGIN_FIX, "under CLAUDE_PLUGIN_CACHE"
+    quoted = "'" + str(spaced.resolve() / "scripts" / "hooks" / "install.sh") + "'"
+    assert fix(spaced, env) == f"bash {quoted} upgrade", "a path that needs quoting is quoted whole"
+
+
+# --- the security floor -----------------------------------------------------------------------------------
+
+SECURITY_NOTES = (
+    "# Release Notes\n\n## v3.19.0 (2026-11-19)\n\n### Security\n- A fix users must upgrade for.\n\n"
+    "## v3.18.0 (2026-11-18)\n\n### Changed\n- Something.\n"
+)
+SOURCE = "https://example.test/a-fork/doc-superpowers.git"
+FETCHED = "2026-11-19T08:30:00Z"
+
+
+def release_notes(
+    where: Path, monkeypatch: pytest.MonkeyPatch | None = None, text: str = SECURITY_NOTES, **sidecar: Any
+) -> Path:
+    """`<where>/release-notes.md` and its sidecar, as `install.sh upgrade` writes them; named by
+    DOC_SEARCH_RELEASE_NOTES when `monkeypatch` is given."""
+    where.mkdir(parents=True, exist_ok=True)
+    notes = where / "release-notes.md"
+    notes.write_text(text)
+    meta = {"tag": "v3.19.0", "fetched": FETCHED, "source": SOURCE, **sidecar}
+    (where / "release-notes.json").write_text(json.dumps(meta) + "\n")
+    if monkeypatch is not None:
+        monkeypatch.setenv("DOC_SEARCH_RELEASE_NOTES", str(notes))
+    return notes
+
+
+BELOW = "doc-superpowers 3.18.0 is below security release 3.19.0"
+
+
+def test_below_security_release_halts_when_opted_in(gated, run, tmp_path: Path, monkeypatch) -> None:
+    root = fake_root(tmp_path / "ds-checkout", monkeypatch)
+    release_notes(tmp_path / "notes", monkeypatch)
+    configure(gated, security_floor=True)
+
+    code, payload = check(run)
+
+    assert code == 1 and payload["state"] == "not-ready"
+    assert BELOW in payload["reason"]
+    assert payload["fix"] == upgrade_fix(root) and payload["fix"].endswith("install.sh upgrade")
+    assert payload["cache"] == {}, "the order stopped before the indexes"
+
+
+def test_below_security_release_degrades_when_not_opted_in(gated, run, tmp_path: Path, monkeypatch) -> None:
+    root = fake_root(tmp_path / "ds-checkout", monkeypatch)
+    assert run("index").code == 0
+    release_notes(tmp_path / "notes", monkeypatch)
+
+    code, payload = check(run)
+
+    assert code == 0 and payload["state"] == "degraded" and payload["launcher"] == "current"
+    assert payload["reason"].startswith(BELOW)
+    assert payload["fix"] == upgrade_fix(root), "the upgrade, not install --search"
+
+
+def test_below_security_release_not_required_is_not_in_force(repo, run, tmp_path: Path, monkeypatch) -> None:
+    """The halt applies only with `required: true`: elsewhere `security_floor` is reported, never a halt."""
+    fake_root(tmp_path / "ds-checkout", monkeypatch)
+    install_launcher(repo)
+    release_notes(tmp_path / "notes", monkeypatch)
+    configure(repo, security_floor=True)
+
+    code, payload = check(run)
+
+    assert code == 4 and payload["state"] == "not-in-force"
+    assert payload["reason"].startswith(f"not required here (not-ready: {BELOW}")
+
+
+def test_no_cache_never_behind(gated, run, tmp_path: Path, monkeypatch) -> None:
+    """No variable and an empty cache: only the root's own notes, which never show a release past its own."""
+    fake_root(tmp_path / "ds-checkout", monkeypatch)
+    release_cache.cache_dir(os.environ).mkdir(parents=True)
+    configure(gated, security_floor=True)
+    assert run("index").code == 0
+
+    code, payload = check(run)
+
+    assert code == 0 and payload["state"] == "ready" and payload["reason"] is None
+
+
+def test_reason_names_source(gated, run, tmp_path: Path, monkeypatch) -> None:
+    """A cache from another install's remote (a fork's notes) is named in the reason, with when it was fetched."""
+    fake_root(tmp_path / "ds-checkout", monkeypatch)
+    release_notes(tmp_path / "notes", monkeypatch)
+    configure(gated, security_floor=True)
+
+    reason = check(run)[1]["reason"]
+
+    assert SOURCE in reason and FETCHED in reason and "release notes v3.19.0" in reason
+
+
+def test_the_cache_is_read(gated, run, tmp_path: Path, monkeypatch) -> None:
+    """`install.sh upgrade`'s cache, `${XDG_CACHE_HOME:-~/.cache}/doc-superpowers`, with no variable set."""
+    fake_root(tmp_path / "ds-checkout", monkeypatch)
+    release_notes(release_cache.cache_dir(os.environ))
+    configure(gated, security_floor=True)
+
+    code, payload = check(run)
+
+    assert code == 1 and BELOW in payload["reason"] and SOURCE in payload["reason"]
+
+
+def test_store_then_load_round_trips(tmp_path: Path) -> None:
+    env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "HOME": str(tmp_path / "h")}
+
+    release_cache.store(env, SECURITY_NOTES, "v3.19.0", SOURCE)
+
+    where = release_cache.cache_dir(env)
+    assert where == tmp_path / "xdg" / "doc-superpowers"
+    meta = json.loads((where / "release-notes.json").read_text())
+    assert set(meta) == {"tag", "fetched", "source"} and meta["tag"] == "v3.19.0" and meta["source"] == SOURCE
+    assert (where / "release-notes.md").read_text() == SECURITY_NOTES
+    assert [p.name for p in where.iterdir() if p.name.startswith(".")] == [], "no temp file left behind"
+    text, loaded = release_cache.load(env, plugin=tmp_path / "no-root")
+    assert text == SECURITY_NOTES and loaded["source"] == SOURCE and loaded["tag"] == "v3.19.0"
+    assert release_cache.cache_dir({"HOME": str(tmp_path / "h")}) == tmp_path / "h" / ".cache" / "doc-superpowers"
+    assert release_cache.cache_dir({"HOME": str(tmp_path / "h"), "XDG_CACHE_HOME": ""}) == (
+        tmp_path / "h" / ".cache" / "doc-superpowers"
+    ), "an empty XDG_CACHE_HOME is unset, as for install.sh"
+
+
+@pytest.mark.parametrize(
+    "sidecar",
+    [
+        {"source": "https://evil.test/x\nsecond line"},
+        {"source": "https://evil.test/\x1b[31mred\x1b[0m"},
+        {"source": "has a space", "fetched": "yesterday\r\n"},
+        {"source": 5, "fetched": None, "tag": "v3.19.0;touch pwned"},
+    ],
+    ids=["newline", "ansi", "space", "wrong-types"],
+)
+def test_hostile_sidecar_shows_unknown(gated, run, tmp_path: Path, monkeypatch, sidecar: dict) -> None:
+    fake_root(tmp_path / "ds-checkout", monkeypatch)
+    release_notes(tmp_path / "notes", monkeypatch, **sidecar)
+    configure(gated, security_floor=True)
+
+    reason = check(run)[1]["reason"]
+
+    assert BELOW in reason and "unknown" in reason
+    assert not any(ch in reason for ch in "\n\r\x1b"), reason
+    assert "evil" not in reason and "pwned" not in reason and "yesterday" not in reason
+    verdict = (gated.root / ".git" / "doc-search-gate").read_text().splitlines()
+    assert len(verdict) == 2 and verdict[0] == "not-ready", "the verdict file keeps its two lines"
+
+
+def test_a_hostile_path_reaches_the_reason_stripped(gated, run, tmp_path: Path, monkeypatch) -> None:
+    """With no sidecar the source is the file's path, which may hold anything a file name can: its ANSI sequences
+    and control characters are dropped."""
+    fake_root(tmp_path / "ds-checkout", monkeypatch)
+    where = tmp_path / "a\x1b[31mred\nline two"
+    where.mkdir()
+    (where / "notes.md").write_text(SECURITY_NOTES)
+    monkeypatch.setenv("DOC_SEARCH_RELEASE_NOTES", str(where / "notes.md"))
+    configure(gated, security_floor=True)
+
+    reason = check(run)[1]["reason"]
+
+    assert BELOW in reason and "aredlinetwo" in reason
+    assert not any(ch in reason for ch in "\n\x1b "), reason
+
+
+@pytest.mark.parametrize("content", ["not json", "[1, 2]", "{" + '"source": "x", ' * 2000 + '"tag": "v3.19.0"}'])
+def test_unreadable_sidecar_shows_unknown(tmp_path: Path, content: str) -> None:
+    notes = release_notes(tmp_path / "notes")
+    (tmp_path / "notes" / "release-notes.json").write_text(content)
+
+    _text, meta = release_cache.load({"DOC_SEARCH_RELEASE_NOTES": str(notes), "HOME": str(tmp_path)}, plugin=tmp_path)
+
+    assert meta["source"] == "unknown" and meta["fetched"] == "unknown"
+    assert meta["tag"] == "v3.19.0", "no valid tag: the notes' own first release"
+
+
+def test_symlinked_cache_dir_is_refused(gated, run, tmp_path: Path, monkeypatch) -> None:
+    fake_root(tmp_path / "ds-checkout", monkeypatch)
+    real = tmp_path / "elsewhere"
+    release_notes(real)
+    where = release_cache.cache_dir(os.environ)
+    where.parent.mkdir(parents=True)
+    where.symlink_to(real, target_is_directory=True)
+    configure(gated, security_floor=True)
+    assert run("index").code == 0
+
+    code, payload = check(run)
+
+    assert code == 0 and payload["state"] == "ready", "a symlinked cache dir is never read"
+    where.unlink()
+    shutil.copytree(real, where)
+    assert check(run)[0] == 1, "the same files in a real directory are read"
+
+
+def test_cache_dir_not_owned_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "HOME": str(tmp_path)}
+    release_notes(release_cache.cache_dir(env))
+    assert release_cache.load(env, plugin=tmp_path) is not None
+    real_uid = os.getuid()
+    monkeypatch.setattr(release_cache.os, "getuid", lambda: real_uid + 1)
+
+    assert release_cache.load(env, plugin=tmp_path) is None
+
+
+HOSTILE = "\n## v99999.0.0 (2026-11-19)\n\n### Security\n- A release far in the future.\n"
+
+
+def test_hostile_newer_heading_is_clamped_to_the_sidecar_tag(gated, run, tmp_path: Path, monkeypatch) -> None:
+    """A security section above the notes' own release is dropped: a release is never newer than its notes."""
+    fake_root(tmp_path / "ds-checkout", monkeypatch)
+    release_notes(release_cache.cache_dir(os.environ), text="# Release Notes\n" + HOSTILE + SECURITY_NOTES[17:])
+    configure(gated, security_floor=True)
+
+    reason = check(run)[1]["reason"]
+
+    assert BELOW in reason and "99999" not in reason
+
+
+def test_hostile_newer_heading_is_clamped_to_the_first_release(gated, run, tmp_path: Path, monkeypatch) -> None:
+    """With no sidecar, a source's ceiling is its first release heading (check-version's rule)."""
+    fake_root(tmp_path / "ds-checkout", monkeypatch, notes=own_notes("3.18.0") + HOSTILE)
+    configure(gated, security_floor=True)
+    assert run("index").code == 0
+
+    code, payload = check(run)
+
+    assert code == 0 and payload["state"] == "ready", "the root's own notes never put it below a security release"
+    notes = tmp_path / "plain" / "RELEASE-NOTES.md"
+    notes.parent.mkdir()
+    notes.write_text(SECURITY_NOTES + HOSTILE)
+    monkeypatch.setenv("DOC_SEARCH_RELEASE_NOTES", str(notes))
+    code, payload = check(run)
+    assert code == 1 and BELOW in payload["reason"] and "99999" not in payload["reason"]
+
+
+def marketplace(home: Path, name: str, plugin: str, notes: str) -> Path:
+    clone = home / ".claude" / "plugins" / "marketplaces" / name
+    (clone / ".claude-plugin").mkdir(parents=True)
+    (clone / ".claude-plugin" / "plugin.json").write_text(json.dumps({"name": plugin, "version": "0.0.0"}))
+    (clone / "RELEASE-NOTES.md").write_text(notes)
+    return clone
+
+
+def test_the_marketplace_clone_is_read(gated, run, tmp_path: Path, monkeypatch) -> None:
+    """Claude Code keeps its marketplace clone fresh: the doc-superpowers one counts, by its plugin.json name, and
+    the newest release across all sources wins."""
+    fake_root(tmp_path / "ds-checkout", monkeypatch)
+    home = Path(os.environ["HOME"])
+    release_notes(tmp_path / "older", monkeypatch, text=own_notes("3.18.0"), tag="v3.18.0")
+    marketplace(home, "some-other", "other-plugin", SECURITY_NOTES.replace("3.19.0", "9.0.0"))
+    clone = marketplace(home, "renamed-market", "doc-superpowers", SECURITY_NOTES)
+    configure(gated, security_floor=True)
+
+    code, payload = check(run)
+
+    assert code == 1 and BELOW in payload["reason"]
+    assert str(clone) in payload["reason"] and "9.0.0" not in payload["reason"]
+
+
+NETWORK_GIT = {"fetch", "ls-remote", "pull", "clone"}
+
+
+def test_check_never_fetches(gated, run, tmp_path: Path, monkeypatch) -> None:
+    """`check` reads only what is on disk: no socket reaches the network, and no git verb that would."""
+    fake_root(tmp_path / "ds-checkout", monkeypatch)
+    assert run("index").code == 0
+    release_notes(tmp_path / "notes", monkeypatch)
+    blocked: list[str] = []
+    real_init = subprocess.Popen.__init__
+    real_connect = socket.socket.connect
+
+    def popen(self, args, *rest, **kwargs):
+        argv = [str(a) for a in args] if isinstance(args, (list, tuple)) else str(args).split()
+        if argv and Path(argv[0]).name == "git" and NETWORK_GIT & set(argv[1:]):
+            blocked.append(" ".join(argv))
+            raise AssertionError(f"check ran a network git verb: {argv}")
+        real_init(self, args, *rest, **kwargs)
+
+    def connect(self, address):
+        if self.family in (socket.AF_INET, socket.AF_INET6):
+            blocked.append(f"connect {address}")
+            raise AssertionError(f"check opened a network connection: {address}")
+        return real_connect(self, address)
+
+    def create_connection(address, *args, **kwargs):
+        blocked.append(f"create_connection {address}")
+        raise AssertionError(f"check opened a network connection: {address}")
+
+    monkeypatch.setattr(subprocess.Popen, "__init__", popen)
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket, "create_connection", create_connection)
+
+    code, payload = check(run)
+
+    assert blocked == []
+    assert code == 0 and payload["state"] == "degraded" and BELOW in payload["reason"]
 
 
 def test_check_launcher_absent_or_below_floor_is_not_ready(gated, run) -> None:

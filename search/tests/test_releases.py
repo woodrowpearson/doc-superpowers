@@ -7,6 +7,7 @@ from pathlib import Path
 from doc_search.releases import (
     MAX_NOTES_BYTES,
     Release,
+    first_release,
     newest_security,
     parse_releases,
     read_notes,
@@ -220,3 +221,21 @@ def test_read_notes_invalid_utf8_is_replaced(tmp_path: Path) -> None:
     path.write_bytes(b"## v1.0.0 (2026-01-01)\n\xff\xfe\n### Security\n")
     text = read_notes(path)
     assert text is not None and newest_security(parse_releases(text)) == (1, 0, 0)
+
+
+HOSTILE = "## v3.19.0 (2026-11-19)\n### Changed\n\n## v99999.0.0 (2026-11-19)\n### Security\n\n" + NOTES[17:]
+
+
+def test_newest_security_ceiling_drops_what_is_above_it() -> None:
+    rs = parse_releases(HOSTILE)
+    assert newest_security(rs) == (99999, 0, 0)
+    assert newest_security(rs, ceiling=(3, 19, 0)) == (3, 18, 0)
+    assert newest_security(rs, ceiling=(3, 18, 0)) == (3, 18, 0), "the ceiling itself counts"
+    assert newest_security(rs, ceiling=(3, 17, 9)) is None
+
+
+def test_first_release_is_in_file_order() -> None:
+    assert first_release(HOSTILE) == (3, 19, 0)
+    assert first_release(NOTES) == (3, 18, 0)
+    assert first_release(FIXTURE.read_text()) == (3, 19, 0), "fenced headings are not releases"
+    assert first_release("hello") is None and first_release(None) is None

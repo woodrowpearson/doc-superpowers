@@ -105,6 +105,18 @@ class _Fence:
 def parse_releases(text: str | None) -> list[Release]:
     """Every release heading outside code fences, newest first by version (file order breaks ties); none for
     None or any other non-text value (an unreadable cache, a caller's JSON)."""
+    return sorted(_scan(text), key=lambda r: r.version, reverse=True)
+
+
+def first_release(text: str | None) -> Version | None:
+    """The version of the first release heading outside code fences, in file order: the release the notes
+    belong to (check-version's first release heading); None when there is none."""
+    releases = _scan(text)
+    return releases[0].version if releases else None
+
+
+def _scan(text: str | None) -> list[Release]:
+    """`parse_releases`, in file order."""
     if not isinstance(text, str):
         return []
     fence = _Fence()
@@ -126,11 +138,12 @@ def parse_releases(text: str | None) -> list[Release]:
             current = len(found) - 1
         elif current >= 0 and _SECURITY.fullmatch(line):
             security[current] = True
-    releases = [Release(version=v, date=d, security=s) for (v, d), s in zip(found, security, strict=True)]
-    return sorted(releases, key=lambda r: r.version, reverse=True)
+    return [Release(version=v, date=d, security=s) for (v, d), s in zip(found, security, strict=True)]
 
 
-def newest_security(releases: Sequence[Release]) -> Version | None:
-    """The highest version among the security releases; None when there is none."""
-    versions = [r.version for r in releases if r.security]
+def newest_security(releases: Sequence[Release], ceiling: Version | None = None) -> Version | None:
+    """The highest version among the security releases, none above `ceiling` when it is given (a release is
+    never newer than the notes that carry it, so a hostile `## v99999.0.0` under older notes is dropped); None
+    when there is none."""
+    versions = [r.version for r in releases if r.security and (ceiling is None or r.version <= ceiling)]
     return max(versions) if versions else None

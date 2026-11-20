@@ -6,6 +6,8 @@ that decides wins:
 1. no config: `not-in-force`;
 2. an invalid config: `not-ready` when its raw text says `"required": true`, else `not-in-force`;
 3. the plugin below `requires`: `not-ready`;
+3b. the plugin below the newest security release in the release notes on disk (`release_cache`; never
+    fetched): `not-ready` with `security_floor`, else `degraded`, remembered; the fix is the upgrade either way;
 4. the committed launcher copy absent, or below `requires`: `not-ready`; differing from the plugin's own
    but meeting the floor: `degraded`, remembered;
 5. with a transformer docs model and no transformer index: the static fallback valid is `degraded`, stale
@@ -34,9 +36,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .config import CONFIG_REL, Config, ConfigError, load_config
+from . import release_cache
+from .config import CONFIG_REL, Config, ConfigError, load_config, parse_version
 from .engines import Building, IndexPool
 from .progress import read_progress
+from .releases import newest_security, parse_releases
 from .version import launcher_stamp, plugin_root, plugin_version
 
 State = Literal["ready", "degraded", "not-ready", "not-in-force"]
@@ -52,6 +56,9 @@ LAUNCHER_REL = ".claude/doc-superpowers/search-mcp.sh"
 
 INDEX_FIX = f"sh {LAUNCHER_REL} index"
 PLUGIN_FIX = "claude plugin update doc-superpowers"
+UPGRADE_FIX = "bash {install_sh} upgrade"
+"""The fix for any install that is not a Claude Code plugin (a checkout, the Codex root): the plugin's own
+`install.sh upgrade`, by its path (`_plugin_fix` renders it, quoted when the path needs it)."""
 CONFIG_FIX = f"edit {CONFIG_REL}, then run sh {LAUNCHER_REL} check"
 TRANSFORMER_NOT_BUILT = "transformer index not built"
 """Row 5's reason when nothing serves the docs: its fix, INDEX_FIX, is a first transformer build that takes hours,
@@ -177,7 +184,8 @@ def _would_be(
     env: Mapping[str, str],
 ) -> Verdict:
     """Rows 3 to 7: the verdict as if the repository required doc-search. Row 7 refreshes only when it does:
-    a stale index of a repository that does not require doc-search is reported, not refreshed."""
+    a stale index of a repository that does not require doc-search is reported, not refreshed. Row 3b's
+    `security_floor` halt therefore holds only where `required` is true (assess turns the rest not-in-force)."""
 
     def verdict(
         state: State,
@@ -193,10 +201,16 @@ def _would_be(
         shown = _dotted(version) if version is not None else "(version unknown)"
         reason = f"doc-superpowers {shown} is below requires >={_dotted(cfg.requires)}"
         return verdict("not-ready", reason, _plugin_fix(env))
+    security = _security(version, env)
+    if security is not None and cfg.security_floor:
+        return verdict("not-ready", security, _plugin_fix(env))
     if launcher in ("absent", "below-floor"):
         return verdict("not-ready", launcher_reason, _install_fix())
     degraded = [launcher_reason] if launcher == "differs" and launcher_reason else []
     fix = _install_fix() if degraded else None
+    if security is not None:
+        degraded.insert(0, security)
+        fix = _plugin_fix(env)
 
     pool = IndexPool(cfg, fallback=False)
     cache = _cache(pool, top, cfg)
@@ -292,15 +306,53 @@ def _launcher(top: Path, floor: tuple[int, int, int] | None) -> tuple[LauncherSt
     return ("current", None) if current else ("differs", "launcher copy differs from the plugin's")
 
 
+def _security(version: tuple[int, int, int] | None, env: Mapping[str, str]) -> str | None:
+    """Row 3b: why the plugin is below the newest security release in the release notes on disk, naming where
+    the notes came from; None when it is not (or its version is unknown, or no notes are found). Never fetches."""
+    if version is None:
+        return None
+    found = release_cache.load(env, plugin_root())
+    if found is None:
+        return None
+    text, meta = found
+    tag = meta["tag"]
+    newest = newest_security(parse_releases(text), ceiling=_tag_version(tag))
+    if newest is None or version >= newest:
+        return None
+    shown = release_cache.safe
+    return (
+        f"doc-superpowers {_dotted(version)} is below security release {_dotted(newest)}"
+        f" (release notes {shown(tag)} from {shown(meta['source'])}, fetched {shown(meta['fetched'])})"
+    )
+
+
+def _tag_version(tag: str) -> tuple[int, int, int] | None:
+    """`vX.Y.Z` as a tuple (the source's ceiling, as `release_cache.load` names it)."""
+    return parse_version(tag[1:]) if tag.startswith("v") else None
+
+
 def _plugin_fix(env: Mapping[str, str]) -> str:
-    """How this install is updated: the Codex root (`${CODEX_HOME:-~/.codex}/doc-superpowers`) is a git checkout
-    and is pulled; anything else is taken to be the Claude Code plugin."""
-    home = Path(env.get("HOME") or Path.home()).resolve()
+    """How this install is updated: a Claude Code plugin install (a root under `~/.claude/plugins/`, or under
+    `${CLAUDE_PLUGIN_CACHE:-~/.claude/plugins/cache}`) by Claude Code; any other root, a checkout or the Codex
+    root, by its own `install.sh upgrade` (UPGRADE_FIX), which moves it to the newest release tag. launch.sh's
+    `plugin_fix` is the shell twin."""
+    home = Path(env.get("HOME") or Path.home())
     root = plugin_root()
-    if root != (Path(env.get("CODEX_HOME") or home / ".codex") / "doc-superpowers").resolve():
+    plugin_dirs = (
+        home / ".claude" / "plugins",
+        Path(env.get("CLAUDE_PLUGIN_CACHE") or home / ".claude" / "plugins" / "cache"),
+    )
+    if any(root.is_relative_to(where.resolve()) for where in plugin_dirs):
         return PLUGIN_FIX
-    shown = f"~/{root.relative_to(home)}" if root.is_relative_to(home) else str(root)
-    return f"git -C {shown} pull"
+    return UPGRADE_FIX.format(install_sh=_sh_quote(str(root / "scripts" / "hooks" / "install.sh")))
+
+
+def _sh_quote(text: str) -> str:
+    """`text` as one shell word: as it is when it needs no quoting, else in single quotes (install.sh's
+    `sh_squote`, so the two print the same command)."""
+    if re.fullmatch(r"[A-Za-z0-9_@%+=:,./-]+", text):
+        return text
+    return "'" + text.replace("'", "'\\''") + "'"
 
 
 def _install_fix() -> str:

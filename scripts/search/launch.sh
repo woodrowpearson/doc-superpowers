@@ -79,8 +79,7 @@
 #   - a root that predates the readiness gate (no search/src/doc_search/gate.py,
 #     so its doc-search has neither check nor gate): answered as with no uv,
 #     the reason "doc-superpowers <its package.json version> predates the
-#     readiness gate" and the fix the plugin update doc-search check names
-#     (git -C <the Codex root> pull for the Codex install);
+#     readiness gate" and the fix plugin_fix names (below);
 #   - no uv, where the raw text of docs/search/config.json (at the repository
 #     top) matches "required"\s*:\s*true, across lines, as doc-search's own
 #     test does: check prints "not ready: uv not found" and exits 1; gate
@@ -231,17 +230,36 @@ root_version() {
   printf '%s' "${RV:-(version unknown)}"
 }
 
-# plugin_fix: how the root is updated, as doc-search check says it: the Codex
-# install (${CODEX_HOME:-$HOME/.codex}/doc-superpowers, a git checkout) is
-# pulled; anything else is taken to be the Claude Code plugin.
+# plugin_fix: how the root is updated, as doc-search check's _plugin_fix says
+# it: a Claude Code plugin install (a root under $HOME/.claude/plugins/ or
+# ${CLAUDE_PLUGIN_CACHE:-$HOME/.claude/plugins/cache}) by Claude Code; any
+# other root, a checkout or the Codex install, by its own install.sh upgrade
+# (by its physical path, single-quoted when it needs quoting, as install.sh's
+# sh_squote does). Only a root that predates the readiness gate gets here, and
+# such a root predates upgrade (3.19.0) too: one whose install.sh has no
+# upgrade verb is pulled instead, the one update its own tools carry.
 plugin_fix() {
-  if [ "$ROOT" != "${CODEX_HOME:-$HOME/.codex}/doc-superpowers" ]; then
-    printf 'claude plugin update doc-superpowers'
+  PF_ROOT=$(cd "$ROOT" 2>/dev/null && pwd -P) || PF_ROOT=$ROOT
+  for PF_DIR in "${HOME:-/nonexistent}/.claude/plugins" "${CLAUDE_PLUGIN_CACHE:-${HOME:-/nonexistent}/.claude/plugins/cache}"; do
+    PF_DIR=$(cd "$PF_DIR" 2>/dev/null && pwd -P) || continue
+    case $PF_ROOT/ in
+      "$PF_DIR"/*)
+        printf 'claude plugin update doc-superpowers'
+        return 0
+        ;;
+    esac
+  done
+  if grep '^cmd_upgrade()' "$ROOT/scripts/hooks/install.sh" >/dev/null 2>&1; then
+    PF_SH=$PF_ROOT/scripts/hooks/install.sh
+    case $PF_SH in
+      *[!A-Za-z0-9_@%+=:,./-]*) PF_SH="'$(printf '%s' "$PF_SH" | sed "s/'/'\\\\''/g")'" ;;
+    esac
+    printf 'bash %s upgrade' "$PF_SH"
     return 0
   fi
   # The tilde is in the format string: it is the text shown, not expanded.
   case $ROOT in
-    "$HOME"/*) printf 'git -C ~/%s pull' "${ROOT#"$HOME"/}" ;;
+    "${HOME:-/nonexistent}"/*) printf 'git -C ~/%s pull' "${ROOT#"$HOME"/}" ;;
     *) printf 'git -C %s pull' "$ROOT" ;;
   esac
 }

@@ -8057,14 +8057,15 @@ test_launcher_check_keeps_the_verdict_file() {
 }
 
 test_launcher_pre_gate_root() {
-  echo "test: launcher: a root that predates the readiness gate (no search/src/doc_search/gate.py) — required: check says not ready, '<X> predates the readiness gate', the plugin update as the fix, exit 1, and gate session-start|prompt answer as with no uv; not required: check exit 4, gate silent; uv is never run"
+  echo "test: launcher: a root that predates the readiness gate (no search/src/doc_search/gate.py) — required: check says not ready, '<X> predates the readiness gate', the root's update as the fix (a plugin install: claude plugin update; an install.sh with upgrade: that; else git pull), exit 1, and gate session-start|prompt answer as with no uv; not required: check exit 4, gate silent; uv is never run"
   srh_fixture '{"required": true}'
-  local envroot vf want reason fix codex
+  local envroot vf want reason fix codex cached upg
   envroot=$(harness_mktemp_d pregate)
   srl_pregate_root "$envroot" 3.10.0
   vf=$(git rev-parse --git-path doc-search-gate)
   reason="doc-superpowers 3.10.0 predates the readiness gate"
-  fix="claude plugin update doc-superpowers"
+  # Not a plugin install, and its install.sh has no upgrade verb: pulled.
+  fix="git -C $envroot pull"
   rm -f "$SRL_BIN/argc"
   srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check
   assert_eq "1:doc-search: not ready: $reason:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: not ready, exit 1"
@@ -8094,6 +8095,27 @@ test_launcher_pre_gate_root() {
   srl_pregate_root "$codex" 3.9.0
   srg_run /dev/null -- check --format json
   assert_eq "$(srg_check_json not-ready 1 "doc-superpowers 3.9.0 predates the readiness gate" "git -C ~/.codex/doc-superpowers pull")" "$(srg_compact)" "the Codex root: its version, git pull as the fix"
+  # A plugin install (a root under CLAUDE_PLUGIN_CACHE): the plugin update, as check.py's _plugin_fix says.
+  cached=$(harness_mktemp_d pregate-cache)
+  srl_pregate_root "$cached/doc-superpowers/doc-superpowers/3.10.0" 3.10.0
+  srg_run /dev/null CLAUDE_PLUGIN_CACHE="$cached" DOC_SUPERPOWERS_ROOT="$cached/doc-superpowers/doc-superpowers/3.10.0" -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "$reason" "claude plugin update doc-superpowers")" "$(srg_compact)" "a plugin install under CLAUDE_PLUGIN_CACHE: claude plugin update as the fix"
+  srl_pregate_root "$HOME/.claude/plugins/marketplaces/doc-superpowers" 3.10.0
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$HOME/.claude/plugins/marketplaces/doc-superpowers" -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "$reason" "claude plugin update doc-superpowers")" "$(srg_compact)" "a root under ~/.claude/plugins/: claude plugin update as the fix"
+  rm -rf "$HOME/.claude/plugins/marketplaces/doc-superpowers"
+  # A root whose install.sh has the upgrade verb: that verb, by the physical path, as check.py's UPGRADE_FIX,
+  # single-quoted when the path needs it (the harness's scratch root holds a space, so it does here).
+  mkdir -p "$envroot/scripts/hooks"
+  printf 'cmd_upgrade() {\n  :\n}\n' > "$envroot/scripts/hooks/install.sh"
+  upg="$(cd "$envroot" && pwd -P)/scripts/hooks/install.sh"
+  case $upg in
+    *[!A-Za-z0-9_@%+=:,./-]*) upg="'$upg'" ;;
+  esac
+  upg="bash $upg upgrade"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "$reason" "$upg")" "$(srg_compact)" "a checkout whose install.sh has upgrade: install.sh upgrade as the fix"
+  rm -rf "$envroot/scripts"
   # No package.json: the version is unknown.
   srl_pregate_root "$envroot/../pregate-nopkg" none
   srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot/../pregate-nopkg" -- check
