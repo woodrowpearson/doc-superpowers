@@ -367,7 +367,8 @@ Machine-readable:
   status --check      the drift check: each committed copy (the installed
                       workflows, the vendored doc-tools.sh and helpers, the
                       --search launcher) against what install writes now;
-                      the CI tier and --search, or those named. Exit 1 when
+                      the CI tier and --search, or those named (naming
+                      neither, only other tiers: exit 2). Exit 1 when
                       a copy drifted, a workflow is recorded-missing, or
                       installed.json cannot be read; with no installed.json
                       the CI copies are untracked (exit 0). With --json, the
@@ -4156,9 +4157,14 @@ case "$COMMAND" in
     # --check: the drift check of the committed copies (the CI tier and the
     # --search set, or those of them named); exit 1 on a drift, a workflow
     # recorded installed but missing, or an install record that cannot be
-    # read, else 0. With no tier named it checks both.
+    # read, else 0. With no tier named it checks both; naming only tiers it
+    # does not check is a usage error (as --merge-driver-only without --git
+    # is), never a "no copy drifted" over nothing.
     if $CHECK && ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE && ! $DO_SEARCH && ! $DO_SEARCH_GATE; then
       DO_CI=true DO_SEARCH=true
+    fi
+    if $CHECK && ! $DO_CI && ! $DO_SEARCH; then
+      usage_error "status --check: nothing checked (the drift check covers --ci and --search): add --ci or --search, or name no tier"
     fi
     if $JSON; then
       # The three tiers (all of them, or those named), one JSON object on

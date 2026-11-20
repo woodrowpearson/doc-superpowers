@@ -13314,6 +13314,25 @@ test_status_check_untracked_and_missing() {
   teardown
 }
 
+test_status_check_names_no_checked_tier() {
+  echo "test: status --check naming only tiers it does not check (--git, --claude, --ledger, --ledger-claude, --search-gate): a usage error, exit 2, saying nothing was checked and what --check covers; with --ci or --search beside them it runs"
+  srh_fixture
+  local t
+  for t in --git --claude --ledger --ledger-claude --search-gate "--git --claude"; do
+    # shellcheck disable=SC2086  # one or two flags
+    inst status --check $t
+    assert_eq "2" "$IRC" "status --check $t: exit 2"
+    assert_contains "$IOUT" "nothing checked (the drift check covers --ci and --search)" "…saying nothing was checked"
+    assert_not_contains "$IOUT" "no copy drifted" "…never that no copy drifted"
+  done
+  inst status --check --git --json
+  assert_eq "2" "$IRC" "status --check --git --json: exit 2 too"
+  inst status --check --git --ci
+  assert_eq "0" "$IRC" "status --check --git --ci: runs, exit 0 ($IOUT)"
+  assert_contains "$IOUT" "Drift check:" "…with a drift-check line"
+  teardown
+}
+
 test_status_check_reads_the_pin_offline() {
   echo "test: status --check renders an AI workflow with the DOC_SUPERPOWERS_COMMIT its committed file holds, and never reads the marketplace (no git ls-remote)"
   srh_fixture
@@ -13385,6 +13404,7 @@ echo ""
 echo "=== install.sh status --check ==="
 test_status_check_reports_drift
 test_status_check_untracked_and_missing
+test_status_check_names_no_checked_tier
 test_status_check_reads_the_pin_offline
 test_status_check_agrees_with_check_self_install
 
