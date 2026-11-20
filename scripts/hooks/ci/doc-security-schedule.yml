@@ -1,0 +1,81 @@
+# doc-superpowers workflow v1
+# Weekly security-floor check (opt-in: install --ci --workflows=doc-security-schedule)
+# Installed by doc-superpowers hooks installer
+#
+# Reads the newest doc-superpowers release's RELEASE-NOTES.md and fails when
+# the "requires" floor of docs/search/config.json is below the newest
+# security release (a release whose notes section holds "### Security"), so
+# a project learns of a security release without anyone noticing it by hand.
+# Without the config, or with no requires, it passes with a warning.
+#
+# The notes come from the repository the installer records (--marketplace-url,
+# else the plugin's own): the newest vX.Y.Z tag (git ls-remote), one shallow
+# fetch of that tag (--depth 1), and `git show` of RELEASE-NOTES.md alone.
+# Nothing it fetches runs: the vendored doc-tools.sh reads the notes' headings
+# as data. No secret, read-only token, no write anywhere.
+
+name: Doc Security Floor (Scheduled)
+
+on:
+  schedule:
+    - cron: '__CRON_SCHEDULE__'
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: read
+
+jobs:
+  security-floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Pin jq (checksum-verified)
+        run: .github/scripts/doc-superpowers-steps/install-jq.sh
+
+      # Data only: the newest release tag's RELEASE-NOTES.md, at most
+      # 2,000,000 bytes, into $RUNNER_TEMP. Tag names are read as vX.Y.Z only.
+      - name: Fetch the newest release's notes
+        env:
+          RELEASES_URL: "__MARKETPLACE_URL__"
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASES_URL" ]; then
+            echo "::error::doc-superpowers: no repository to read the release notes from: re-run install --ci with --marketplace-url <git URL>"
+            exit 1
+          fi
+          tags=$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags --refs -- "$RELEASES_URL" 'refs/tags/v*' </dev/null) || {
+            echo "::error::doc-superpowers: cannot list the release tags at $RELEASES_URL"
+            exit 1
+          }
+          tag=$(printf '%s\n' "$tags" | awk '{ sub(/^refs\/tags\//, "", $2); print $2 }' \
+            | { grep -xE 'v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}' || true; } \
+            | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)
+          if [ -z "$tag" ]; then
+            echo "::error::doc-superpowers: $RELEASES_URL has no release tag (vX.Y.Z)"
+            exit 1
+          fi
+          repo="$RUNNER_TEMP/doc-superpowers-releases.git"
+          git init -q --bare --template= "$repo"
+          GIT_TERMINAL_PROMPT=0 git -C "$repo" -c core.hooksPath=/dev/null fetch --quiet --no-tags --depth 1 -- \
+            "$RELEASES_URL" "refs/tags/v$tag:refs/tags/v$tag" </dev/null || {
+            echo "::error::doc-superpowers: cannot fetch tag v$tag from $RELEASES_URL"
+            exit 1
+          }
+          git -C "$repo" cat-file -e "refs/tags/v$tag:RELEASE-NOTES.md" 2>/dev/null || {
+            echo "::error::doc-superpowers: tag v$tag at $RELEASES_URL has no RELEASE-NOTES.md"
+            exit 1
+          }
+          # git stops on the closed pipe once head has its bytes.
+          { git -C "$repo" show "refs/tags/v$tag:RELEASE-NOTES.md" 2>/dev/null || true; } \
+            | head -c 2000000 > "$RUNNER_TEMP/doc-superpowers-release-notes.md"
+          echo "doc-superpowers: release notes of v$tag from $RELEASES_URL"
+
+      - name: Check requires against the newest security release
+        run: .github/scripts/doc-superpowers-steps/security-floor.sh "$RUNNER_TEMP/doc-superpowers-release-notes.md" docs/search/config.json

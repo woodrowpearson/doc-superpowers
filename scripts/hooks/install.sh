@@ -69,7 +69,7 @@ SHELL_WORKFLOWS="doc-freshness-pr doc-freshness-schedule"
 CI_DEFAULT_WORKFLOWS="$SHELL_WORKFLOWS"
 # Shell workflows outside the default set, installed by name (or by
 # --workflows=all): no AI, no secret (final review OPS-I4).
-SHELL_OPTIN_WORKFLOWS="doc-index-resolve doc-ledger-publish"
+SHELL_OPTIN_WORKFLOWS="doc-index-resolve doc-ledger-publish doc-security-schedule"
 # Installed by name only, never by --workflows=all: doc-index-resolve pushes to
 # other people's pull request branches.
 BY_NAME_ONLY_WORKFLOWS="doc-index-resolve"
@@ -237,6 +237,7 @@ workflow_desc() {
     doc-pr-release) echo "PR pushes: AI release-notes fragment, a checked step commits it to the PR branch; PR body edited (contents + pull-requests: write)" ;;
     doc-index-resolve) echo "push to the base, and by hand: merges the base into each open same-repository PR whose only conflict is docs/.doc-index.json, with the vendored index merge driver; pushes with a lease, dispatches --resolve-test-workflow, one PR comment (contents + pull-requests + actions: write; by name only)" ;;
     doc-ledger-publish) echo "every 30 minutes and by hand: with docs/ledger/config.json, doc-tools.sh ledger publish renders the work-ledger views from the base and pushes them to views.branch; with the config, ships the ledger helper set (contents: write; pull-requests + issues: read, for the adapters)" ;;
+    doc-security-schedule) echo "weekly cron, and by hand: reads the newest release's RELEASE-NOTES.md (one shallow tag fetch from the marketplace URL; nothing fetched runs) and fails when the requires of docs/search/config.json is below the newest security release; no config or no requires: a warning (contents: read)" ;;
     *) echo "(no description)" ;;
   esac
 }
@@ -3403,8 +3404,8 @@ status_json() {
 # Tags are read by name only: vMAJOR.MINOR.PATCH, at most 9 digits a field,
 # sorted per numeric field (launch.sh's order). A tag is a release only when
 # its own RELEASE-NOTES.md opens with its version (check-version's tag rule).
-# Fetched notes are data: an awk program reads their headings; nothing in
-# them runs. Each run caches the newest tag's notes and a sidecar (tag,
+# Fetched notes are data: doc-tools.sh tools security-floor (an awk program)
+# reads their headings; nothing in them runs. Each run caches the newest tag's notes and a sidecar (tag,
 # fetched, source) for doc-search check, which never fetches.
 #
 # Every refusal that needs no fetch comes first, so a refused run changes
@@ -3419,62 +3420,6 @@ UPG_RELEASE_URL="https://github.com/woodrowpearson/doc-superpowers.git"
 # An env hook line that assigns DOC_SUPERPOWERS_ROOT (the awk in upg_env_write
 # spells the same regex).
 UPG_ENV_RE='^[[:space:]]*(export[[:space:]]+)?DOC_SUPERPOWERS_ROOT='
-
-# The security-release marker, as doc_search.releases applies it: a
-# "## vX.Y.Z (YYYY-MM-DD)" section holding a "### Security" heading before the
-# next "## " heading; nothing inside a code fence counts (the fence rule is
-# doc-tools.sh's _AWK_FENCE, copied: this installer cannot source doc-tools.sh).
-# Prints "first <token>" for the first "## v<digit>" line (check-version's first
-# release heading), then "release <X.Y.Z> <0|1>" per release section, 1 when it
-# holds a security heading, in file order.
-# shellcheck disable=SC2016  # awk program, not shell expansion
-_UPG_NOTES_AWK='
-function dedent3(s,    k) {
-  for (k = 0; k < 3 && substr(s, 1, 1) == " "; k++) s = substr(s, 2)
-  return s
-}
-function fence(s,    t, c, n) {
-  t = dedent3(s)
-  c = substr(t, 1, 1)
-  if (c != "`" && c != "~") return 0
-  n = 0
-  while (substr(t, n + 1, 1) == c) n++
-  if (n < 3) return 0
-  if (fence_c == "") {
-    if (c == "`" && index(substr(t, n + 1), "`")) return 0
-    fence_c = c; fence_n = n
-    return 1
-  }
-  if (c == fence_c && n >= fence_n && substr(t, n + 1) ~ /^[[:space:]]*$/) {
-    fence_c = ""; fence_n = 0
-    return 1
-  }
-  return 0
-}
-function short_fields(v,    p, k, i) {
-  k = split(v, p, ".")
-  for (i = 1; i <= k; i++) if (length(p[i]) > 9) return 0
-  return 1
-}
-{ sub(/\r$/, "") }
-fence($0) || fence_c != "" { next }
-first == "" && /^## v[0-9]/ {
-  first = substr($0, 5)
-  sub(/[[:space:]].*$/, "", first)
-  print "first " first
-}
-$0 == "##" || /^## / {
-  cur = 0
-  if ($0 ~ /^## v[0-9]+\.[0-9]+\.[0-9]+ \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)$/) {
-    v = substr($0, 5)
-    sub(/ .*$/, "", v)
-    if (short_fields(v)) { n++; ver[n] = v; sec[n] = 0; cur = n }
-  }
-  next
-}
-cur && /^### Security[ \t]*$/ { sec[cur] = 1 }
-END { for (i = 1; i <= n; i++) print "release " ver[i] " " sec[i] }
-'
 
 upg_refuse() {
   echo "ERROR: $*" >&2
@@ -3689,7 +3634,10 @@ upg_notes() {
 # is dropped: a release is never newer than the tag whose notes carry it.
 upg_scan() {
   local out first v
-  out=$(LC_ALL=C awk "$_UPG_NOTES_AWK" <"$1") || upg_die "cannot read $1"
+  # The security-release marker is doc-tools.sh's (tools security-floor, the
+  # rule doc_search.releases applies): "first <token>" for the first release
+  # heading, then "release <X.Y.Z> <0|1>" per release section.
+  out=$("$BASH" "$DOC_TOOLS" tools security-floor "$1" 2>/dev/null) || upg_die "cannot read $1 (doc-tools.sh tools security-floor)"
   first=$(printf '%s\n' "$out" | sed -n 's/^first //p')
   first=${first%%$'\n'*}
   [ "$first" = "$2" ] || upg_refuse "tag v$2 is not a release commit: its RELEASE-NOTES.md first release heading is $([ -n "$first" ] && printf 'v%s' "$(upg_safe "$first")" || printf 'missing')"

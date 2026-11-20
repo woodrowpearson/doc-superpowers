@@ -9295,7 +9295,7 @@ setup_lib() {
 }
 
 test_setup_catalog() {
-  echo "test: #51 setup's catalog: the 15 items of the shared table, in order, with their groups, kinds, options, defaults, scopes and per-user flags; ci.workflows is install.sh's 10 workflows in its order; every item says its scope, whether it blocks a commit and whether it reaches the network, and how to undo it"
+  echo "test: #51 setup's catalog: the 15 items of the shared table, in order, with their groups, kinds, options, defaults, scopes and per-user flags; ci.workflows is install.sh's 11 workflows in its order; every item says its scope, whether it blocks a commit and whether it reaches the network, and how to undo it"
   local cat="$SETUP_ROOT/scripts/setup/catalog.json" got want wf_help id
   assert_true "catalog.json is one JSON object" jq -e 'type == "object"' "$cat"
   got=$(jq -r '[.items[].id] | join(" ")' "$cat" 2>/dev/null || true)
@@ -9336,7 +9336,7 @@ ledger.claude: on,off
 claims: on,off
 bin: on,off"
   assert_eq "$want" "$got" "the options of every toggle, choice and multi (ci.workflows: install.sh help's list)"
-  assert_eq "10" "$(tr ',' '\n' <<<"$wf_help" | grep -c .)" "install.sh lists 10 workflows"
+  assert_eq "11" "$(tr ',' '\n' <<<"$wf_help" | grep -c .)" "install.sh lists 11 workflows"
   for id in $(jq -r '.items[].id' "$cat" 2>/dev/null); do
     got=$(jq -r --arg id "$id" '.items[] | select(.id == $id) | .details' "$cat")
     case "$(jq -r --arg id "$id" '.items[] | select(.id == $id) | .scope' "$cat")" in
@@ -13387,6 +13387,93 @@ test_status_check_reports_drift
 test_status_check_untracked_and_missing
 test_status_check_reads_the_pin_offline
 test_status_check_agrees_with_check_self_install
+
+# --- doc-security-schedule: the weekly security-floor check -------------------------
+
+# sf_step <config JSON or "-" for no config> <notes file>: run the step script
+# on <notes file> and docs/search/config.json. Sets RUN_RC and RUN_OUT (both
+# streams: a GitHub annotation is a stdout line).
+sf_step() {
+  rm -f docs/search/config.json
+  if [ "$1" != - ]; then
+    mkdir -p docs/search
+    printf '%s\n' "$1" > docs/search/config.json
+  fi
+  RUN_RC=0
+  RUN_OUT=$(env DOC_TOOLS="$DOC_TOOLS" PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/ci/doc-superpowers-steps/security-floor.sh" "$2" docs/search/config.json 2>&1) || RUN_RC=$?
+}
+
+test_security_floor_step() {
+  echo "test: security-floor.sh — requires below the newest security release: exit 1 naming both versions; meeting it: exit 0; a fenced ### Security does not count; no requires (or no config): exit 0 with a warning"
+  setup
+  local fixture="$SCRIPT_DIR/../search/tests/fixtures/release-notes-security.md"
+  sf_step '{"requires": ">=3.18.0"}' "$fixture"
+  assert_eq "1" "$RUN_RC" "requires >=3.18.0, newest security release 3.19.0: exit 1 ($RUN_OUT)"
+  assert_contains "$RUN_OUT" "::error::" "…an error annotation"
+  assert_contains "$RUN_OUT" "3.18.0" "…naming the floor"
+  assert_contains "$RUN_OUT" "3.19.0" "…and the security release"
+  sf_step '{"requires": ">=3.19.0"}' "$fixture"
+  assert_eq "0" "$RUN_RC" "requires >=3.19.0: exit 0 ($RUN_OUT)"
+  assert_not_contains "$RUN_OUT" "::error::" "…no error"
+  printf '# Release Notes\n\n## v3.20.0 (2026-11-20)\n\n```\n### Security\n```\n\n## v3.19.0 (2026-11-19)\n\n### Changed\n- x\n' > fenced.md
+  sf_step '{"requires": ">=3.18.0"}' fenced.md
+  assert_eq "0" "$RUN_RC" "a ### Security inside a code fence is no security release: exit 0 ($RUN_OUT)"
+  sf_step '{"required": true}' "$fixture"
+  assert_eq "0" "$RUN_RC" "no requires: exit 0"
+  assert_contains "$RUN_OUT" "::warning::" "…with a warning"
+  assert_contains "$RUN_OUT" "requires" "…that names requires"
+  sf_step '{"requires": null}' "$fixture"
+  assert_eq "0" "$RUN_RC" "requires null: exit 0"
+  assert_contains "$RUN_OUT" "::warning::" "…with a warning"
+  sf_step - "$fixture"
+  assert_eq "0" "$RUN_RC" "no docs/search/config.json: exit 0"
+  assert_contains "$RUN_OUT" "::warning::" "…with a warning"
+  sf_step '{"requires": "3.18"}' "$fixture"
+  assert_eq "1" "$RUN_RC" "a requires that is not >=X.Y.Z: exit 1"
+  sf_step '{"requires": ">=3.18.0"}' "$TEST_DIR/no such notes.md"
+  assert_eq "1" "$RUN_RC" "notes that cannot be read: exit 1"
+  teardown
+}
+
+test_security_schedule_is_opt_in() {
+  echo "test: doc-security-schedule — not in the default set; installed by name (and by --workflows=all), with its step script and install-jq.sh vendored; read-only, no secret, pinned actions; it fetches only RELEASE-NOTES.md and runs nothing it fetched"
+  local tpl="$HOOKS_DIR/ci/doc-security-schedule.yml" body
+  assert_file_exists "$tpl" "the template exists"
+  assert_eq "# doc-superpowers workflow v1" "$(head -n 1 "$tpl" 2>/dev/null || true)" "it carries the workflow marker"
+  body=$(cat "$tpl")
+  assert_contains "$body" "workflow_dispatch" "…runs by hand"
+  assert_contains "$body" "- cron: '__CRON_SCHEDULE__'" "…and on the recorded cron"
+  assert_not_contains "$body" 'secrets.' "…uses no secret"
+  assert_eq "" "$(grep -E ':[[:space:]]*write' "$tpl" || true)" "…grants no write permission"
+  assert_contains "$body" "contents: read" "…contents: read"
+  assert_eq "" "$(grep -E '^[[:space:]]*-?[[:space:]]*uses:' "$tpl" | grep -vE '@[0-9a-f]{40}( |$)' || true)" "…every action pinned by commit"
+  assert_contains "$body" "--depth 1" "…a shallow fetch"
+  assert_contains "$body" "RELEASE-NOTES.md" "…of the release notes"
+  setup
+  inst install --ci
+  assert_eq "0" "$IRC" "install --ci: exit 0"
+  assert_file_not_exists ".github/workflows/doc-security-schedule.yml" "the default set does not install it"
+  inst install --ci --workflows=doc-security-schedule
+  assert_eq "0" "$IRC" "install --ci --workflows=doc-security-schedule: exit 0 ($IOUT)"
+  assert_file_exists ".github/workflows/doc-security-schedule.yml" "the named workflow is installed"
+  assert_true "its step script is vendored executable" test -x .github/scripts/doc-superpowers-steps/security-floor.sh
+  assert_true "…and install-jq.sh" test -x .github/scripts/doc-superpowers-steps/install-jq.sh
+  assert_contains "$(cat .github/workflows/doc-security-schedule.yml)" '"https://github.com/woodrowpearson/doc-superpowers.git"' "the release notes' repository: the marketplace URL, plugin.json's by default"
+  _assert_installed_workflows_wired "install --ci --workflows=doc-security-schedule"
+  inst status --check --ci
+  assert_eq "0" "$IRC" "status --check --ci: exit 0 ($IOUT)"
+  teardown
+  setup
+  inst install --ci --workflows=all
+  assert_eq "0" "$IRC" "install --ci --workflows=all: exit 0"
+  assert_file_exists ".github/workflows/doc-security-schedule.yml" "--workflows=all installs it"
+  teardown
+}
+
+echo ""
+echo "=== doc-security-schedule ==="
+test_security_floor_step
+test_security_schedule_is_opt_in
 
 # --- install.sh upgrade ---------------------------------------------------------
 #

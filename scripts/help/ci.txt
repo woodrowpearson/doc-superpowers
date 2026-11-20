@@ -10,9 +10,11 @@ Terminal:   doc-superpowers hooks install --ci [--workflows=<csv|all|none>]
               [--resolve-test-workflow=<file>] [--resolve-test-pr-input=<name>]
             doc-superpowers setup --set ci.workflows=doc-freshness-pr
 Skill:      /doc-superpowers hooks install --ci
-Workflows:  10 templates.
+Workflows:  11 templates.
   shell, no secret:  doc-freshness-pr  doc-freshness-schedule (the default 2)
                      doc-ledger-publish (opt-in; for a ledger host)
+                     doc-security-schedule (opt-in: weekly, fails when the
+                     doc-search requires is below the newest security release)
                      doc-index-resolve (opt-in by name, never by all: merges
                      the base into PRs that conflict only in the doc index
                      and the cite line numbers of indexed docs)

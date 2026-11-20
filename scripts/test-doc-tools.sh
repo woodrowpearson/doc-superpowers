@@ -7565,6 +7565,55 @@ test_i10_tools_from_the_vendored_copy() {
   teardown
 }
 
+test_tools_security_floor_reads_the_marker() {
+  echo "test: tools security-floor — the shared fixture search/tests/fixtures/release-notes-security.md reads as doc_search.releases reads it (first 3.19.0, newest security 3.19.0, fenced and non-release sections not counted); --floor exits 1 below it, 0 at it; a security section above the first heading is dropped; a vendored copy runs it too"
+  setup
+  local fixture out rc vendored
+  fixture="$SCRIPT_DIR/../search/tests/fixtures/release-notes-security.md"
+  rc=0
+  out=$("$DOC_TOOLS" tools security-floor "$fixture" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "the fixture: exit 0"
+  assert_eq "first 3.19.0
+release 3.19.0 1
+release 3.18.0 1
+release 3.17.1 0
+release 3.17.0 0
+newest-security 3.19.0" "$out" "…the first heading, each release with its marker, the newest security release"
+  rc=0
+  out=$("$DOC_TOOLS" tools security-floor --floor 3.18.0 "$fixture" 2>&1) || rc=$?
+  assert_eq "1" "$rc" "--floor 3.18.0: below security release 3.19.0, exit 1"
+  assert_contains "$out" "below 3.19.0" "…and says so"
+  rc=0
+  out=$("$DOC_TOOLS" tools security-floor --floor 3.19.0 "$fixture" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "--floor 3.19.0: meets it, exit 0"
+  rc=0
+  out=$("$DOC_TOOLS" tools security-floor --floor 10.0.0 "$fixture" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "--floor 10.0.0: per numeric field, above 3.19.0, exit 0"
+  printf '# Release Notes\n\n## v3.20.0 (2026-11-20)\n\nThe release.\n\n## v99999.0.0 (2026-01-01)\n\n### Security\n- Hostile.\n\n## v3.19.0 (2026-11-19)\n\n### Security\n- Real.\n' > hostile.md
+  rc=0
+  out=$("$DOC_TOOLS" tools security-floor hostile.md 2>&1) || rc=$?
+  assert_contains "$out" "newest-security 3.19.0" "a security section above the first release heading (v99999.0.0) is dropped"
+  printf '# Release Notes\n\n## v3.20.0 (2026-11-20)\n\n### Changed\n- x\n\n```\n### Security\n```\n' > none.md
+  rc=0
+  out=$("$DOC_TOOLS" tools security-floor --floor 3.0.0 none.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "no security release: exit 0 whatever the floor"
+  assert_not_contains "$out" "newest-security" "…and no newest-security line"
+  rc=0
+  "$DOC_TOOLS" tools security-floor --floor 3.0 none.md >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "a malformed --floor: usage error, exit 2"
+  rc=0
+  "$DOC_TOOLS" tools security-floor "no such file.md" >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "a file that cannot be read: exit 2"
+  mkdir -p vendor
+  cp "$SCRIPT_DIR/doc-tools.sh" vendor/doc-tools.sh
+  vendored="$TEST_DIR/vendor/doc-tools.sh"
+  rc=0
+  out=$("$BASH_BIN" "$vendored" tools security-floor "$fixture" 2>&1) || rc=$?
+  assert_eq "0" "$rc" "the vendored copy: exit 0"
+  assert_contains "$out" "newest-security 3.19.0" "…the same reading"
+  teardown
+}
+
 test_i10_no_hidden_sed_or_ripgrep_dependency() {
   echo "test: no shipped script needs GNU sed or ripgrep; CI installs no GNU sed"
   local repo_root f hits=""
@@ -10086,6 +10135,7 @@ run_tests() {
   test_i10_tools_reinstall_restores_the_exec_bit
   test_i10_tools_status_counts_user_added_helpers_apart
   test_i10_tools_from_the_vendored_copy
+  test_tools_security_floor_reads_the_marker
   test_i10_no_hidden_sed_or_ripgrep_dependency
 
   # --- Work ledger: the vendored helper set (3.3.0 Task 17) ---
