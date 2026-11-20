@@ -51,6 +51,13 @@ def read_notes(path: Path) -> str | None:
             data = handle.read(MAX_NOTES_BYTES + 1)
     except OSError:
         return None
+    return notes_text(data)
+
+
+def notes_text(data: bytes) -> str:
+    """Notes bytes as `read_notes` returns them: past `MAX_NOTES_BYTES`, cut after the last whole line within
+    the cap; bytes that are not UTF-8 replaced. A caller that opens the file itself reads `MAX_NOTES_BYTES + 1`
+    bytes and passes them here."""
     if len(data) > MAX_NOTES_BYTES:
         data = data[: data.rfind(b"\n", 0, MAX_NOTES_BYTES) + 1]
     return data.decode("utf-8", errors="replace")

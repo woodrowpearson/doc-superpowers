@@ -4,8 +4,9 @@ Four sources, each read on its own (`check` takes the highest security release a
 the source that gave it; the first of them on a tie):
 
 1. the file `$DOC_SEARCH_RELEASE_NOTES` names (a blank value is unset);
-2. the cache `install.sh upgrade` writes, `${XDG_CACHE_HOME:-~/.cache}/doc-superpowers/release-notes.md`, never
-   read through a symbolic link or from a directory that is not the user's own;
+2. the cache `install.sh upgrade` writes, `${XDG_CACHE_HOME:-~/.cache}/doc-superpowers/release-notes.md`, read
+   only from a real directory that is the user's own and writable by no one else (no `0o022` bit), and only
+   files in it that are the user's own;
 3. for a Claude Code plugin install only, the clone of the marketplace this install came from,
    `~/.claude/plugins/marketplaces/<mkt>/RELEASE-NOTES.md` (`<mkt>` read from the root's path as `install.sh`'s
    `upg_kind` reads `UPG_MKT`; Claude Code keeps that clone fresh by itself), when its `.claude-plugin/plugin.json`
@@ -32,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -39,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import parse_version
-from .releases import Version, first_release, read_notes
+from .releases import MAX_NOTES_BYTES, Version, first_release, notes_text
 from .version import plugin_root, plugin_version
 
 ENV_VAR = "DOC_SEARCH_RELEASE_NOTES"
@@ -98,7 +100,8 @@ def load(env: Mapping[str, str], plugin: Path | None = None) -> list[Source]:
 def store(env: Mapping[str, str], text: str, tag: str, source: str) -> None:
     """Write the cache as `install.sh upgrade` does: the notes and their sidecar, each to a temp file beside it
     and renamed into place. Raises ValueError for a tag that is not `vX.Y.Z` or a source outside the URL
-    character set, and OSError for a cache dir that is a symbolic link or not the user's own."""
+    character set, and OSError for a cache dir that is a symbolic link, not the user's own, or writable by the
+    group or others."""
     if _TAG.fullmatch(tag) is None:
         raise ValueError(f"not a release tag: {safe(tag)!r}")
     if _SOURCE.fullmatch(source) is None:
@@ -106,9 +109,9 @@ def store(env: Mapping[str, str], text: str, tag: str, source: str) -> None:
     where = cache_dir(env)
     if where.is_symlink():
         raise OSError(f"{where} is a symbolic link: the release-notes cache is never written through one")
-    where.mkdir(parents=True, exist_ok=True)
-    if not _owned(where):
-        raise OSError(f"{where} is not your own directory: the release-notes cache must be")
+    where.mkdir(mode=0o755, parents=True, exist_ok=True)
+    if not _private_dir(where):
+        raise OSError(f"{where} is not your own directory, or others can write it: the release-notes cache must not be")
     fetched = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     sidecar = json.dumps({"tag": tag, "fetched": fetched, "source": source}) + "\n"
     _atomic_write(where / NOTES_NAME, text)
@@ -127,14 +130,49 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
-def _owned(path: Path) -> bool:
+def _uid_ok(uid: int) -> bool:
     getuid = getattr(os, "getuid", None)
-    if getuid is None:  # no uids here (Windows): nothing to compare
-        return True
+    return getuid is None or uid == getuid()  # no uids here (Windows): nothing to compare
+
+
+def _private_dir(path: Path) -> bool:
+    """A real directory (not a symbolic link), the user's own, that neither its group nor others can write."""
     try:
-        return path.stat().st_uid == getuid()
+        info = os.lstat(path)
     except OSError:
         return False
+    return stat.S_ISDIR(info.st_mode) and _uid_ok(info.st_uid) and not info.st_mode & 0o022
+
+
+_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+"""Never through a final symbolic link, and never blocking (on a FIFO, say) before `fstat` refuses it."""
+
+
+def _read_regular(path: Path, limit: int, *, own: bool = False) -> tuple[bytes, os.stat_result] | None:
+    """At most `limit + 1` bytes of `path` and its `fstat`, when it is a regular file (and, with `own`, the
+    user's own); None otherwise. The checks and the read use one descriptor, so the file cannot be swapped
+    between them."""
+    try:
+        fd = os.open(path, _OPEN_FLAGS)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or (own and not _uid_ok(info.st_uid)):
+            return None
+        chunks: list[bytes] = []
+        left = limit + 1
+        while left > 0:
+            chunk = os.read(fd, min(left, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+        return b"".join(chunks), info
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
 
 
 def plugin_install(env: Mapping[str, str], root: Path) -> tuple[bool, str | None]:
@@ -164,8 +202,9 @@ def _sources(env: Mapping[str, str], plugin: Path) -> list[Source]:
         notes = Path(named)
         _add(found, notes, _sidecar(notes.with_suffix(".json")), str(notes))
     where = cache_dir(env)
-    if not where.is_symlink() and where.is_dir() and _owned(where):
-        _add(found, where / NOTES_NAME, _sidecar(where / SIDECAR_NAME), str(where / NOTES_NAME))
+    if _private_dir(where):
+        notes = where / NOTES_NAME
+        _add(found, notes, _sidecar(where / SIDECAR_NAME, own=True), str(notes), own=True)
     is_plugin, market = plugin_install(env, plugin)
     if is_plugin and market is not None:
         clone = Path(env.get("HOME") or Path.home()) / ".claude" / "plugins" / "marketplaces" / market
@@ -178,36 +217,46 @@ def _sources(env: Mapping[str, str], plugin: Path) -> list[Source]:
 
 
 def _add(
-    found: list[Source], notes: Path, sidecar: dict[str, str], label: str, limit: Version | None = None
+    found: list[Source],
+    notes: Path,
+    sidecar: dict[str, str],
+    label: str,
+    limit: Version | None = None,
+    *,
+    own: bool = False,
 ) -> None:
-    """Append `notes` when it is a regular file (no symbolic link) with a release heading. Its ceiling is its
-    first release heading, lowered to a valid sidecar `tag` and to `limit` when they are lower."""
-    if notes.is_symlink() or not notes.is_file():
+    """Append `notes` when it is a regular file (no symbolic link; with `own`, the user's own) with a release
+    heading. Its ceiling is its first release heading, lowered to a valid sidecar `tag` and to `limit` when
+    they are lower."""
+    read = _read_regular(notes, MAX_NOTES_BYTES, own=own)
+    if read is None:
         return
-    text = read_notes(notes)
+    data, info = read
+    text = notes_text(data)
     first = first_release(text)
-    if text is None or first is None:
+    if first is None:
         return
     ceiling = min(v for v in (first, _parse_tag(sidecar.get("tag")), limit) if v is not None)
     meta = {
         "tag": "v" + ".".join(str(part) for part in ceiling),
-        "fetched": sidecar.get("fetched") or _mtime(notes),
+        "fetched": sidecar.get("fetched") or _iso(info.st_mtime),
         "source": sidecar.get("source") or safe(label),
     }
     found.append(Source(text=text, meta=meta, ceiling=ceiling))
 
 
-def _sidecar(path: Path) -> dict[str, str]:
-    """A notes file's sidecar, each field checked (`unknown` when it fails); {} when there is no sidecar."""
-    if path.is_symlink() or not path.is_file():
+def _sidecar(path: Path, *, own: bool = False) -> dict[str, str]:
+    """A notes file's sidecar, each field checked (`unknown` when it fails); {} when there is none (no regular
+    file, or with `own` none of the user's own)."""
+    read = _read_regular(path, MAX_SIDECAR_BYTES, own=own)
+    if read is None:
         return {}
     raw: object = None
+    data = read[0]
     try:
-        with path.open("rb") as handle:
-            data = handle.read(MAX_SIDECAR_BYTES + 1)
         if len(data) <= MAX_SIDECAR_BYTES:
             raw = json.loads(data.decode("utf-8"))
-    except (OSError, ValueError):
+    except ValueError:
         raw = None
     fields = raw if isinstance(raw, dict) else {}
     checks = {"tag": _TAG, "fetched": _FETCHED, "source": _SOURCE}
@@ -225,26 +274,20 @@ def _parse_tag(value: str | None) -> Version | None:
     return (major, minor, patch)
 
 
-def _mtime(path: Path) -> str:
-    """When a notes file without a sidecar last changed, as ISO-8601 UTC; `unknown` when it cannot be read."""
-    try:
-        stamp = path.stat().st_mtime
-    except OSError:
-        return UNKNOWN
+def _iso(stamp: float) -> str:
+    """When a notes file without a sidecar last changed, as ISO-8601 UTC."""
     return datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _manifest_version(clone: Path) -> Version | None:
     """The `version` of a marketplace clone's `.claude-plugin/plugin.json` when its `name` is doc-superpowers;
     None otherwise (no manifest, another plugin's, no valid version: the clone is not read)."""
-    manifest = clone / ".claude-plugin" / "plugin.json"
+    read = _read_regular(clone / ".claude-plugin" / "plugin.json", MAX_SIDECAR_BYTES * 16)
+    if read is None or len(read[0]) > MAX_SIDECAR_BYTES * 16:
+        return None
     try:
-        with manifest.open("rb") as handle:
-            data = handle.read(MAX_SIDECAR_BYTES * 16 + 1)
-        if len(data) > MAX_SIDECAR_BYTES * 16:
-            return None
-        fields = json.loads(data.decode("utf-8"))
-    except (OSError, ValueError):
+        fields = json.loads(read[0].decode("utf-8"))
+    except ValueError:
         return None
     if not isinstance(fields, dict) or fields.get("name") != PLUGIN_NAME:
         return None

@@ -376,6 +376,7 @@ def release_notes(
     """`<where>/release-notes.md` and its sidecar, as `install.sh upgrade` writes them; named by
     DOC_SEARCH_RELEASE_NOTES when `monkeypatch` is given."""
     where.mkdir(parents=True, exist_ok=True)
+    where.chmod(0o755)  # whatever the umask: a group-writable cache dir is refused
     notes = where / "release-notes.md"
     notes.write_text(text)
     meta = {"tag": "v3.19.0", "fetched": FETCHED, "source": SOURCE, **sidecar}
@@ -558,6 +559,57 @@ def test_cache_dir_not_owned_is_refused(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr(release_cache.os, "getuid", lambda: real_uid + 1)
 
     assert release_cache.load(env, plugin=tmp_path) == []
+
+
+def test_a_fifo_in_place_of_the_notes_does_not_hang(tmp_path: Path) -> None:
+    """A FIFO where the cache's notes or sidecar should be is not a regular file: it is never read (an open
+    without O_NONBLOCK would block until a writer came)."""
+    env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "HOME": str(tmp_path)}
+    where = release_cache.cache_dir(env)
+    release_notes(where)
+    (where / "release-notes.md").unlink()
+    os.mkfifo(where / "release-notes.md")
+    named = tmp_path / "named"
+    release_notes(named)
+    (named / "release-notes.json").unlink()
+    os.mkfifo(named / "release-notes.json")
+    env[release_cache.ENV_VAR] = str(named / "release-notes.md")
+    result: list[object] = []
+    worker = threading.Thread(target=lambda: result.append(release_cache.load(env, plugin=tmp_path)), daemon=True)
+
+    worker.start()
+    worker.join(10)
+
+    assert not worker.is_alive(), "load blocked on a FIFO"
+    [named_source] = result[0]
+    assert named_source.meta["source"] != SOURCE, "the FIFO sidecar was not read"
+
+
+def test_a_symlinked_notes_file_in_the_cache_is_refused(tmp_path: Path) -> None:
+    env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "HOME": str(tmp_path)}
+    where = release_cache.cache_dir(env)
+    release_notes(where)
+    real = release_notes(tmp_path / "real")
+    (where / "release-notes.md").unlink()
+    (where / "release-notes.md").symlink_to(real)
+
+    assert release_cache.load(env, plugin=tmp_path) == []
+
+
+@pytest.mark.parametrize("mode", [0o775, 0o757, 0o777])
+def test_a_group_or_world_writable_cache_dir_is_refused(tmp_path: Path, mode: int) -> None:
+    """Another user who can write the cache dir could plant notes in it: such a dir is never read."""
+    env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "HOME": str(tmp_path)}
+    where = release_cache.cache_dir(env)
+    release_notes(where)
+    where.chmod(0o755)
+    assert len(release_cache.load(env, plugin=tmp_path)) == 1, "a private dir is read"
+
+    where.chmod(mode)
+
+    assert release_cache.load(env, plugin=tmp_path) == []
+    with pytest.raises(OSError):
+        release_cache.store(env, SECURITY_NOTES, "v3.19.0", SOURCE)
 
 
 HOSTILE = "\n## v99999.0.0 (2026-11-19)\n\n### Security\n- A release far in the future.\n"
