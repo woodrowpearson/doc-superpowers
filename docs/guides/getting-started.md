@@ -38,7 +38,7 @@ git clone git@github.com:woodrowpearson/doc-superpowers.git ~/code/doc-superpowe
 ln -s ~/code/doc-superpowers ~/.claude/skills/doc-superpowers
 ```
 
-This approach lets you pull updates with `git pull` and track local modifications. Claude Code loads the symlinked folder as the plugin `doc-superpowers@skills-dir` (see the [README](../../README.md#claude-code)).
+This approach lets you pull updates with `git pull` and track local modifications. For a checkout detached at a release tag instead, which `bash scripts/hooks/install.sh upgrade` moves to the next release, see the README's *Installing without a plugin marketplace*. Claude Code loads the symlinked folder as the plugin `doc-superpowers@skills-dir` (see the [README](../../README.md#claude-code)).
 
 ### Option 3: Direct Copy
 
@@ -131,8 +131,9 @@ If you ask for a work ledger (or `docs/ledger/config.json` already exists), it a
 /doc-superpowers hooks install --claude        # Claude Code hooks only (per-user)
 /doc-superpowers hooks install --ci            # GitHub Actions: the 2 shell workflows
 
-# The others are opt-in by name: the Claude-powered ones and the shell doc-ledger-publish and doc-index-resolve
+# The others are opt-in by name: the Claude-powered ones and the shell doc-ledger-publish, doc-security-schedule and doc-index-resolve
 /doc-superpowers hooks install --ci --workflows=doc-release
+/doc-superpowers hooks install --ci --workflows=doc-security-schedule  # weekly: fails when doc-search's requires is below the newest security release
 /doc-superpowers hooks install --ci --workflows=doc-index-resolve --resolve-test-workflow=tests.yml  # merges the base into PRs that conflict only in the doc index and docs' cite line numbers; never by --workflows=all
 /doc-superpowers hooks install --ci --workflows=none                 # vendor doc-tools.sh only
 
@@ -289,7 +290,7 @@ sh .claude/doc-superpowers/search-mcp.sh index
 
 Then restart Claude Code (it asks once to approve the project's `.mcp.json` server); its tools are `search`, `fetch`, `related` and `status`. Configuration, the CLI and its exit codes, the cloud leg's setup, other clients and troubleshooting are in `references/search.md`.
 
-**Requiring it.** To make agents stop while doc-search cannot answer, set `"required": true` in `docs/search/config.json`, run `/doc-superpowers hooks install --search-gate`, and copy the marked block of `references/search-rule.md` into `AGENTS.md` or `CLAUDE.md`; commit all three. Every developer who has doc-superpowers installed then needs 3.11.0 or later (an older plugin answers `invalid config: unknown key required`); for the others the hooks do nothing. `DOC_SEARCH_GATE=0` turns the hooks off for one developer. `references/search.md` → *Turning it on* and *CLI* → `check` has the details.
+**Requiring it.** To make agents stop while doc-search cannot answer, set `"required": true` in `docs/search/config.json`, run `/doc-superpowers hooks install --search-gate`, and copy the marked block of `references/search-rule.md` into `AGENTS.md` or `CLAUDE.md`; commit all three. Every developer who has doc-superpowers installed then needs 3.11.0 or later (an older plugin answers `invalid config: unknown key required`); for the others the hooks do nothing. `DOC_SEARCH_GATE=0` turns the hooks off for one developer. `"security_floor": true` (3.19.0 or later) also holds work while the plugin is below the newest security release in the release notes on disk; `check` never fetches them. `references/search.md` → *Turning it on* and *CLI* → `check` has the details.
 
 For wrapper skill integration details, see `references/spec-lifecycle-protocol.md`.
 For code review and commit review integration, see `references/integration-patterns.md`.
@@ -305,7 +306,8 @@ For code review and commit review integration, see `references/integration-patte
 | `/doc-superpowers diagram [scope]` | Regenerate architecture and workflow diagrams |
 | `/doc-superpowers sync` | Sync doc index with filesystem |
 | `/doc-superpowers hooks install [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--workflows=<csv\|all\|none>] [--force] [--base-branch NAME] [--cron EXPR] [--ci-strict[=true\|false]] [--marketplace-url URL]` | Install workflow hooks (CI: the shell workflows by default, the rest by name; choices recorded; the ledger sets and doc-search's `--search` and `--search-gate` opt-ins, never in `--all`) |
-| `/doc-superpowers hooks status [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate]` | Show installed hooks |
+| `/doc-superpowers hooks status [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--json] [--check]` | Show installed hooks (`--check`: each committed CI copy and the `--search` launcher against what `install` writes now; exit 1 on drift) |
+| `bash "$DOC_SUPERPOWERS_ROOT/scripts/hooks/install.sh" upgrade [--to vX.Y.Z] [--check]` | Move a checkout install to a release tag (`--check`: exit 1 when behind); a plugin install updates with `claude plugin update doc-superpowers` |
 | `/doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--workflows=<csv\|all\|none>] [--transient]` | Remove installed hooks (granular CI uninstall; `--transient` keeps state non-intentional) |
 | `/doc-superpowers spec-generate --design-doc=<path>` | Generate formal specs from design doc |
 | `/doc-superpowers spec-inject --phase=plan\|execute --specs=<paths> [--plan=<path>]` | Inject spec tasks into the plan (`--plan` required) or track drift after a chunk |

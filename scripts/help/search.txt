@@ -14,6 +14,9 @@ Terminal:   doc-superpowers setup --set search=on [--set search.model=gte]
             doc-superpowers hooks install --search-gate   (the readiness
             gate: hooks that hold work while a required doc-search is not
             ready; needs --search)
+            "security_floor": true in the config: a required doc-search is
+            not ready while the plugin is below the newest security release
+            (default false: reported, never a halt; check never fetches)
 Skill:      /doc-superpowers hooks install --search
 Committed:  docs/search/config.json, .claude/doc-superpowers/search-mcp.sh
             (the launcher), .mcp.json (the doc-search entry); for each

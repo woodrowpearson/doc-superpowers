@@ -11,7 +11,13 @@ Default:    setup turns on the merge driver, the 5 git hooks (pre-commit,
 Terminal:   doc-superpowers hooks install [--git] [--claude] [--ci] [--all]
             doc-superpowers hooks install --git --merge-driver-only
             doc-superpowers hooks status [--json]    (same flags)
+            doc-superpowers hooks status --check   the committed CI copies
+              and the --search launcher against what install writes now
+              (exit 1 when one drifted)
             doc-superpowers hooks uninstall [--git] [--claude] [--ci] [--all]
+            doc-superpowers hooks upgrade [--to vX.Y.Z] [--check]   move a
+              checkout install to a release tag (--check: exit 1 behind);
+              a plugin install: claude plugin update doc-superpowers
             doc-superpowers hooks help        every flag, hook and variable
 Skill:      /doc-superpowers hooks install|status|uninstall [flags]
 Committed:  .gitattributes (the doc-index merge-driver block).

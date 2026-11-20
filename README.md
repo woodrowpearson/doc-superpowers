@@ -254,6 +254,8 @@ It is **inert without `docs/search/config.json`**: every tool answers `doc-searc
 
 A repository can also **require** doc-search, so agents stop while it cannot answer instead of working around it: `"required": true` in the config (and optionally `"requires": ">=X.Y.Z"`, a version floor), the gate's hooks (`hooks install --search-gate`, for Claude Code and Codex), and the agent rule `references/search-rule.md` copied into `AGENTS.md` or `CLAUDE.md`. `sh .claude/doc-superpowers/search-mcp.sh check` gives the verdict (`0` ready, `1` not ready, with one fix command, `4` not in force). The hooks gate only a developer who has doc-superpowers installed, and `DOC_SEARCH_GATE=0` turns them off for one developer.
 
+A required repository can also hold work while the plugin is below a **security release** (a release whose `RELEASE-NOTES.md` section holds a `### Security` heading): `"security_floor": true` in the config (3.19.0 or later; default `false`, which reports the same finding as `degraded`). `check` then answers not ready, and its fix is the upgrade: `claude plugin update doc-superpowers` for a plugin install, else `bash <root>/scripts/hooks/install.sh upgrade`. `check` never fetches: it reads the release notes on disk, among them the cache `install.sh upgrade --check` writes (*Installing without a plugin marketplace*). The opt-in `doc-security-schedule` workflow checks `requires` against the newest security release every week.
+
 ### Writing lint (opt-in)
 
 Text that people and agents read should put first what the reader needs, give every code (a decision, issue or spec id) words or a link, and keep sentences short. The **writing rule** is a marked block, [`references/writing-rule.md`](references/writing-rule.md), that a project copies into `AGENTS.md` or `CLAUDE.md`. The **writing lint** counts what it can of the rule: a code that nothing explains, a sentence over the word limit of its register (`terse` or `full`), and a list item over its limit. It reports a density of backtick spans for information only.
@@ -316,6 +318,8 @@ $DOC_TOOLS tools uninstall                     # removes only files identical to
 # sets with --ledger / --ledger-claude / --search / --search-gate, each in its own section after the tiers);
 # "⚠ … outdated: re-run install --git|--claude|--ledger|--ledger-claude|--search" marks another version's install
 /doc-superpowers hooks status
+/doc-superpowers hooks status --check   # the drift check: each committed CI copy and the --search launcher against
+                                        # what install writes now; "⚠ drifted: <path>" and exit 1 when one differs
 
 # Remove hooks
 /doc-superpowers hooks uninstall --all
@@ -448,7 +452,7 @@ doc-superpowers/
 ├── search/               # doc-search: the opt-in MCP server over docs and code (a uv Python package)
 │   ├── pyproject.toml    # semble, mcp, pathspec; the cloud extra (google-genai, google-cloud-firestore) and the local-transformer extra (onnxruntime, flatbuffers, protobuf; tokenizers and huggingface-hub, which semble already brings)
 │   ├── uv.lock
-│   ├── src/doc_search/   # server, CLI, searcher, semble engines, the local transformer docs embedder, cloud leg (read and write paths), the readiness check and gate
+│   ├── src/doc_search/   # server, CLI, searcher, semble engines, the local transformer docs embedder, cloud leg (read and write paths), the readiness check and gate, the security-release reader (releases, release_cache)
 │   └── tests/            # pytest suite (no network: a tiny test-built model, fake cloud clients)
 ├── scripts/
 │   ├── doc-superpowers   # The dispatcher: help, setup, version, and hooks / tools / search pass-throughs (the terminal command)
@@ -475,7 +479,7 @@ doc-superpowers/
 │   ├── merge-doc-index.sh        # Custom git merge driver for .doc-index.json
 │   ├── test-merge-driver.sh      # Test suite for merge driver
 │   └── hooks/
-│       ├── install.sh        # Hook installer engine
+│       ├── install.sh        # Hook installer engine (also upgrade, and status --check)
 │       ├── state.sh          # Install-state tracking
 │       ├── git/              # Git hook scripts (pre-commit, post-merge, etc.; ledger-* legs)
 │       ├── claude/           # Claude Code hook scripts (and ledger-session-notices, ledger-state-watch)

@@ -6,7 +6,9 @@ Report it privately through this repository's **Security → Report a vulnerabil
 
 ## Supported versions
 
-Fixes go into the latest release. There are no backports: upgrade, then re-run `hooks install --ci` if you use the CI tier, because its workflows and step scripts are copies in your repository.
+Fixes go into the latest release. There are no backports: upgrade, then re-run `hooks install --ci` if you use the CI tier, because its workflows and step scripts are copies in your repository. `hooks status --check` names each copy that differs from the installed release.
+
+A release whose section of `RELEASE-NOTES.md` holds a `### Security` heading is a **security release**: a fix you must upgrade for. A project opts in to holding work below the newest one with `"security_floor": true` in `docs/search/config.json` (3.19.0 or later). doc-search's `check` is then `not-ready` until the plugin is upgraded; without the key, the same finding is a `degraded` reason. `check` reads release notes already on disk and never fetches them: `install.sh upgrade --check` and the opt-in `doc-security-schedule` workflow fetch the newest notes (`references/search.md` → *`check`*, `references/hooks.md`).
 
 ## What is trusted
 
