@@ -382,7 +382,9 @@ repository):
             assigns DOC_SUPERPOWERS_ROOT more than once, a target directory
             that exists, an older --to without --force.
   --check   whether the install is behind (exit 1) or current (exit 0), and
-            the newest security release; writes nothing but the cache
+            the newest security release. It moves nothing: it writes the
+            cache and, from a git checkout (the Codex one too), fetches the
+            release tags into that checkout's .git
   --to vX.Y.Z  that release instead of the newest; an older one needs --force
   --json    one JSON object (schema doc-superpowers-upgrade/1)
   Each run caches the newest tag's release notes and a sidecar (tag,
