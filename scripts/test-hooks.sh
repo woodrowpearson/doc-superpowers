@@ -14093,7 +14093,7 @@ upg_mode() {
 }
 
 test_upgrade_refuses_a_writable_cache_dir() {
-  echo "test: upgrade makes the cache directory 0700, and refuses one that its group or others can write (exit 4 under --check, 1 without; nothing written), as doc_search.release_cache reads only such a directory"
+  echo "test: upgrade makes the cache directory 0700, and refuses one that its group or others can write (exit 3, refused, with or without --check, as a linked or not-own one is; nothing written), as doc_search.release_cache reads only such a directory"
   setup
   upg_origin
   upg_release_root
@@ -14109,16 +14109,17 @@ test_upgrade_refuses_a_writable_cache_dir() {
   /bin/rm -f "$UPG_CACHE/release-notes.md" "$UPG_CACHE/release-notes.json"
   chmod 775 "$UPG_CACHE"
   upg_run -- --check
-  assert_eq "4" "$RUN_RC" "a group-writable cache directory: refused under --check (exit 4)"
+  assert_eq "3" "$RUN_RC" "a group-writable cache directory: refused under --check (exit 3)"
   assert_contains "$RUN_ERR" "writable by its group or others" "…the message says why"
+  assert_eq "1" "$(grep -c 'Nothing was changed' <<<"$RUN_ERR" || true)" "…and says nothing was changed once"
   assert_contains "$RUN_ERR" "$UPG_CACHE" "…and names the directory"
   assert_eq "" "$(ls -A "$UPG_CACHE")" "…nothing written into it"
   chmod 757 "$UPG_CACHE"
   upg_run -- --check
-  assert_eq "4" "$RUN_RC" "a world-writable cache directory: refused (exit 4)"
+  assert_eq "3" "$RUN_RC" "a world-writable cache directory: refused (exit 3)"
   assert_eq "" "$(ls -A "$UPG_CACHE")" "…nothing written into it"
   upg_run --
-  assert_eq "1" "$RUN_RC" "upgrade (no --check): refused, exit 1"
+  assert_eq "3" "$RUN_RC" "upgrade (no --check): refused, exit 3"
   assert_true "…no worktree is made" test ! -e "$UPG_NEW"
   assert_true "…no env hook is written" test ! -e "$UPG_ENV"
   assert_eq "" "$(ls -A "$UPG_CACHE")" "…nothing written into the cache directory"

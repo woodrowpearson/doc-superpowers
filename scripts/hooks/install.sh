@@ -398,7 +398,8 @@ repository):
   --json    one JSON object (schema doc-superpowers-upgrade/1)
   Each run caches the newest tag's release notes and a sidecar (tag,
   fetched, source) in ~/.cache/doc-superpowers/ (\$XDG_CACHE_HOME), which
-  doc-search check reads; a cache directory that is a link is refused.
+  doc-search check reads. A new cache directory is made 0700; one that is
+  a link, not your own, or writable by its group or others is refused.
   Exit: 0 current or done, 1 behind (--check; without --check, a failure
   part-way), 2 usage, 3 refused, 4 the fetch failed or --check could not
   finish.
@@ -3669,7 +3670,7 @@ upg_store_cache() {
   [ "${#mode}" -eq 3 ] || mode=${mode#?}
   case ${mode#?} in
     [0145][0145]) ;;
-    *) upg_die "$UPG_CACHE_DIR is writable by its group or others (mode $mode), and doc-search check reads the release-notes cache only from a directory no one else can write: chmod go-w $(sh_squote "$UPG_CACHE_DIR"), then run upgrade again. Nothing was changed." ;;
+    *) upg_refuse "$UPG_CACHE_DIR is writable by its group or others (mode $mode), and doc-search check reads the release-notes cache only from a directory no one else can write: chmod go-w $(sh_squote "$UPG_CACHE_DIR"), then run upgrade again" ;;
   esac
   UPG_CACHE_SOURCE=$UPG_SHOWN
   fetched=$(date -u +%Y-%m-%dT%H:%M:%SZ)
