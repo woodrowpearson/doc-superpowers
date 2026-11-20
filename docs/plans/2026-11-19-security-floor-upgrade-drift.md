@@ -270,6 +270,8 @@ The Python fence rule matches `_AWK_FENCE` (`doc-tools.sh:7426`): both fence cha
 - Add `"security_floor"` to `INIT_OMITS` (`cli.py:277`) so `init` and `scripts/setup/search-config.json` don't write it. Document it in the `references/search.md:99` table on the `requires` precedent, and say that the halt applies only with `required: true` (`check.py:134`).
 - Validate the sidecar fields: `tag` against `^v\d+\.\d+\.\d+$`, `fetched` against ISO-8601 UTC, and `source` against the `valid_marketplace_url` character set (`install.sh:2407`). A field that fails shows as `unknown`. Strip control and ANSI characters from anything put in a reason. Refuse a cache dir that is a symlink or that the user doesn't own.
 
+- (Chunk 1 review follow-up) Whatever source `check` reads, drop any security version above the source's own newest release heading (for the cache, the sidecar `tag`), as `install.sh`'s `upg_scan` does: a release is never newer than the notes that carry it. Clamp in `releases.newest_security` (add an optional `ceiling`) or in the caller, and test it with a hostile `## v99999.0.0` plus `### Security`.
+
 ### Task 3 (I4, M3)
 
 - Dispatch `upgrade` before `enter_repo` (`install.sh:3194`, `:3342`), as `print-merge-driver` is. Give `allowed()` (`:3235`) `upgrade:` entries. `--force` is valid with `upgrade`.
@@ -288,6 +290,7 @@ The Python fence rule matches `_AWK_FENCE` (`doc-tools.sh:7426`): both fence cha
 
 - Register the template in `SHELL_OPTIN_WORKFLOWS` (`install.sh:72`), `workflow_desc`, `scripts/setup/catalog.json` (`ci.workflows` options and `option_details`), the `test_setup_catalog` count (`test-hooks.sh:9245`), `help/ci.txt`, the `hooks.md` workflow table and the README. `--workflows=all` now includes it.
 - The marker parser is `doc-tools.sh tools security-floor` (a new verb built on `_AWK_FENCE`). The step script calls the vendored `doc-tools.sh` and reuses `install-jq.sh`. The workflow fetches only `RELEASE-NOTES.md` (`fetch --depth 1` plus `git show`) and never runs anything it fetched. Re-render the self-installed tier (`install.sh install --ci`) because `doc-tools.sh` changed.
+- (Chunk 1 review follow-up) Replace `install.sh`'s own copy of the parser (`_UPG_NOTES_AWK`, Task 3) by running the new verb, `"$BASH" "$DOC_TOOLS" tools security-floor …`, as `install.sh` already runs `tools version`. Keep the shared-fixture parity test (`bf67871a`) passing.
 
 ### Task 6 (I10, M1, M4)
 
