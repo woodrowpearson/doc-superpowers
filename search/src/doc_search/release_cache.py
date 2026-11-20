@@ -34,7 +34,6 @@ import json
 import os
 import re
 import stat
-import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -108,39 +107,6 @@ def load(env: Mapping[str, str], plugin: Path | None = None) -> list[Source]:
     must not hide the cache's security release. `plugin` is the plugin's root (default: the one this package
     runs from)."""
     return _sources(env, plugin if plugin is not None else plugin_root())
-
-
-def store(env: Mapping[str, str], text: str, tag: str, source: str) -> None:
-    """Write the cache as `install.sh upgrade` does: the notes and their sidecar, each to a temp file beside it
-    and renamed into place. Raises ValueError for a tag that is not `vX.Y.Z` or a source outside the URL
-    character set, and OSError for a cache dir that is a symbolic link, not the user's own, or writable by the
-    group or others."""
-    if _TAG.fullmatch(tag) is None:
-        raise ValueError(f"not a release tag: {safe(tag)!r}")
-    if _SOURCE.fullmatch(source) is None:
-        raise ValueError(f"not a repository URL: {safe(source)!r}")
-    where = cache_dir(env)
-    if where.is_symlink():
-        raise OSError(f"{where} is a symbolic link: the release-notes cache is never written through one")
-    where.mkdir(mode=0o755, parents=True, exist_ok=True)
-    if not _private_dir(where):
-        raise OSError(f"{where} is not your own directory, or others can write it: the release-notes cache must not be")
-    fetched = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    sidecar = json.dumps({"tag": tag, "fetched": fetched, "source": source}) + "\n"
-    _atomic_write(where / NOTES_NAME, text)
-    _atomic_write(where / SIDECAR_NAME, sidecar)
-
-
-def _atomic_write(path: Path, text: str) -> None:
-    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
 
 
 def _uid_ok(uid: int) -> bool:

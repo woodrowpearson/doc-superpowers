@@ -13,8 +13,10 @@ import os
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 from dataclasses import fields
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -441,6 +443,33 @@ def release_notes(
     return notes
 
 
+def store(env: dict[str, str], text: str, tag: str, source: str) -> None:
+    """Write the cache as `install.sh upgrade`'s `upg_store_cache` does: a new cache dir made 0700 (`mkdir -m
+    700`), one that is a symbolic link, not the user's own or writable by its group or others refused
+    (OSError), then the notes and their sidecar, each to a temp file beside it and renamed into place. A tag
+    that is not `vX.Y.Z` or a source outside the URL character set raises ValueError."""
+    if release_cache._TAG.fullmatch(tag) is None:
+        raise ValueError(f"not a release tag: {tag!r}")
+    if release_cache._SOURCE.fullmatch(source) is None:
+        raise ValueError(f"not a repository URL: {source!r}")
+    where = release_cache.cache_dir(env)
+    if where.is_symlink():
+        raise OSError(f"{where} is a symbolic link: the release-notes cache is never written through one")
+    if not where.is_dir():
+        where.parent.mkdir(parents=True, exist_ok=True)
+        where.mkdir(mode=0o700)
+    if not release_cache._private_dir(where):
+        raise OSError(f"{where} is not your own directory, or others can write it")
+    fetched = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    sidecar = json.dumps({"tag": tag, "fetched": fetched, "source": source}) + "\n"
+    for name, body in ((release_cache.NOTES_NAME, text), (release_cache.SIDECAR_NAME, sidecar)):
+        fd, tmp = tempfile.mkstemp(prefix=f".{name}.", dir=where)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, where / name)
+
+
 BELOW = "doc-superpowers 3.18.0 is below security release 3.19.0"
 
 
@@ -519,7 +548,7 @@ def test_the_cache_is_read(gated, run, tmp_path: Path, monkeypatch) -> None:
 def test_store_then_load_round_trips(tmp_path: Path) -> None:
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "HOME": str(tmp_path / "h")}
 
-    release_cache.store(env, SECURITY_NOTES, "v3.19.0", SOURCE)
+    store(env, SECURITY_NOTES, "v3.19.0", SOURCE)
 
     where = release_cache.cache_dir(env)
     assert where == tmp_path / "xdg" / "doc-superpowers"
@@ -527,6 +556,7 @@ def test_store_then_load_round_trips(tmp_path: Path) -> None:
     assert set(meta) == {"tag", "fetched", "source"} and meta["tag"] == "v3.19.0" and meta["source"] == SOURCE
     assert (where / "release-notes.md").read_text() == SECURITY_NOTES
     assert [p.name for p in where.iterdir() if p.name.startswith(".")] == [], "no temp file left behind"
+    assert where.stat().st_mode & 0o777 == 0o700, "a new cache dir is 0700, as install.sh's mkdir -m 700 makes it"
     [loaded] = release_cache.load(env, plugin=tmp_path / "no-root")
     assert loaded.text == SECURITY_NOTES and loaded.ceiling == (3, 19, 0)
     assert loaded.meta["source"] == SOURCE and loaded.meta["tag"] == "v3.19.0"
@@ -729,7 +759,7 @@ def test_a_group_or_world_writable_cache_dir_is_refused(tmp_path: Path, mode: in
 
     assert release_cache.load(env, plugin=tmp_path) == []
     with pytest.raises(OSError):
-        release_cache.store(env, SECURITY_NOTES, "v3.19.0", SOURCE)
+        store(env, SECURITY_NOTES, "v3.19.0", SOURCE)
 
 
 HOSTILE = "\n## v99999.0.0 (2026-11-19)\n\n### Security\n- A release far in the future.\n"
