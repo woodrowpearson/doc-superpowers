@@ -388,8 +388,9 @@ repository):
   Each run caches the newest tag's release notes and a sidecar (tag,
   fetched, source) in ~/.cache/doc-superpowers/ (\$XDG_CACHE_HOME), which
   doc-search check reads; a cache directory that is a link is refused.
-  Exit: 0 current or done, 1 behind (--check), 2 usage, 3 refused, 4 the
-  fetch failed.
+  Exit: 0 current or done, 1 behind (--check; without --check, a failure
+  part-way), 2 usage, 3 refused, 4 the fetch failed or --check could not
+  finish.
 
 Hook output: DOC_SUPERPOWERS_ADVICE (else the advice key of
 .claude/doc-superpowers/hooks.conf) replaces the '/doc-superpowers <action>'
@@ -3241,8 +3242,9 @@ status_json() {
 #
 # Every refusal that needs no fetch comes first, so a refused run changes
 # nothing; git hooks never run (core.hooksPath=/dev/null). Exit: 0 current or
-# done · 1 behind (--check), or a failure part-way (the message says what was
-# done) · 2 usage · 3 refused · 4 the fetch failed.
+# done · 1 behind (--check); without --check, a failure part-way (the message
+# says what was done) · 2 usage · 3 refused · 4 the fetch failed, or --check
+# failed part-way (upg_die), so a --check exit 1 always means behind.
 
 # The most of a RELEASE-NOTES.md read (doc_search.releases.MAX_NOTES_BYTES).
 UPG_MAX_NOTES=2000000
@@ -3311,6 +3313,15 @@ upg_refuse() {
   echo "ERROR: $*" >&2
   echo "Nothing was changed." >&2
   exit 3
+}
+
+# upg_die <message>: a failure after preflight. Under --check it exits 4, so a
+# check that could not finish never reads as "behind" (1); otherwise 1, and the
+# message says what was done.
+upg_die() {
+  echo "ERROR: $*" >&2
+  if $UPG_CHECK; then exit 4; fi
+  exit 1
 }
 
 upg_fetch_failed() {
@@ -3469,14 +3480,14 @@ upg_notes() {
   fi
   "${UPG_GIT[@]}" show "refs/tags/v$1:RELEASE-NOTES.md" >"$2.raw" 2>/dev/null \
     || upg_refuse "tag v$1 has no RELEASE-NOTES.md: it is not a release commit"
-  head -c "$UPG_MAX_NOTES" <"$2.raw" >"$2" || die "cannot read the notes of v$1"
+  head -c "$UPG_MAX_NOTES" <"$2.raw" >"$2" || upg_die "cannot read the notes of v$1"
 }
 
 # upg_scan <notes file> <version>: refuse notes that do not open with
 # <version>; UPG_SEC is their newest security release ("" for none).
 upg_scan() {
   local out first
-  out=$(LC_ALL=C awk "$_UPG_NOTES_AWK" <"$1") || die "cannot read $1"
+  out=$(LC_ALL=C awk "$_UPG_NOTES_AWK" <"$1") || upg_die "cannot read $1"
   first=$(printf '%s\n' "$out" | sed -n 's/^first //p')
   first=${first%%$'\n'*}
   [ "$first" = "$2" ] || upg_refuse "tag v$2 is not a release commit: its RELEASE-NOTES.md first release heading is $([ -n "$first" ] && printf 'v%s' "$(upg_safe "$first")" || printf 'missing')"
@@ -3492,7 +3503,7 @@ upg_store_cache() {
   fi
   UPG_CACHE_DIR="${XDG_CACHE_HOME:-${HOME:-}/.cache}/doc-superpowers"
   [ ! -L "$UPG_CACHE_DIR" ] || upg_refuse "$UPG_CACHE_DIR is a symbolic link, and the release-notes cache is never written through one: remove it, then run upgrade again"
-  mkdir -p "$UPG_CACHE_DIR" || die "cannot create $UPG_CACHE_DIR"
+  mkdir -p "$UPG_CACHE_DIR" || upg_die "cannot create $UPG_CACHE_DIR"
   [ -O "$UPG_CACHE_DIR" ] || upg_refuse "$UPG_CACHE_DIR is not your own directory: the release-notes cache must be"
   # The source without a user and password (https://user:token@host/…).
   src=$UPG_SOURCE
@@ -3508,16 +3519,16 @@ upg_store_cache() {
   esac
   UPG_CACHE_SOURCE=$src
   fetched=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  tn=$(mktemp "$UPG_CACHE_DIR/.release-notes.md.XXXXXX") || die "cannot create a temp file in $UPG_CACHE_DIR"
+  tn=$(mktemp "$UPG_CACHE_DIR/.release-notes.md.XXXXXX") || upg_die "cannot create a temp file in $UPG_CACHE_DIR"
   _TMPS+=("$tn")
-  tj=$(mktemp "$UPG_CACHE_DIR/.release-notes.json.XXXXXX") || die "cannot create a temp file in $UPG_CACHE_DIR"
+  tj=$(mktemp "$UPG_CACHE_DIR/.release-notes.json.XXXXXX") || upg_die "cannot create a temp file in $UPG_CACHE_DIR"
   _TMPS+=("$tj")
-  cat "$1" >"$tn" || die "cannot write $tn"
+  cat "$1" >"$tn" || upg_die "cannot write $tn"
   printf '{"tag": %s, "fetched": %s, "source": %s}\n' "$(upg_json_str "$2")" "$(upg_json_str "$fetched")" \
-    "$(upg_json_str "$src")" >"$tj" || die "cannot write $tj"
-  chmod 644 "$tn" "$tj" || die "cannot chmod the release-notes cache"
-  mv -f "$tn" "$UPG_CACHE_DIR/release-notes.md" || die "cannot write $UPG_CACHE_DIR/release-notes.md"
-  mv -f "$tj" "$UPG_CACHE_DIR/release-notes.json" || die "cannot write $UPG_CACHE_DIR/release-notes.json"
+    "$(upg_json_str "$src")" >"$tj" || upg_die "cannot write $tj"
+  chmod 644 "$tn" "$tj" || upg_die "cannot chmod the release-notes cache"
+  mv -f "$tn" "$UPG_CACHE_DIR/release-notes.md" || upg_die "cannot write $UPG_CACHE_DIR/release-notes.md"
+  mv -f "$tj" "$UPG_CACHE_DIR/release-notes.json" || upg_die "cannot write $UPG_CACHE_DIR/release-notes.json"
 }
 
 # upg_env_write <new root>: the env hook's DOC_SUPERPOWERS_ROOT line set to
@@ -3526,12 +3537,12 @@ upg_env_write() {
   local line dir tmp mode=644
   line="DOC_SUPERPOWERS_ROOT=$(sh_squote "$1")"
   dir=$(dirname "$UPG_ENV")
-  mkdir -p "$dir" || die "cannot create $dir"
-  tmp=$(mktemp "$dir/.env.sh.XXXXXX") || die "cannot create a temp file in $dir"
+  mkdir -p "$dir" || upg_die "cannot create $dir"
+  tmp=$(mktemp "$dir/.env.sh.XXXXXX") || upg_die "cannot create a temp file in $dir"
   _TMPS+=("$tmp")
   if [ -f "$UPG_ENV" ]; then
     mode=$(file_mode "$UPG_ENV") || mode=644
-    cp -p "$UPG_ENV" "$UPG_ENV.bak" || die "cannot write $UPG_ENV.bak"
+    cp -p "$UPG_ENV" "$UPG_ENV.bak" || upg_die "cannot write $UPG_ENV.bak"
     if grep -qE "$UPG_ENV_RE" "$UPG_ENV"; then
       # shellcheck disable=SC2016  # awk program, not shell expansion
       UPG_LINE=$line awk '
@@ -3540,9 +3551,9 @@ upg_env_write() {
           print substr($0, 1, RLENGTH) ENVIRON["UPG_LINE"]
           next
         }
-        { print }' <"$UPG_ENV" >"$tmp" || die "cannot rewrite $UPG_ENV"
+        { print }' <"$UPG_ENV" >"$tmp" || upg_die "cannot rewrite $UPG_ENV"
     else
-      cat "$UPG_ENV" >"$tmp" || die "cannot read $UPG_ENV"
+      cat "$UPG_ENV" >"$tmp" || upg_die "cannot read $UPG_ENV"
       if [ -n "$(tail -c 1 "$UPG_ENV")" ]; then
         echo >>"$tmp"
       fi
@@ -3551,9 +3562,9 @@ upg_env_write() {
   else
     printf '# doc-search: the per-user env hook (the launcher sources it)\nexport %s\n' "$line" >"$tmp"
   fi
-  sh -n "$tmp" 2>/dev/null || die "the rewritten $UPG_ENV would not parse as sh: left as it was"
-  chmod "$mode" "$tmp" || die "cannot chmod $tmp"
-  mv -f "$tmp" "$UPG_ENV" || die "cannot replace $UPG_ENV"
+  sh -n "$tmp" 2>/dev/null || upg_die "the rewritten $UPG_ENV would not parse as sh: left as it was"
+  chmod "$mode" "$tmp" || upg_die "cannot chmod $tmp"
+  mv -f "$tmp" "$UPG_ENV" || upg_die "cannot replace $UPG_ENV"
 }
 
 # upg_relink <new root>: ~/.claude/skills/doc-superpowers, when it is a link
@@ -3563,7 +3574,7 @@ upg_relink() {
   [ -n "${HOME:-}" ] && [ -L "$link" ] || return 0
   to=$(upg_phys "$link") || return 0
   upg_under "$to" "$UPG_ROOT" || return 0
-  ln -sfn "$1${to#"$UPG_ROOT"}" "$link" || die "cannot relink $link"
+  ln -sfn "$1${to#"$UPG_ROOT"}" "$link" || upg_die "cannot relink $link"
   echo "  relinked $link -> $1${to#"$UPG_ROOT"}"
 }
 
@@ -3623,7 +3634,7 @@ cmd_upgrade() {
         ;;
     esac
   fi
-  UPG_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/doc-superpowers-upgrade.XXXXXX") || die "cannot create a scratch directory"
+  UPG_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/doc-superpowers-upgrade.XXXXXX") || upg_die "cannot create a scratch directory"
   _TMPDIRS+=("$UPG_SCRATCH")
   upg_fetch
   [ -n "$UPG_VERSIONS" ] || upg_refuse "$UPG_SOURCE has no release tag (vX.Y.Z)"
@@ -3672,12 +3683,12 @@ cmd_upgrade() {
   case $UPG_KIND in
     codex)
       git -C "$UPG_ROOT" -c core.hooksPath=/dev/null checkout --quiet --detach "refs/tags/v$UPG_TARGET" \
-        || die "git checkout --detach v$UPG_TARGET failed in $UPG_ROOT (still at $UPG_INSTALLED; the cache was written)"
+        || upg_die "git checkout --detach v$UPG_TARGET failed in $UPG_ROOT (still at $UPG_INSTALLED; the cache was written)"
       new=$UPG_ROOT
       ;;
     checkout)
       git -C "$UPG_ROOT" -c core.hooksPath=/dev/null worktree add --detach "$new" "refs/tags/v$UPG_TARGET" >/dev/null 2>&1 \
-        || die "git worktree add $new v$UPG_TARGET failed (the cache was written; nothing else changed)"
+        || upg_die "git worktree add $new v$UPG_TARGET failed (the cache was written; nothing else changed)"
       ;;
   esac
   have=$("$BASH" "$new/scripts/doc-tools.sh" tools version 2>/dev/null) || have=""

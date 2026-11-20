@@ -13619,6 +13619,11 @@ test_upgrade_cache_and_fetch_failures() {
   assert_eq "3" "$RUN_RC" "a linked cache directory: refused (exit 3)"
   assert_eq "" "$(ls -A "$TEST_DIR/elsewhere")" "…nothing written through it"
   /bin/rm -f "$UPG_CACHE"
+  # A failure part-way through --check is never "behind" (exit 1).
+  printf 'not a directory\n' > "$TEST_DIR/cache file"
+  upg_run XDG_CACHE_HOME="$TEST_DIR/cache file" -- --check
+  assert_eq "4" "$RUN_RC" "--check whose cache directory cannot be made: exit 4, not 1 (behind)"
+  assert_contains "$RUN_ERR" "cache file/doc-superpowers" "…naming the directory"
   git -C "$UPG_BASE/doc-superpowers" remote set-url origin "$TEST_DIR/no such origin.git"
   upg_run -- --check
   assert_eq "4" "$RUN_RC" "an origin that cannot be fetched: exit 4"
