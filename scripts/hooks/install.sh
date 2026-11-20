@@ -3223,7 +3223,8 @@ status_json() {
 #             clone's origin (~/.claude/plugins/marketplaces/<mkt>), else at
 #             plugin.json's repository, and fetches the newest one's notes into
 #             a scratch repository (a plugin copy has no .git).
-#   codex     ${CODEX_HOME:-~/.codex}/doc-superpowers: checked out in place,
+#   codex     ${CODEX_HOME:-~/.codex}/doc-superpowers, when it is a checkout
+#             whose top is itself (else none): checked out in place,
 #             git checkout --detach <tag>; a clean branch checkout is fine.
 #   checkout  any other git checkout whose top is the root (the one
 #             DOC_SUPERPOWERS_ROOT names): a new detached worktree,
@@ -3392,12 +3393,14 @@ upg_kind() {
     UPG_KIND=plugin
     rel=${UPG_ROOT#"$cache"/}
     UPG_MKT=${rel%%/*}
+  elif ! top=$(git -C "$UPG_ROOT" rev-parse --show-toplevel 2>/dev/null) || [ "$(upg_phys "$top")" != "$UPG_ROOT" ]; then
+    # No checkout of its own (a copy inside another repository, say): the
+    # Codex root too, so no git command ever acts on an enclosing repository.
+    UPG_KIND=none
   elif [ -n "$codex" ] && [ "$codex" = "$UPG_ROOT" ]; then
     UPG_KIND=codex
-  elif top=$(git -C "$UPG_ROOT" rev-parse --show-toplevel 2>/dev/null) && [ "$(upg_phys "$top")" = "$UPG_ROOT" ]; then
-    UPG_KIND=checkout
   else
-    UPG_KIND=none
+    UPG_KIND=checkout
   fi
 }
 

@@ -13605,6 +13605,20 @@ test_upgrade_codex_root_in_place() {
   upg_run --
   assert_eq "0" "$RUN_RC" "again: current, exit 0"
   assert_contains "$RUN_OUT" "current" "…and says so"
+  # A Codex root that is no checkout of its own, inside another repository:
+  # that repository is never checked out.
+  local outer="$TEST_DIR/outer" head
+  git clone -q "$UPG_ORIGIN" "$outer"
+  git -C "$outer" reset -q --hard v3.18.0
+  mkdir -p "$outer/codex/doc-superpowers"
+  git -C "$UPG_ORIGIN" archive v3.18.0 | tar -x -C "$outer/codex/doc-superpowers"
+  printf 'codex/\n' >> "$outer/.git/info/exclude"
+  head=$(git -C "$outer" rev-parse HEAD)
+  UPG_ROOT="$outer/codex/doc-superpowers"
+  upg_run CODEX_HOME="$outer/codex" --
+  assert_eq "3" "$RUN_RC" "a Codex root inside another repository, no checkout of its own: refused (exit 3)"
+  assert_eq "$head" "$(git -C "$outer" rev-parse HEAD)" "…the enclosing repository's HEAD unchanged"
+  assert_true "…and still on its branch" git -C "$outer" symbolic-ref -q HEAD
   teardown
 }
 
