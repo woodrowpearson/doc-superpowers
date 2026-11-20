@@ -3318,9 +3318,11 @@ upg_refuse() {
 
 # upg_die <message>: a failure after preflight. Under --check it exits 4, so a
 # check that could not finish never reads as "behind" (1); otherwise 1, and the
-# message says what was done.
+# message says what was done (UPG_DONE, once something outside the cache is).
+UPG_DONE=""
 upg_die() {
   echo "ERROR: $*" >&2
+  [ -z "$UPG_DONE" ] || echo "$UPG_DONE" >&2
   if $UPG_CHECK; then exit 4; fi
   exit 1
 }
@@ -3700,12 +3702,14 @@ cmd_upgrade() {
     checkout)
       git -C "$UPG_ROOT" -c core.hooksPath=/dev/null worktree add --detach "$new" "refs/tags/v$UPG_TARGET" >/dev/null 2>&1 \
         || upg_die "git worktree add $new v$UPG_TARGET failed (the cache was written; nothing else changed)"
+      UPG_DONE="The new release worktree $new was made (the old root is left as it is), and DOC_SUPERPOWERS_ROOT is unchanged: set it to $(sh_squote "$new") in $UPG_ENV by hand, or remove the worktree (git -C $(sh_squote "$UPG_ROOT") worktree remove $(sh_squote "$new"))."
       ;;
   esac
   have=$("$BASH" "$new/scripts/doc-tools.sh" tools version 2>/dev/null) || have=""
   [ "$have" = "$UPG_TARGET" ] || echo "WARN: $new reads as version ${have:-unknown}, not $UPG_TARGET" >&2
   if [ "$UPG_KIND" = checkout ]; then
     upg_env_write "$new"
+    UPG_DONE="The new release worktree $new was made, and DOC_SUPERPOWERS_ROOT in $UPG_ENV points at it (the old file: $UPG_ENV.bak, when there was one)."
   fi
   if $JSON; then
     [ "$UPG_KIND" = checkout ] && upg_relink "$new" >/dev/null

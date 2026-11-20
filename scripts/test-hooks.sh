@@ -13654,6 +13654,25 @@ test_upgrade_cache_and_fetch_failures() {
   teardown
 }
 
+test_upgrade_env_write_failure_names_the_new_root() {
+  echo "test: an env hook that cannot be rewritten after the new worktree is made — exit 1, the message names the new root and that DOC_SUPERPOWERS_ROOT is unchanged"
+  setup
+  upg_origin
+  upg_release_root
+  mkdir -p "$(dirname "$UPG_ENV")"
+  printf 'export DOC_SUPERPOWERS_ROOT=/old/place\n' > "$UPG_ENV"
+  # The file can be written, its directory cannot: the rewrite's temp file fails.
+  chmod 555 "$(dirname "$UPG_ENV")"
+  upg_run --
+  chmod 755 "$(dirname "$UPG_ENV")"
+  assert_eq "1" "$RUN_RC" "the rewrite fails part-way: exit 1"
+  assert_true "…the new worktree was made" test -d "$UPG_NEW"
+  assert_contains "$RUN_ERR" "$UPG_NEW" "…the message names the new root"
+  assert_contains "$RUN_ERR" "DOC_SUPERPOWERS_ROOT is unchanged" "…and says the env hook still names the old one"
+  assert_eq "/old/place" "$(upg_env_root "$UPG_ENV")" "…which it does"
+  teardown
+}
+
 test_upgrade_never_runs_git_hooks() {
   echo "test: upgrade --check runs no git hook: not the root's own on its tag fetch, not a template's in the plugin path's scratch repository"
   setup
@@ -13700,6 +13719,7 @@ test_upgrade_ignores_hostile_and_mismatched_tags
 test_upgrade_orders_versions_per_field
 test_upgrade_codex_root_in_place
 test_upgrade_cache_and_fetch_failures
+test_upgrade_env_write_failure_names_the_new_root
 test_upgrade_never_runs_git_hooks
 
 test_claude_hook_contract_held() {
