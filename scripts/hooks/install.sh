@@ -458,6 +458,15 @@ CI options (install --ci / --all):
                             --resolve-test-workflow it has no effect; recorded
                             only when given, and --resolve-test-pr-input=
                             clears the record)
+  --resolve-pr-runs=approved
+                            a later step of yours approves the pull request's
+                            own runs, which GitHub holds for approval after a
+                            push with the job token: the comment then says the
+                            merge's checks start once they are approved, and
+                            asks for no push (default: empty, and the comment
+                            asks for a push; approved or empty only; recorded
+                            only when given, and --resolve-pr-runs= clears the
+                            record)
   --helpers=<true|false>    deprecated, and inert: the helpers ship exactly
                             while an installed workflow runs them.
                             --helpers=false only refuses doc-pr-release
@@ -465,7 +474,7 @@ CI options (install --ci / --all):
   --force                   also re-install workflows removed on purpose
   The choices are recorded (.claude/doc-superpowers/installed.json, commit it):
   a plain 'install --ci' reproduces the recorded set, branch, cron, strict,
-  marketplace URL and test workflow.
+  marketplace URL, test workflow and pr runs choice.
 
 Uninstall options (uninstall --ci):
   --workflows=<csv|all|none>  which workflows (default: all of them, and the
@@ -918,6 +927,7 @@ render_workflow() {
     -e "s|__PLUGIN_COMMIT__|$R_COMMIT|g" \
     -e "s|__RESOLVE_TEST_WORKFLOW__|$R_RTW|g" \
     -e "s|__RESOLVE_TEST_PR_INPUT__|$R_RPI|g" \
+    -e "s|__RESOLVE_PR_RUNS__|$R_RPR|g" \
     "$1"
 }
 
@@ -2476,6 +2486,12 @@ valid_input_name() {
   [[ "$1" =~ $re ]]
 }
 
+# --resolve-pr-runs' one value: a later step approves the pull request runs
+# the resolver's push holds (index-resolve.sh RESOLVE_PR_RUNS).
+valid_pr_runs() {
+  [ "$1" = approved ]
+}
+
 # plugin_marketplace_url: the plugin's own repository (plugin.json's
 # "repository", a URL or {url}) as a git URL ending in .git — where a
 # Claude-powered workflow fetches the plugin unless --marketplace-url names
@@ -2624,6 +2640,11 @@ preflight_ci() {
   [ "$OPT_RPI_SET" != 1 ] || CI_RPI="$OPT_RPI"
   [ -z "$CI_RPI" ] || valid_input_name "$CI_RPI" \
     || die "the recorded pull request input '$CI_RPI' is not an input name; pass --resolve-test-pr-input. Nothing was changed."
+  # Whether a later step approves the push's own pull request runs: the same.
+  CI_RPR="$STATE_RPR"
+  [ "$OPT_RPR_SET" != 1 ] || CI_RPR="$OPT_RPR"
+  [ -z "$CI_RPR" ] || valid_pr_runs "$CI_RPR" \
+    || die "the recorded pull request runs choice '$CI_RPR' is not approved; pass --resolve-pr-runs. Nothing was changed."
 
   CI_DISK=$(disk_workflows)
   # Every install --ci retires every retired workflow.
@@ -2709,7 +2730,7 @@ preflight_ci() {
 
   # sed-escaped once, in the main shell (the version lookup is cached here).
   R_BASE=$(sed_repl "$CI_BASE") R_CRON=$(sed_repl "$CI_CRON") R_STRICT=0 R_VERSION="" R_MARKET="" R_COMMIT=""
-  R_RTW=$(sed_repl "$CI_RTW") R_RPI=$(sed_repl "$CI_RPI")
+  R_RTW=$(sed_repl "$CI_RTW") R_RPI=$(sed_repl "$CI_RPI") R_RPR=$(sed_repl "$CI_RPR")
   if [ "$CI_STRICT" = true ]; then
     R_STRICT=1
   fi
@@ -2973,7 +2994,7 @@ install_ci() {
     echo "  Existing $w.yml found (not doc-superpowers-managed), skipping."
   done
   retire_workflows
-  state_set_choices "$CI_BASE" "$CI_CRON" "$CI_STRICT" "$CI_MARKET" "$CI_RTW" "$CI_RPI"
+  state_set_choices "$CI_BASE" "$CI_CRON" "$CI_STRICT" "$CI_MARKET" "$CI_RTW" "$CI_RPI" "$CI_RPR"
   vendor_sync install
   state_flush
 
@@ -2981,7 +3002,7 @@ install_ci() {
   nforeign=$(set -- $CI_FOREIGN; echo $#)
   nskip=$(set -- $CI_SKIP; echo $#)
   echo "CI/CD workflows: $installed installed, $refreshed refreshed, $nforeign skipped (existing non-managed), $nskip skipped (intentionally uninstalled)"
-  echo "  Choices (recorded in $STATE_FILE): base branch $CI_BASE, cron '$CI_CRON', strict $CI_STRICT${CI_MARKET:+, marketplace $CI_MARKET}${CI_RTW:+, test workflow $CI_RTW}${CI_RPI:+, pr input $CI_RPI}"
+  echo "  Choices (recorded in $STATE_FILE): base branch $CI_BASE, cron '$CI_CRON', strict $CI_STRICT${CI_MARKET:+, marketplace $CI_MARKET}${CI_RTW:+, test workflow $CI_RTW}${CI_RPI:+, pr input $CI_RPI}${CI_RPR:+, pr runs $CI_RPR}"
   if [ -n "$CI_RPI" ] && [ -z "$CI_RTW" ]; then
     echo "  note: --resolve-test-pr-input $CI_RPI has no effect without --resolve-test-workflow (nothing is dispatched); it is recorded for when one is named"
   fi
@@ -3107,7 +3128,7 @@ ck_choices() {
   s="${STATE_STRICT:-$(infer_choice strict)}"
   R_BASE=$(sed_repl "${b:-main}") R_CRON=$(sed_repl "${c:-0 9 * * 1}") R_STRICT=0
   [ "${s:-false}" != true ] || R_STRICT=1
-  R_RTW=$(sed_repl "$STATE_RTW") R_RPI=$(sed_repl "$STATE_RPI")
+  R_RTW=$(sed_repl "$STATE_RTW") R_RPI=$(sed_repl "$STATE_RPI") R_RPR=$(sed_repl "$STATE_RPR")
   R_VERSION="" R_MARKET="" R_COMMIT=""
   CK_MARKET_DONE=0 CK_VERSION_DONE=0
 }
@@ -3275,9 +3296,9 @@ status_ci() {
   done
   if [ "$state_ok" = 1 ] && [ "$STATE_HAS_CI" = 1 ]; then
     if $JSON; then
-      st_rec ci.choices "${STATE_BASE:-main}" "${STATE_CRON:-0 9 * * 1}" "${STATE_STRICT:-false}" "$STATE_MARKET" "$STATE_RTW" "$STATE_RPI"
+      st_rec ci.choices "${STATE_BASE:-main}" "${STATE_CRON:-0 9 * * 1}" "${STATE_STRICT:-false}" "$STATE_MARKET" "$STATE_RTW" "$STATE_RPI" "$STATE_RPR"
     else
-      echo "  choices: base branch ${STATE_BASE:-main}, cron '${STATE_CRON:-0 9 * * 1}', strict ${STATE_STRICT:-false}${STATE_MARKET:+, marketplace $STATE_MARKET}${STATE_RTW:+, test workflow $STATE_RTW}${STATE_RPI:+, pr input $STATE_RPI} ($STATE_FILE)"
+      echo "  choices: base branch ${STATE_BASE:-main}, cron '${STATE_CRON:-0 9 * * 1}', strict ${STATE_STRICT:-false}${STATE_MARKET:+, marketplace $STATE_MARKET}${STATE_RTW:+, test workflow $STATE_RTW}${STATE_RPI:+, pr input $STATE_RPI}${STATE_RPR:+, pr runs $STATE_RPR} ($STATE_FILE)"
     fi
   fi
   # On a ledger host, a claims workflow without the ledger set beside
@@ -3361,7 +3382,8 @@ _STATUS_JSON_JQ='
     elif $r[0] == "ci.choices" then .tiers.ci.choices = {base_branch: $r[1], cron: $r[2], ci_strict: ($r[3] == "true"),
                                                       marketplace_url: ($r[4] // "" | n),
                                                       resolve_test_workflow: ($r[5] // "" | n),
-                                                      resolve_test_pr_input: ($r[6] // "" | n)}
+                                                      resolve_test_pr_input: ($r[6] // "" | n),
+                                                      resolve_pr_runs: ($r[7] // "" | n)}
     elif $r[0] == "ci.ledger_gap" then .tiers.ci.claims_without_ledger_helpers += [$r[1]]
     elif $r[0] == "ci.helpers" then .tiers.ci.helpers[$r[1]] = ($r[2] | tonumber)
     elif $r[0] == "ci.removable" then .tiers.ci.removable_vendored += [$r[1]]
@@ -3924,6 +3946,8 @@ OPT_MARKET="" OPT_MARKET_SET=0
 OPT_RTW="" OPT_RTW_SET=0
 # --resolve-test-pr-input: the same, OPT_RPI_SET=1 once given.
 OPT_RPI="" OPT_RPI_SET=0
+# --resolve-pr-runs: the same, OPT_RPR_SET=1 once given.
+OPT_RPR="" OPT_RPR_SET=0
 WF_MODE=plain CSV_NAMES=""
 SEEN_CI_OPTS=""
 # --merge-driver-only: the git tier is the merge driver alone (no hook).
@@ -3941,7 +3965,7 @@ allowed() {
     upgrade:*) return 1 ;;
     *:--git | *:--claude | *:--ci | *:--all | *:--ledger | *:--ledger-claude | *:--search | *:--search-gate | *:--merge-driver-only) return 0 ;;
     status:--json | status:--check) return 0 ;;
-    install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force | install:--marketplace-url | install:--resolve-test-workflow | install:--resolve-test-pr-input) return 0 ;;
+    install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force | install:--marketplace-url | install:--resolve-test-workflow | install:--resolve-test-pr-input | install:--resolve-pr-runs) return 0 ;;
     uninstall:--workflows | uninstall:--transient) return 0 ;;
   esac
   return 1
@@ -3956,7 +3980,7 @@ while [ $# -gt 0 ]; do
     *) value="" has_value=0 ;;
   esac
   case "$name" in
-    --git | --claude | --ci | --all | --ledger | --ledger-claude | --search | --search-gate | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input | --to | --check) ;;
+    --git | --claude | --ci | --all | --ledger | --ledger-claude | --search | --search-gate | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input | --resolve-pr-runs | --to | --check) ;;
     *) usage_error "unknown option: $arg" ;;
   esac
   allowed "$name" || usage_error "$name does not apply to $COMMAND"
@@ -3968,7 +3992,7 @@ while [ $# -gt 0 ]; do
         shift
       fi
       ;;
-    --base-branch | --cron | --workflows | --helpers | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input)
+    --base-branch | --cron | --workflows | --helpers | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input | --resolve-pr-runs)
       if [ "$has_value" = 0 ]; then
         [ $# -gt 0 ] || die "$name requires a value"
         value="$1"
@@ -4018,6 +4042,11 @@ while [ $# -gt 0 ]; do
         || usage_error "invalid --resolve-test-pr-input '$value': a workflow_dispatch input name (a letter or _, then letters, digits, _ and -), or empty for none"
       OPT_RPI="$value" OPT_RPI_SET=1
       ;;
+    --resolve-pr-runs)
+      [ -z "$value" ] || valid_pr_runs "$value" \
+        || usage_error "invalid --resolve-pr-runs '$value': approved (a later step approves the pull request's own runs), or empty for none"
+      OPT_RPR="$value" OPT_RPR_SET=1
+      ;;
     --ci-strict)
       case "$has_value:$value" in
         0:* | 1:true) OPT_STRICT=true ;;
@@ -4042,7 +4071,7 @@ while [ $# -gt 0 ]; do
     --transient) TRANSIENT=true ;;
   esac
   case "$name" in
-    --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input)
+    --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input | --resolve-pr-runs)
       SEEN_CI_OPTS="${SEEN_CI_OPTS:+$SEEN_CI_OPTS }$name"
       ;;
   esac

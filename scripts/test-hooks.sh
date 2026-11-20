@@ -3335,6 +3335,55 @@ test_ci_resolve_test_pr_input_choice() {
   teardown
 }
 
+test_ci_resolve_pr_runs_choice() {
+  # --resolve-pr-runs=approved: a later step approves the runs the resolver's
+  # push holds, so its comment says the merge's own checks start then.
+  echo "test: --resolve-pr-runs — empty by default and not recorded; =approved rendered into RESOLVE_PR_RUNS, recorded, reproduced by a plain install, shown by status (and status --check reads no drift), cleared by an empty value; any other value exits 2 and writes nothing; an invalid recorded value exits 1"
+  local before bad
+  setup
+  inst install --ci --workflows=doc-index-resolve
+  assert_eq "0" "$IRC" "install --ci --workflows=doc-index-resolve exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'RESOLVE_PR_RUNS: ""' "not given: RESOLVE_PR_RUNS is empty"
+  assert_eq "null" "$(jq -r '.tiers.ci.resolve_pr_runs' .claude/doc-superpowers/installed.json)" "…and nothing is recorded"
+  inst install --ci --resolve-pr-runs=approved
+  assert_eq "0" "$IRC" "--resolve-pr-runs=approved exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'RESOLVE_PR_RUNS: "approved"' "rendered into RESOLVE_PR_RUNS"
+  assert_eq "approved" "$(jq -r '.tiers.ci.resolve_pr_runs' .claude/doc-superpowers/installed.json)" "recorded as .tiers.ci.resolve_pr_runs"
+  assert_contains "$IOUT" "pr runs approved" "the install's choices line names it"
+  inst install --ci
+  assert_eq "0" "$IRC" "a plain install --ci exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'RESOLVE_PR_RUNS: "approved"' "…and keeps the recorded choice"
+  inst install --ci --resolve-pr-runs approved
+  assert_eq "0" "$IRC" "--resolve-pr-runs approved (a separate value) exits 0"
+  inst status --ci
+  assert_contains "$IOUT" "pr runs approved" "status --ci shows the recorded choice"
+  inst status --ci --json
+  assert_eq "approved" "$(jq -r .tiers.ci.choices.resolve_pr_runs <<<"$IOUT" 2>/dev/null || true)" "…and status --json, under choices"
+  inst status --check --ci
+  assert_eq "0" "$IRC" "status --check --ci reads the rendered copy as current"
+  before=$(_tree_state)
+  for bad in 'yes' 'Approved' 'approved ' 'none' '$(x)' 'a"b'; do
+    inst install --ci "--resolve-pr-runs=$bad"
+    assert_eq "2" "$IRC" "'$bad' is not approved or empty: exit 2"
+  done
+  assert_contains "$IOUT" "--resolve-pr-runs" "…the error names the option"
+  assert_eq "$before" "$(_tree_state)" "…and nothing is written"
+  inst install --resolve-pr-runs=approved
+  assert_eq "2" "$IRC" "without --ci: exit 2 (it applies to the CI tier)"
+  printf '%s\n' "$(jq '.tiers.ci.resolve_pr_runs = "yes"' .claude/doc-superpowers/installed.json)" > .claude/doc-superpowers/installed.json
+  before=$(_tree_state)
+  inst install --ci
+  assert_eq "1" "$IRC" "an invalid recorded value: install --ci exits 1"
+  assert_contains "$IOUT" "pass --resolve-pr-runs" "…and names the flag that fixes it"
+  assert_eq "$before" "$(_tree_state)" "…writing nothing"
+  inst install --ci --resolve-pr-runs=
+  assert_eq "0" "$IRC" "--resolve-pr-runs= (empty) exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'RESOLVE_PR_RUNS: ""' "…and clears RESOLVE_PR_RUNS"
+  assert_eq "null" "$(jq -r '.tiers.ci.resolve_pr_runs' .claude/doc-superpowers/installed.json)" "…and the record"
+  assert_not_contains "$IOUT" "pr runs" "…and the choices line no longer names it"
+  teardown
+}
+
 test_install_help_lists_index_resolve_as_shell_optin() {
   echo "test: install.sh help — doc-index-resolve under 'shell, opt-in by name'; --workflows=all's help says it never installs it; --resolve-test-workflow is described"
   local out optin claude
@@ -3346,6 +3395,7 @@ test_install_help_lists_index_resolve_as_shell_optin() {
   assert_contains "$out" "never doc-index-resolve" "--workflows=all's help names it"
   assert_contains "$out" "--resolve-test-workflow" "the option is described"
   assert_contains "$out" "--resolve-test-pr-input" "…and --resolve-test-pr-input"
+  assert_contains "$out" "--resolve-pr-runs=approved" "…and --resolve-pr-runs=approved"
 }
 
 test_ci_index_resolve_vendors_the_driver() {
@@ -4406,6 +4456,7 @@ test_install_help_groups_publish_as_shell_optin
 test_ci_index_resolve_is_opt_in_by_name
 test_ci_resolve_test_workflow_choice
 test_ci_resolve_test_pr_input_choice
+test_ci_resolve_pr_runs_choice
 test_install_help_lists_index_resolve_as_shell_optin
 test_install_ci_helpers_false_still_wires_steps
 test_install_ci_version_comes_from_doc_tools

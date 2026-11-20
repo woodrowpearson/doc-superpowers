@@ -4256,7 +4256,7 @@ test_index_resolve_template() {
   echo "Test: doc-index-resolve.yml — a push to the base and workflow_dispatch (one optional pr), never a pull_request event; one job: contents, pull-requests and actions write, one run at a time never cancelled, a timeout, the pinned checkout with no persisted token and full history, the jq pin, then the step with its env"
   yaml_unavailable "index_resolve_template" && return 0
   local dir json
-  dir=$(installed_repo --ci --workflows=doc-index-resolve --resolve-test-workflow=tests.yml --resolve-test-pr-input=pr) \
+  dir=$(installed_repo --ci --workflows=doc-index-resolve --resolve-test-workflow=tests.yml --resolve-test-pr-input=pr --resolve-pr-runs=approved) \
     || { assert_true "install --ci --workflows=doc-index-resolve" false; return 0; }
   assert_eq "# doc-superpowers workflow v1" "$(head -n 1 "$dir/.github/workflows/doc-index-resolve.yml")" "the workflow marker on line 1"
   json=$(_yaml_json "$dir/.github/workflows/doc-index-resolve.yml")
@@ -4276,9 +4276,9 @@ test_index_resolve_template() {
   json=$(jq 'del(.jobs[].steps[] | select((.run // "") | endswith("install-jq.sh")))' <<<"$json")
   assert_eq "1" "$(jq '[.jobs[].steps[] | select(.run != null)] | length' <<<"$json")" "then one run: step"
   # shellcheck disable=SC2016  # the workflow's literal expressions
-  assert_eq '.github/scripts/doc-superpowers-steps/index-resolve.sh|main|${{ inputs.pr }}|tests.yml|pr|${{ github.token }}|${{ github.token }}' \
-    "$(jq -r '[.jobs[].steps[] | select(.run != null)] | first | "\(.run | rtrimstr("\n"))|\(.env.BASE_BRANCH)|\(.env.PR)|\(.env.TEST_WORKFLOW)|\(.env.TEST_PR_INPUT)|\(.env.DOC_SUPERPOWERS_GIT_TOKEN)|\(.env.GH_TOKEN)"' <<<"$json")" \
-    "…the step, with the base, the dispatch input, the recorded test workflow and its pull request input, and the job token for git and gh"
+  assert_eq '.github/scripts/doc-superpowers-steps/index-resolve.sh|main|${{ inputs.pr }}|tests.yml|pr|approved|${{ github.token }}|${{ github.token }}' \
+    "$(jq -r '[.jobs[].steps[] | select(.run != null)] | first | "\(.run | rtrimstr("\n"))|\(.env.BASE_BRANCH)|\(.env.PR)|\(.env.TEST_WORKFLOW)|\(.env.TEST_PR_INPUT)|\(.env.RESOLVE_PR_RUNS)|\(.env.DOC_SUPERPOWERS_GIT_TOKEN)|\(.env.GH_TOKEN)"' <<<"$json")" \
+    "…the step, with the base, the dispatch input, the recorded test workflow and its pull request input, the recorded pr runs choice, and the job token for git and gh"
 }
 
 test_index_resolve_usage_errors() {
@@ -4365,6 +4365,68 @@ test_index_resolve_checks_without_a_test_workflow() {
   assert_contains "$body" "git commit --allow-empty" "…and asks for a push"
   assert_not_contains "$body" "re-run" "…not a re-run"
   assert_contains "$(cat "$out.log")" "::warning::" "…with a warning in the run log"
+}
+
+# _ir_checks_line <out> <n> <env…>: pull request <n>, on branch b<n> (made
+# before the base moved), resolved with <env…> alone; prints the comment's
+# "- Checks:" line.
+_ir_checks_line() {
+  local out="$1" n="$2" rc
+  shift 2
+  _ir_pr "$n" "b$n" false
+  rc=0; _ir_run "$out" "$@" || rc=$?
+  [ "$rc" = 0 ] || echo "exit $rc"
+  jq -r .body "$IR_GH/posted-$n.json" 2>/dev/null | grep '^- Checks: ' || true
+  rm -f "$IR_GH/pull-$n.json" "$IR_GH/dispatches.log" "$IR_GH/fail-dispatch"
+}
+
+test_index_resolve_checks_by_default_are_unchanged() {
+  echo "Test: index-resolve.sh — RESOLVE_PR_RUNS unset or empty: each checks sentence is as before (none dispatched, one started, one that could not be started)"
+  _ir_fixture || { assert_true "fixture" false; return 0; }
+  local out push line
+  out="$(harness_mktemp_d ir)/out"
+  _ir_branch b1 src/a/1/ -
+  _ir_branch b2 src/a/2/ -
+  _ir_branch b3 src/a/3/ -
+  _ir_base src/b/new/
+  push="Before you merge, push a commit (\`git pull\`, then \`git commit --allow-empty -m 'Run the checks'\` and \`git push\`), or close and reopen the pull request."
+  line=$(_ir_checks_line "$out" 1 TEST_WORKFLOW=)
+  assert_eq "- Checks: A push by the workflow token starts no workflow, so this merge has no checks yet. $push" "$line" "none dispatched"
+  line=$(_ir_checks_line "$out" 2 TEST_WORKFLOW=tests.yml)
+  assert_eq "- Checks: The \`tests.yml\` workflow was started on this branch for the merge. The pull request's other checks start on your next push." "$line" "one started"
+  : > "$IR_GH/fail-dispatch"
+  line=$(_ir_checks_line "$out" 3 TEST_WORKFLOW=tests.yml RESOLVE_PR_RUNS=)
+  assert_eq "- Checks: The \`tests.yml\` workflow could not be started for the merge (the resolver's run log says why). $push" "$line" "one not started (RESOLVE_PR_RUNS empty)"
+}
+
+test_index_resolve_checks_when_runs_are_approved() {
+  echo "Test: index-resolve.sh — RESOLVE_PR_RUNS=approved: the comment says the merge's own checks start once the workflow approves them, and asks for no push, empty commit or close and reopen, whatever was dispatched; any other value: exit 3"
+  _ir_fixture || { assert_true "fixture" false; return 0; }
+  local out approved line body rc
+  out="$(harness_mktemp_d ir)/out"
+  _ir_branch b1 src/a/1/ -
+  _ir_branch b2 src/a/2/ -
+  _ir_branch b3 src/a/3/ -
+  _ir_base src/b/new/
+  approved="This merge's own checks start once the workflow approves them; pull before your next push."
+  line=$(_ir_checks_line "$out" 1 TEST_WORKFLOW= RESOLVE_PR_RUNS=approved)
+  assert_eq "- Checks: $approved" "$line" "none dispatched: the approved sentence alone"
+  body=$(jq -r .body "$IR_GH/posted-1.json" 2>/dev/null || true)
+  assert_not_contains "$body" "allow-empty" "…no empty commit"
+  assert_not_contains "$body" "Before you merge, push a commit" "…no push for checks"
+  assert_not_contains "$body" "close and reopen" "…no close and reopen"
+  assert_not_contains "$body" "no checks yet" "…and never that the merge has no checks"
+  line=$(_ir_checks_line "$out" 2 TEST_WORKFLOW=tests.yml RESOLVE_PR_RUNS=approved)
+  assert_eq "- Checks: The \`tests.yml\` workflow was started on this branch for the merge. $approved" "$line" "one started: the approved sentence"
+  body=$(jq -r .body "$IR_GH/posted-2.json" 2>/dev/null || true)
+  assert_not_contains "$body" "start on your next push" "…not that the other checks start on the next push"
+  assert_not_contains "$body" "allow-empty" "…and no empty commit"
+  : > "$IR_GH/fail-dispatch"
+  line=$(_ir_checks_line "$out" 3 TEST_WORKFLOW=tests.yml RESOLVE_PR_RUNS=approved)
+  assert_eq "- Checks: The \`tests.yml\` workflow could not be started for the merge (the resolver's run log says why). $approved" "$line" "one not started: the approved sentence, no push"
+  rc=0; _ir_run "$out" RESOLVE_PR_RUNS=yes || rc=$?
+  assert_eq "3" "$rc" "RESOLVE_PR_RUNS=yes: exit 3"
+  assert_contains "$(cat "$out.log")" "--resolve-pr-runs" "…naming the install option"
 }
 
 test_index_resolve_left_out_and_not_touched() {
@@ -4940,6 +5002,8 @@ test_index_resolve_template
 test_index_resolve_usage_errors
 test_index_resolve_merges_an_index_only_conflict
 test_index_resolve_checks_without_a_test_workflow
+test_index_resolve_checks_by_default_are_unchanged
+test_index_resolve_checks_when_runs_are_approved
 test_index_resolve_left_out_and_not_touched
 test_index_resolve_skips_what_the_driver_cannot_fix
 test_index_resolve_refuses_a_dropped_entry_and_workflow_files

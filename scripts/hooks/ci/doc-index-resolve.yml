@@ -9,11 +9,14 @@
 # gets the base merged in, with the index merged entry by entry by
 # doc-superpowers' merge driver (vendored beside the step). The merge is
 # pushed with a lease, so a branch that moved meanwhile is left alone. A push
-# with the job token starts no workflow, so the step dispatches the test
-# workflow install --ci --resolve-test-workflow=<file> recorded. That starts one
-# workflow only: the pull request's other checks wait for the author's next
-# push, which the comment asks for (a re-run would check the original commit,
-# not the merge). Each pull request it merged
+# with the job token starts no workflow run that is not held for approval, so
+# the step dispatches the test workflow install --ci
+# --resolve-test-workflow=<file> recorded. That starts one workflow only: the
+# pull request's other checks wait for the author's next push, which the
+# comment asks for (a re-run would check the original commit, not the merge).
+# With install --ci --resolve-pr-runs=approved, a later step of the project's
+# approves the pull request's own runs, and the comment says they start then
+# and asks for no push. Each pull request it merged
 # or could not merge gets one comment, updated in place. A pull request from a
 # fork, labelled no-index-resolve, or GitHub reports as mergeable is not
 # touched. It never runs on a pull_request event, so a pull request's own code
@@ -66,6 +69,7 @@ jobs:
           PR: ${{ inputs.pr }}
           TEST_WORKFLOW: "__RESOLVE_TEST_WORKFLOW__"
           TEST_PR_INPUT: "__RESOLVE_TEST_PR_INPUT__"
+          RESOLVE_PR_RUNS: "__RESOLVE_PR_RUNS__"
           DOC_SUPERPOWERS_GIT_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/doc-superpowers-steps/index-resolve.sh

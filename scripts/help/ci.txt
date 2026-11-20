@@ -8,6 +8,7 @@ Default:    off. setup leaves CI at none. "hooks install --ci" on its own
 Terminal:   doc-superpowers hooks install --ci [--workflows=<csv|all|none>]
               [--base-branch NAME] [--cron EXPR] [--ci-strict[=true|false]]
               [--resolve-test-workflow=<file>] [--resolve-test-pr-input=<name>]
+              [--resolve-pr-runs=approved]
             doc-superpowers setup --set ci.workflows=doc-freshness-pr
 Skill:      /doc-superpowers hooks install --ci
 Workflows:  11 templates.
