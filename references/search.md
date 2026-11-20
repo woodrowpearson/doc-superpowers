@@ -211,7 +211,7 @@ Four tools. Each returns text; anything that cannot be answered is one line star
 A `search` hit reads:
 
 ```
-doc-search · docs: semble potion-code-16M-v2 (+cloud: gemini-embedding-001) · code: semble 0.7.0 · 10 hits
+doc-search · docs: semble potion-code-16M-v2 (+cloud: gemini-embedding-001) · code: semble 0.7.3 · 10 hits
 1. [doc] docs/specs/SPEC-PAY-004.md:41-78 · Refunds › Rounding · spec
    <snippet, at most 6 lines>
    code: functions/src/refunds.ts, Sources/Payments/Refund.swift
