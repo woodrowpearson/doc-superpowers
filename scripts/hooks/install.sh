@@ -3509,14 +3509,21 @@ upg_notes() {
 }
 
 # upg_scan <notes file> <version>: refuse notes that do not open with
-# <version>; UPG_SEC is their newest security release ("" for none).
+# <version>; UPG_SEC is their newest security release ("" for none). A
+# security section above <version> (UPG_LATEST, for the newest tag's notes)
+# is dropped: a release is never newer than the tag whose notes carry it.
 upg_scan() {
-  local out first
+  local out first v
   out=$(LC_ALL=C awk "$_UPG_NOTES_AWK" <"$1") || upg_die "cannot read $1"
   first=$(printf '%s\n' "$out" | sed -n 's/^first //p')
   first=${first%%$'\n'*}
   [ "$first" = "$2" ] || upg_refuse "tag v$2 is not a release commit: its RELEASE-NOTES.md first release heading is $([ -n "$first" ] && printf 'v%s' "$(upg_safe "$first")" || printf 'missing')"
-  UPG_SEC=$(printf '%s\n' "$out" | awk '$1 == "release" && $3 == 1 { print $2 }' | upg_sort | tail -n 1)
+  UPG_SEC=""
+  while IFS= read -r v; do
+    if [ -n "$v" ] && ! upg_lt "$2" "$v"; then UPG_SEC=$v; fi
+  done <<UPG_SCAN
+$(printf '%s\n' "$out" | awk '$1 == "release" && $3 == 1 { print $2 }' | upg_sort)
+UPG_SCAN
 }
 
 # upg_store_cache <notes file> <tag>: the release-notes cache doc-search check

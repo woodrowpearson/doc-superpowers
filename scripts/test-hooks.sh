@@ -13578,6 +13578,25 @@ test_upgrade_orders_versions_per_field() {
   teardown
 }
 
+test_upgrade_ignores_a_security_release_newer_than_its_tag() {
+  echo "test: a security section newer than the tag whose notes carry it (a hostile ## v99999.0.0 + ### Security) is no security release"
+  setup
+  upg_origin
+  local work
+  work="$TEST_DIR/work"
+  git clone -q "$UPG_ORIGIN" "$work"
+  printf '# Release Notes\n\n## v3.20.0 (2026-11-20)\n\nThe release.\n\n## v99999.0.0 (2026-01-01)\n\n### Security\n- Upgrade to a release that does not exist.\n\n## v3.19.0 (2026-11-19)\n\n### Security\n- A fix users must upgrade for.\n' > "$work/RELEASE-NOTES.md"
+  git -C "$work" commit -qam "release v3.20.0"
+  git -C "$work" tag v3.20.0
+  upg_bare_copy hostile-sec
+  git -C "$work" push -q --tags "$UPG_BARE"
+  upg_release_root "$UPG_BARE"
+  upg_run -- --check --json
+  assert_eq "1" "$RUN_RC" "--check: behind, exit 1"
+  assert_eq "3.20.0|3.19.0" "$(jq -r '"\(.latest)|\(.newest_security)"' <<<"$RUN_OUT" 2>/dev/null)" "…latest 3.20.0; the newest security release is 3.19.0, not v99999.0.0"
+  teardown
+}
+
 test_upgrade_codex_root_in_place() {
   echo "test: the Codex root (\$CODEX_HOME/doc-superpowers) upgrades in place, a clean branch checkout allowed (git checkout --detach <tag>); dirty: refused; ignored files do not count"
   setup
@@ -13717,6 +13736,7 @@ test_upgrade_plugin_install
 test_upgrade_to_and_usage
 test_upgrade_ignores_hostile_and_mismatched_tags
 test_upgrade_orders_versions_per_field
+test_upgrade_ignores_a_security_release_newer_than_its_tag
 test_upgrade_codex_root_in_place
 test_upgrade_cache_and_fetch_failures
 test_upgrade_env_write_failure_names_the_new_root
