@@ -13770,6 +13770,15 @@ upg_env_root() {
   )
 }
 
+# upg_name_root [env hook]: the env hook (default UPG_ENV) holds one line,
+# DOC_SUPERPOWERS_ROOT set to UPG_ROOT, as the README's release-checkout
+# install writes it: the root a checkout upgrade moves (D6).
+upg_name_root() {
+  local f=${1:-$UPG_ENV}
+  mkdir -p "$(dirname "$f")"
+  printf "export DOC_SUPERPOWERS_ROOT='%s'\n" "$UPG_ROOT" > "$f"
+}
+
 # upg_tag_commit <repo> <tag>: the commit <tag> names.
 upg_tag_commit() {
   git -C "$1" rev-parse "$2^{commit}"
@@ -13814,11 +13823,13 @@ test_upgrade_check_reports_and_caches() {
 }
 
 test_upgrade_makes_a_sibling_release_worktree() {
-  echo "test: upgrade from a v3.18.0 release worktree — a detached worktree at <parent>/doc-superpowers-v3.19.0, the old root byte-identical, the env hook pointed at it; again from the new root: current"
+  echo "test: upgrade from a v3.18.0 release worktree the env hook names — a detached worktree at <parent>/doc-superpowers-v3.19.0, the old root byte-identical, the env hook pointed at it; again from the new root: current"
   setup
   upg_origin
   upg_release_root
   local before old
+  upg_name_root
+  cp "$UPG_ENV" "$TEST_DIR/env.orig"
   before=$(upg_snapshot "$UPG_ROOT")
   upg_run --
   assert_eq "0" "$RUN_RC" "upgrade: exit 0"
@@ -13826,8 +13837,8 @@ test_upgrade_makes_a_sibling_release_worktree() {
   assert_eq "$(upg_tag_commit "$UPG_ORIGIN" v3.19.0)" "$(git -C "$UPG_NEW" rev-parse HEAD 2>/dev/null)" "…at the tag's commit"
   assert_true "…detached" upg_detached "$UPG_NEW"
   assert_eq "$before" "$(upg_snapshot "$UPG_ROOT")" "the old root's files are byte-identical"
-  assert_eq "$UPG_NEW" "$(upg_env_root "$UPG_ENV")" "the env hook, created, sets DOC_SUPERPOWERS_ROOT to the new root"
-  assert_true "…no .bak for a file that did not exist" test ! -e "$UPG_ENV.bak"
+  assert_eq "$UPG_NEW" "$(upg_env_root "$UPG_ENV")" "the env hook sets DOC_SUPERPOWERS_ROOT to the new root"
+  assert_true "…its .bak the old file" cmp -s "$UPG_ENV.bak" "$TEST_DIR/env.orig"
   assert_true "…and it parses as sh" sh -n "$UPG_ENV"
   assert_contains "$RUN_OUT" "$UPG_NEW" "the output names the new root"
   assert_eq "v3.19.0" "$(jq -r .tag "$UPG_CACHE/release-notes.json" 2>/dev/null)" "the cache is written on upgrade too"
@@ -13850,7 +13861,7 @@ test_upgrade_rewrites_only_the_root_line() {
   upg_release_root
   local want custom
   mkdir -p "$(dirname "$UPG_ENV")"
-  printf '# doc-search settings\nUV_PYTHON=3.14\nexport DOC_SUPERPOWERS_ROOT=/old/place\nexport OTHER="a b"\n' > "$UPG_ENV"
+  printf '# doc-search settings\nUV_PYTHON=3.14\nexport DOC_SUPERPOWERS_ROOT="%s"\nexport OTHER="a b"\n' "$UPG_ROOT" > "$UPG_ENV"
   cp "$UPG_ENV" "$TEST_DIR/env.orig"
   upg_run --
   assert_eq "0" "$RUN_RC" "upgrade: exit 0"
@@ -13860,7 +13871,7 @@ test_upgrade_rewrites_only_the_root_line() {
   # The X= form, in the file DOC_SEARCH_ENV_FILE names.
   upg_release_root "" second
   custom="$TEST_DIR/my env.sh"
-  printf '  DOC_SUPERPOWERS_ROOT=/old\nUV_PYTHON=3.14\n' > "$custom"
+  printf "  DOC_SUPERPOWERS_ROOT='%s'\nUV_PYTHON=3.14\n" "$UPG_ROOT" > "$custom"
   upg_run DOC_SEARCH_ENV_FILE="$custom" --
   assert_eq "0" "$RUN_RC" "DOC_SEARCH_ENV_FILE: exit 0"
   want=$(printf "  DOC_SUPERPOWERS_ROOT='%s'\nUV_PYTHON=3.14" "$UPG_NEW")
@@ -13893,6 +13904,7 @@ test_upgrade_relinks_the_skill_link() {
   local link="$HOME/.claude/skills/doc-superpowers"
   mkdir -p "$HOME/.claude/skills"
   ln -s "$UPG_ROOT" "$link"
+  upg_name_root
   upg_run --
   assert_eq "0" "$RUN_RC" "upgrade: exit 0"
   assert_true "the link is still a link" test -L "$link"
@@ -13901,6 +13913,7 @@ test_upgrade_relinks_the_skill_link() {
   mkdir -p "$TEST_DIR/elsewhere"
   ln -s "$TEST_DIR/elsewhere" "$link"
   upg_release_root "" second
+  upg_name_root
   upg_run --
   assert_eq "0" "$RUN_RC" "a second root: exit 0"
   assert_eq "$TEST_DIR/elsewhere" "$(readlink "$link")" "a link elsewhere is left alone"
@@ -13933,6 +13946,49 @@ test_upgrade_refuses_a_dirty_or_branch_root() {
   upg_run -- --check
   assert_eq "1" "$RUN_RC" "--check on a branch checkout behind (main at v3.18.0): exit 1"
   assert_contains "$RUN_OUT" "fix: git -C '$UPG_BASE_P/doc-superpowers' pull" "…its fix is a pull, which upgrade does not refuse (check.py's PULL_FIX), the path sh-quoted"
+  teardown
+}
+
+test_upgrade_sibling_layout_only_for_the_env_hooks_root() {
+  echo "test: a checkout upgrade makes its sibling worktree only for the root the env hook's DOC_SUPERPOWERS_ROOT names (by its physical path), never into ~/.claude/skills: no env hook, one naming another root, or a root in ~/.claude/skills is refused (exit 3) and touches nothing; --check still reports"
+  setup
+  upg_origin
+  upg_release_root
+  upg_run --
+  assert_eq "3" "$RUN_RC" "no env hook: refused (exit 3)"
+  assert_contains "$RUN_ERR" "DOC_SUPERPOWERS_ROOT" "…naming the variable"
+  assert_true "…no new worktree" test ! -e "$UPG_NEW"
+  assert_true "…no env hook written" test ! -e "$UPG_ENV"
+  assert_true "…no cache" test ! -e "$UPG_CACHE"
+  mkdir -p "$(dirname "$UPG_ENV")"
+  printf 'export DOC_SUPERPOWERS_ROOT=/another/root\n' > "$UPG_ENV"
+  cp "$UPG_ENV" "$TEST_DIR/env.orig"
+  upg_run --
+  assert_eq "3" "$RUN_RC" "an env hook naming another root: refused (exit 3)"
+  assert_contains "$RUN_ERR" "/another/root" "…naming the root it names"
+  assert_true "…the env hook unchanged" cmp -s "$UPG_ENV" "$TEST_DIR/env.orig"
+  assert_true "…no .bak" test ! -e "$UPG_ENV.bak"
+  assert_true "…no new worktree" test ! -e "$UPG_NEW"
+  upg_run -- --check
+  assert_eq "1" "$RUN_RC" "--check there: still reports, exit 1 (behind)"
+  # A root named through a link to it is the same root.
+  ln -s "$UPG_ROOT" "$TEST_DIR/root link"
+  printf "export DOC_SUPERPOWERS_ROOT='%s'\n" "$TEST_DIR/root link" > "$UPG_ENV"
+  upg_run --
+  assert_eq "0" "$RUN_RC" "an env hook naming the root through a link: exit 0"
+  assert_true "…the new worktree made" test -f "$UPG_NEW/RELEASE-NOTES.md"
+  # A release checkout in ~/.claude/skills: its sibling would load as a second skill.
+  local skills="$HOME/.claude/skills"
+  mkdir -p "$skills"
+  git -C "$UPG_BASE/doc-superpowers" worktree add --detach "$skills/doc-superpowers" v3.18.0 >/dev/null 2>&1
+  UPG_ROOT="$skills/doc-superpowers"
+  upg_name_root
+  cp "$UPG_ENV" "$TEST_DIR/env.orig"
+  upg_run --
+  assert_eq "3" "$RUN_RC" "a root in ~/.claude/skills, named by the env hook: refused (exit 3)"
+  assert_contains "$RUN_ERR" ".claude/skills" "…and says why"
+  assert_true "…no sibling in ~/.claude/skills" test ! -e "$skills/doc-superpowers-v3.19.0"
+  assert_true "…the env hook unchanged" cmp -s "$UPG_ENV" "$TEST_DIR/env.orig"
   teardown
 }
 
@@ -13974,6 +14030,7 @@ test_upgrade_to_and_usage() {
   setup
   upg_origin
   upg_release_root
+  upg_name_root
   local bad
   upg_run -- --to v3.17.0
   assert_eq "3" "$RUN_RC" "--to an older tag: refused (exit 3)"
@@ -14018,6 +14075,7 @@ test_upgrade_ignores_hostile_and_mismatched_tags() {
   assert_eq "1" "$RUN_RC" "--check: exit 1"
   assert_contains "$RUN_OUT" "latest 3.19.0" "…the hostile and malformed tags are not releases"
   assert_eq "v3.19.0" "$(jq -r .tag "$UPG_CACHE/release-notes.json" 2>/dev/null)" "…the sidecar names v3.19.0"
+  upg_name_root
   upg_run --
   assert_eq "0" "$RUN_RC" "upgrade: exit 0"
   assert_true "…to v3.19.0" test -d "$UPG_NEW"
@@ -14226,10 +14284,13 @@ test_upgrade_refuses_a_writable_cache_dir() {
   upg_run -- --check
   assert_eq "3" "$RUN_RC" "a world-writable cache directory: refused (exit 3)"
   assert_eq "" "$(ls -A "$UPG_CACHE")" "…nothing written into it"
+  upg_name_root
+  cp "$UPG_ENV" "$TEST_DIR/env.orig"
   upg_run --
-  assert_eq "3" "$RUN_RC" "upgrade (no --check): refused, exit 3"
+  assert_eq "3" "$RUN_RC" "upgrade (no --check), from the root the env hook names: refused, exit 3"
+  assert_contains "$RUN_ERR" "writable by its group or others" "…for the cache directory"
   assert_true "…no worktree is made" test ! -e "$UPG_NEW"
-  assert_true "…no env hook is written" test ! -e "$UPG_ENV"
+  assert_true "…the env hook is unchanged" cmp -s "$UPG_ENV" "$TEST_DIR/env.orig"
   assert_eq "" "$(ls -A "$UPG_CACHE")" "…nothing written into the cache directory"
   chmod 755 "$UPG_CACHE"
   teardown
@@ -14240,8 +14301,7 @@ test_upgrade_env_write_failure_names_the_new_root() {
   setup
   upg_origin
   upg_release_root
-  mkdir -p "$(dirname "$UPG_ENV")"
-  printf 'export DOC_SUPERPOWERS_ROOT=/old/place\n' > "$UPG_ENV"
+  upg_name_root
   # The file can be written, its directory cannot: the rewrite's temp file fails.
   chmod 555 "$(dirname "$UPG_ENV")"
   upg_run --
@@ -14250,7 +14310,7 @@ test_upgrade_env_write_failure_names_the_new_root() {
   assert_true "…the new worktree was made" test -d "$UPG_NEW"
   assert_contains "$RUN_ERR" "$UPG_NEW" "…the message names the new root"
   assert_contains "$RUN_ERR" "DOC_SUPERPOWERS_ROOT is unchanged" "…and says the env hook still names the old one"
-  assert_eq "/old/place" "$(upg_env_root "$UPG_ENV")" "…which it does"
+  assert_eq "$UPG_ROOT" "$(upg_env_root "$UPG_ENV")" "…which it does"
   teardown
 }
 
@@ -14294,6 +14354,7 @@ test_upgrade_makes_a_sibling_release_worktree
 test_upgrade_rewrites_only_the_root_line
 test_upgrade_relinks_the_skill_link
 test_upgrade_refuses_a_dirty_or_branch_root
+test_upgrade_sibling_layout_only_for_the_env_hooks_root
 test_upgrade_plugin_install
 test_upgrade_to_and_usage
 test_upgrade_ignores_hostile_and_mismatched_tags

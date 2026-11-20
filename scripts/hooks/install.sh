@@ -3421,12 +3421,16 @@ status_json() {
 #   codex     ${CODEX_HOME:-~/.codex}/doc-superpowers, when it is a checkout
 #             whose top is itself (else none): checked out in place,
 #             git checkout --detach <tag>; a clean branch checkout is fine.
-#   checkout  any other git checkout whose top is the root (the one
-#             DOC_SUPERPOWERS_ROOT names): a new detached worktree,
-#             <parent>/doc-superpowers-v<version>, from the tag; the old root
-#             is left as it is. The env hook's DOC_SUPERPOWERS_ROOT line is
-#             rewritten, sh-quoted, after a .bak copy (one line: the export
-#             X= or the X= form kept; the file is created when absent), and
+#   checkout  any other git checkout whose top is the root, detached (a
+#             branch checkout follows its branch: refused, git pull its fix):
+#             a new detached worktree, <parent>/doc-superpowers-v<version>,
+#             from the tag; the old root is left as it is. Only for the root
+#             the env hook's DOC_SUPERPOWERS_ROOT names (the hook sourced as
+#             the launcher sources it, compared by physical path), and never
+#             with ~/.claude/skills as <parent>: else refused. The env hook's
+#             DOC_SUPERPOWERS_ROOT line is rewritten, sh-quoted, after a .bak
+#             copy (one line: the export X= or the X= form kept; one is
+#             appended when the hook sets it no such way), and
 #             ~/.claude/skills/doc-superpowers is relinked when it is a link
 #             that resolves inside the old root.
 # Tags are read by name only: vMAJOR.MINOR.PATCH, at most 9 digits a field,
@@ -3593,6 +3597,32 @@ upg_env_preflight() {
   { [ -f "$UPG_ENV" ] && [ -r "$UPG_ENV" ] && [ -w "$UPG_ENV" ]; } || upg_refuse "$UPG_ENV is not a file you can read and write"
   n=$(grep -cE "$UPG_ENV_RE" "$UPG_ENV" || true)
   [ "${n:-0}" -le 1 ] || upg_refuse "$UPG_ENV assigns DOC_SUPERPOWERS_ROOT on $n lines: keep one, then run upgrade again"
+}
+
+# upg_env_root: the DOC_SUPERPOWERS_ROOT the env hook sets, read as the
+# launcher reads it (sourced by sh when it parses, with the caller's value
+# unset, so the launcher runs it anyway); "" when it sets none.
+upg_env_root() {
+  { [ -f "$UPG_ENV" ] && [ -r "$UPG_ENV" ] && sh -n "$UPG_ENV" 2>/dev/null; } || return 0
+  # shellcheck disable=SC2016  # expands in the sh that sources the hook
+  env -u DOC_SUPERPOWERS_ROOT sh -c '. "$1" >/dev/null 2>&1; printf "%s" "${DOC_SUPERPOWERS_ROOT:-}"' upg-env-hook "$UPG_ENV" </dev/null 2>/dev/null || true
+}
+
+# upg_sibling_preflight: a checkout upgrade makes its sibling release worktree
+# only for the root reached through DOC_SUPERPOWERS_ROOT (plan D6), the one the
+# env hook it rewrites names, and never into ~/.claude/skills, where Claude
+# Code would load the sibling as a second skill.
+upg_sibling_preflight() {
+  local named named_p="" skills
+  named=$(upg_env_root)
+  [ -z "$named" ] || named_p=$(upg_phys "$named") || named_p=""
+  if [ -z "$named_p" ] || [ "$named_p" != "$UPG_ROOT" ]; then
+    upg_refuse "$UPG_ROOT is not the root DOC_SUPERPOWERS_ROOT names in $UPG_ENV ($([ -n "$named" ] && upg_safe "$named" || printf 'none')): upgrade adds a release worktree beside a checkout and points the env hook at it only for that root. Set DOC_SUPERPOWERS_ROOT=$(sh_squote "$UPG_ROOT") there, then run upgrade again"
+  fi
+  skills=$(upg_phys "${HOME:-/nonexistent}/.claude/skills") || skills=""
+  if [ -n "$skills" ] && [ "$(dirname "$UPG_ROOT")" = "$skills" ]; then
+    upg_refuse "$UPG_ROOT is in ~/.claude/skills, where the new release worktree beside it would load as a second skill: clone a release checkout elsewhere (git clone --branch vX.Y.Z $UPG_RELEASE_URL), point DOC_SUPERPOWERS_ROOT at it and link ~/.claude/skills/doc-superpowers to it (README → Installing without a plugin marketplace)"
+  fi
 }
 
 # upg_strip_url <url>: <url> without a user and password
@@ -3857,6 +3887,7 @@ cmd_upgrade() {
       if [ -e "$new" ] || [ -L "$new" ]; then
         upg_refuse "$new already exists: remove it, or point DOC_SUPERPOWERS_ROOT at it if it is that release"
       fi
+      upg_sibling_preflight
     fi
   fi
   upg_store_cache "$UPG_SCRATCH/latest.md" "v$UPG_LATEST"
