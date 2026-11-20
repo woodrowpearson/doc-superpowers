@@ -3409,6 +3409,14 @@ test_install_ci_version_comes_from_doc_tools() {
   assert_contains "$(cat .github/workflows/doc-release.yml 2>/dev/null)" 'DOC_SUPERPOWERS_MARKETPLACE_URL: ""' \
     "a plugin.json naming no repository: an empty marketplace URL, never an abort"
   assert_eq "1" "$(grep -c 'WARN.*DOC_SUPERPOWERS_MARKETPLACE_URL' <<<"$out" || true)" "…one WARN about it"
+  # doc-security-schedule reads the same URL, and fails each week without one.
+  rm -rf .github .claude
+  exit_code=0
+  out=$("$BASH_BIN" "$root/scripts/hooks/install.sh" install --ci --workflows=doc-security-schedule 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "doc-security-schedule from that copy: install exits 0"
+  assert_contains "$(cat .github/workflows/doc-security-schedule.yml 2>/dev/null)" 'DOC_SUPERPOWERS_MARKETPLACE_URL: ""' \
+    "…with an empty marketplace URL"
+  assert_eq "1" "$(grep -c 'WARN.*DOC_SUPERPOWERS_MARKETPLACE_URL.*doc-security-schedule' <<<"$out" || true)" "…one WARN, naming doc-security-schedule"
   rm -rf .github .claude "$root/RELEASE-NOTES.md"
   exit_code=0
   out=$("$BASH_BIN" "$root/scripts/hooks/install.sh" install --ci --workflows=doc-release 2>&1) || exit_code=$?

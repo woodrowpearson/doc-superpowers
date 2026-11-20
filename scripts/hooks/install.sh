@@ -428,10 +428,13 @@ CI options (install --ci / --all):
                             claims job on a claims check that cannot run (its
                             findings fail it either way)
   --marketplace-url URL     the git URL the Claude-powered workflows fetch the
-                            plugin from, at its release tag (default: the
-                            plugin's own repository, plugin.json's
-                            "repository"; recorded only when given, and
-                            --marketplace-url= clears the record). Use a mirror
+                            plugin from, at its release tag, and
+                            doc-security-schedule reads the release tags and
+                            notes from, failing each week when it is empty
+                            (default: the plugin's own repository,
+                            plugin.json's "repository"; recorded only when
+                            given, and --marketplace-url= clears the
+                            record). Use a mirror
                             your organization controls to keep the plugin's
                             home out of the project's files
   --resolve-test-workflow=<file>
@@ -2718,8 +2721,9 @@ preflight_ci() {
     fi
   done
   # Like the version: a plugin.json naming no usable repository does not
-  # abort the install. One WARN, an empty URL, and that workflow's plugin
-  # step fails with an ::error:: until it is re-installed with one.
+  # abort the install. One WARN, an empty URL, and each workflow that reads
+  # it (an AI workflow's plugin step, doc-security-schedule's fetch) fails
+  # with an ::error:: until it is re-installed with one.
   local market="$CI_MARKET"
   for w in $CI_RENDER; do
     if grep -q '__MARKETPLACE_URL__' "$SCRIPT_DIR/ci/$w.yml"; then
@@ -2727,7 +2731,7 @@ preflight_ci() {
       if [ -n "$market" ] && valid_marketplace_url "$market"; then
         R_MARKET=$(sed_repl "$market")
       else
-        echo "  WARN: $SKILL_DIR/.claude-plugin/plugin.json names no repository a workflow can fetch the plugin from ('$market'); the Claude-powered workflows get DOC_SUPERPOWERS_MARKETPLACE_URL \"\", and their plugin step fails until you re-install with --marketplace-url <git URL>" >&2
+        echo "  WARN: $SKILL_DIR/.claude-plugin/plugin.json names no repository a workflow can fetch the plugin from ('$market'); the workflows that read it get DOC_SUPERPOWERS_MARKETPLACE_URL \"\": the Claude-powered ones' plugin step fails, and doc-security-schedule fails each week, until you re-install with --marketplace-url <git URL>" >&2
       fi
       break
     fi
