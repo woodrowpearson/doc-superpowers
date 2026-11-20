@@ -436,7 +436,26 @@ case ${1:-} in
   check | gate) answer_check_gate "$@" ;;
 esac
 
-[ -n "$ROOT" ] || fail "cannot find doc-superpowers (set DOC_SUPERPOWERS_ROOT)"
+# No root: name the env hook to set DOC_SUPERPOWERS_ROOT in and a release
+# checkout to point it at, at the floor the project's requires names (">=X.Y.Z",
+# read without jq as config_required reads "required"; none: no --branch).
+if [ -z "$ROOT" ]; then
+  FLOOR=""
+  if [ -n "$TOP" ] && [ -f "$TOP/docs/search/config.json" ]; then
+    FLOOR=$(tr '\t\n\v\f\r' '     ' 2>/dev/null <"$TOP/docs/search/config.json" |
+      sed -n 's/.*"requires" *: *">=\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/p' | head -n 1)
+  fi
+  ENV_SHOWN=$ENV_HOOK
+  if [ -n "${HOME:-}" ]; then
+    case $ENV_HOOK in
+      "$HOME"/*)
+        # shellcheck disable=SC2088  # the tilde is the text shown, not expanded
+        ENV_SHOWN=$(printf '~/%s' "${ENV_HOOK#"$HOME"/}")
+        ;;
+    esac
+  fi
+  fail "cannot find doc-superpowers: set DOC_SUPERPOWERS_ROOT in $ENV_SHOWN to a release checkout (git clone ${FLOOR:+--branch v$FLOOR }https://github.com/woodrowpearson/doc-superpowers.git), or install the plugin"
+fi
 command -v uv >/dev/null 2>&1 || fail "uv not found (https://docs.astral.sh/uv/)"
 
 EXTRAS=""

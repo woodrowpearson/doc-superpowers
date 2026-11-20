@@ -80,6 +80,32 @@ See `.opencode/INSTALL.md` for details.
 gemini extensions install https://github.com/woodrowpearson/doc-superpowers
 ```
 
+### Installing without a plugin marketplace
+
+Without a marketplace, install a release checkout: a clone detached at a release tag, which `upgrade` can move to the next release.
+
+```bash
+git clone --branch v3.19.0 https://github.com/woodrowpearson/doc-superpowers.git ~/code/doc-superpowers-v3.19.0
+mkdir -p ~/.config/doc-search
+printf "export DOC_SUPERPOWERS_ROOT='%s'\n" ~/code/doc-superpowers-v3.19.0 >> ~/.config/doc-search/env.sh
+ln -s ~/code/doc-superpowers-v3.19.0 ~/.claude/skills/doc-superpowers   # optional: the skill in Claude Code
+```
+
+The doc-search launcher sources `~/.config/doc-search/env.sh` (or the file `DOC_SEARCH_ENV_FILE` names; `$XDG_CONFIG_HOME` moves the default), so `DOC_SUPERPOWERS_ROOT` there points every project's launcher at the checkout. With no root found, the launcher's error names that file and the clone line, at the floor the project's `docs/search/config.json` `requires` names.
+
+To upgrade, from the checkout itself:
+
+```bash
+bash "$DOC_SUPERPOWERS_ROOT/scripts/hooks/install.sh" upgrade --check   # exit 1: behind; names the newest security release
+bash "$DOC_SUPERPOWERS_ROOT/scripts/hooks/install.sh" upgrade           # or: upgrade --to vX.Y.Z
+```
+
+`upgrade` fetches the release tags from the checkout's `origin` and adds the release as a new detached worktree beside the old one, `~/code/doc-superpowers-v<version>`. The old checkout stays as it was. Then it rewrites the one `DOC_SUPERPOWERS_ROOT` line of the env hook, keeping a `.bak` copy first, and relinks `~/.claude/skills/doc-superpowers` when that link points inside the old checkout. It refuses, with exit 3, a checkout with uncommitted changes, one on a branch (a branch follows its branch with `git pull`), an older `--to` without `--force`, and a target directory that already exists. A fetch that fails exits 4. `--json` prints one JSON object.
+
+**The new release is a linked worktree of the old checkout:** it depends on the old checkout's `.git`. Keep the old directory while any release worktree uses it (`git -C <old> worktree list` lists them), or clone the release afresh and point `DOC_SUPERPOWERS_ROOT` at that.
+
+The Codex install (`~/.codex/doc-superpowers`) is upgraded in place, with `git checkout --detach <tag>`. A Claude Code plugin install is updated by `claude plugin update doc-superpowers`: `upgrade` refuses there, and `upgrade --check` still reports. Every run caches the newest tag's `RELEASE-NOTES.md` and a sidecar (`tag`, `fetched`, `source`) in `~/.cache/doc-superpowers/` (`$XDG_CACHE_HOME`), for `doc-search check`, which never fetches.
+
 ### skills.sh (`npx skills add`)
 
 Not supported. `npx skills add woodrowpearson/doc-superpowers` copies only the skill folder, `skills/doc-superpowers/` (its `SKILL.md`), and the skill needs `scripts/` and `references/` from two directories above it. A skills.sh install has neither, so the skill stops at its *Detect Bundled Tooling* step. Use one of the installs above.

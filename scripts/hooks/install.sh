@@ -250,12 +250,13 @@ Usage:
   install.sh install   [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [CI options]
   install.sh uninstall [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--workflows=<csv|all|none>] [--transient]
   install.sh status    [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--json]
+  install.sh upgrade   [--to vX.Y.Z] [--check] [--force] [--json]
   install.sh print-merge-driver
   install.sh help
 
-Every command acts on the repository holding the current directory, at its
-top level (a linked worktree or a submodule is its own top level). Nothing is
-ever written through a symbolic link.
+Every command but upgrade acts on the repository holding the current
+directory, at its top level (a linked worktree or a submodule is its own top
+level). Nothing is ever written through a symbolic link.
 
 Tiers:
   --git     Git hooks, where git runs them (git rev-parse --git-path hooks):
@@ -363,6 +364,32 @@ Machine-readable:
                       --search adds the doc-search set and --search-gate the
                       gate set (alone, when they are the only ones named)
   print-merge-driver  the merge.doc-index.driver value install --git registers
+
+Upgrade (the doc-superpowers install this installer runs from; it needs no
+repository):
+  upgrade   fetch the release tags (vX.Y.Z) from the install's origin and move
+            it to the newest one (or --to's). The Codex install
+            (~/.codex/doc-superpowers) is checked out in place at the tag (a
+            clean branch checkout is fine there). Any other git checkout gets a
+            new detached worktree, <parent>/doc-superpowers-v<version>, and is
+            itself left as it is; DOC_SUPERPOWERS_ROOT in the env hook
+            (~/.config/doc-search/env.sh, or \$DOC_SEARCH_ENV_FILE) is pointed
+            at the new one, a .bak first, and ~/.claude/skills/doc-superpowers
+            is relinked when it is a link into the old root. Refused (exit 3):
+            a Claude Code plugin install (claude plugin update
+            doc-superpowers updates it), uncommitted changes, a checkout on a
+            branch (the Codex install aside), an env hook that is a link or
+            assigns DOC_SUPERPOWERS_ROOT more than once, a target directory
+            that exists, an older --to without --force.
+  --check   whether the install is behind (exit 1) or current (exit 0), and
+            the newest security release; writes nothing but the cache
+  --to vX.Y.Z  that release instead of the newest; an older one needs --force
+  --json    one JSON object (schema doc-superpowers-upgrade/1)
+  Each run caches the newest tag's release notes and a sidecar (tag,
+  fetched, source) in ~/.cache/doc-superpowers/ (\$XDG_CACHE_HOME), which
+  doc-search check reads; a cache directory that is a link is refused.
+  Exit: 0 current or done, 1 behind (--check), 2 usage, 3 refused, 4 the
+  fetch failed.
 
 Hook output: DOC_SUPERPOWERS_ADVICE (else the advice key of
 .claude/doc-superpowers/hooks.conf) replaces the '/doc-superpowers <action>'
@@ -507,10 +534,15 @@ sh_squote() {
 
 WRITING=0   # 1 once the first write happened (preflight is over)
 _TMPS=()
+# Scratch directories (upgrade's), removed with everything in them.
+_TMPDIRS=()
 _cleanup() {
   local t
   for t in ${_TMPS[@]+"${_TMPS[@]}"}; do
     rm -f "$t"
+  done
+  for t in ${_TMPDIRS[@]+"${_TMPDIRS[@]}"}; do
+    rm -rf "$t"
   done
   return 0
 }
@@ -3178,6 +3210,500 @@ status_json() {
     --arg advice "${DOC_SUPERPOWERS_ADVICE:-}" "$_STATUS_JSON_JQ"
 }
 
+# --- Upgrade -------------------------------------------------------------------
+#
+# install.sh upgrade [--to vX.Y.Z] [--check] [--force] [--json] moves the
+# doc-superpowers install this installer runs from ($SKILL_DIR, never the
+# current repository) to a release tag, or with --check says whether it is
+# behind. It runs before enter_repo: it needs no repository. Three kinds:
+#   plugin    a root under ~/.claude/plugins/ or $CLAUDE_PLUGIN_CACHE. Claude
+#             Code owns it: upgrade refuses and names `claude plugin update
+#             doc-superpowers`. --check lists the tags at the marketplace
+#             clone's origin (~/.claude/plugins/marketplaces/<mkt>), else at
+#             plugin.json's repository, and fetches the newest one's notes into
+#             a scratch repository (a plugin copy has no .git).
+#   codex     ${CODEX_HOME:-~/.codex}/doc-superpowers: checked out in place,
+#             git checkout --detach <tag>; a clean branch checkout is fine.
+#   checkout  any other git checkout whose top is the root (the one
+#             DOC_SUPERPOWERS_ROOT names): a new detached worktree,
+#             <parent>/doc-superpowers-v<version>, from the tag; the old root
+#             is left as it is. The env hook's DOC_SUPERPOWERS_ROOT line is
+#             rewritten, sh-quoted, after a .bak copy (one line: the export
+#             X= or the X= form kept; the file is created when absent), and
+#             ~/.claude/skills/doc-superpowers is relinked when it is a link
+#             that resolves inside the old root.
+# Tags are read by name only: vMAJOR.MINOR.PATCH, at most 9 digits a field,
+# sorted per numeric field (launch.sh's order). A tag is a release only when
+# its own RELEASE-NOTES.md opens with its version (check-version's tag rule).
+# Fetched notes are data: an awk program reads their headings; nothing in
+# them runs. Each run caches the newest tag's notes and a sidecar (tag,
+# fetched, source) for doc-search check, which never fetches.
+#
+# Every refusal that needs no fetch comes first, so a refused run changes
+# nothing; git hooks never run (core.hooksPath=/dev/null). Exit: 0 current or
+# done · 1 behind (--check), or a failure part-way (the message says what was
+# done) · 2 usage · 3 refused · 4 the fetch failed.
+
+# The most of a RELEASE-NOTES.md read (doc_search.releases.MAX_NOTES_BYTES).
+UPG_MAX_NOTES=2000000
+UPG_RELEASE_URL="https://github.com/woodrowpearson/doc-superpowers.git"
+# An env hook line that assigns DOC_SUPERPOWERS_ROOT (the awk in upg_env_write
+# spells the same regex).
+UPG_ENV_RE='^[[:space:]]*(export[[:space:]]+)?DOC_SUPERPOWERS_ROOT='
+
+# The security-release marker, as doc_search.releases applies it: a
+# "## vX.Y.Z (YYYY-MM-DD)" section holding a "### Security" heading before the
+# next "## " heading; nothing inside a code fence counts (the fence rule is
+# doc-tools.sh's _AWK_FENCE, copied: this installer cannot source doc-tools.sh).
+# Prints "first <token>" for the first "## v<digit>" line (check-version's first
+# release heading), then "release <X.Y.Z> <0|1>" per release section, 1 when it
+# holds a security heading, in file order.
+# shellcheck disable=SC2016  # awk program, not shell expansion
+_UPG_NOTES_AWK='
+function dedent3(s,    k) {
+  for (k = 0; k < 3 && substr(s, 1, 1) == " "; k++) s = substr(s, 2)
+  return s
+}
+function fence(s,    t, c, n) {
+  t = dedent3(s)
+  c = substr(t, 1, 1)
+  if (c != "`" && c != "~") return 0
+  n = 0
+  while (substr(t, n + 1, 1) == c) n++
+  if (n < 3) return 0
+  if (fence_c == "") {
+    if (c == "`" && index(substr(t, n + 1), "`")) return 0
+    fence_c = c; fence_n = n
+    return 1
+  }
+  if (c == fence_c && n >= fence_n && substr(t, n + 1) ~ /^[[:space:]]*$/) {
+    fence_c = ""; fence_n = 0
+    return 1
+  }
+  return 0
+}
+function short_fields(v,    p, k, i) {
+  k = split(v, p, ".")
+  for (i = 1; i <= k; i++) if (length(p[i]) > 9) return 0
+  return 1
+}
+{ sub(/\r$/, "") }
+fence($0) || fence_c != "" { next }
+first == "" && /^## v[0-9]/ {
+  first = substr($0, 5)
+  sub(/[[:space:]].*$/, "", first)
+  print "first " first
+}
+$0 == "##" || /^## / {
+  cur = 0
+  if ($0 ~ /^## v[0-9]+\.[0-9]+\.[0-9]+ \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)$/) {
+    v = substr($0, 5)
+    sub(/ .*$/, "", v)
+    if (short_fields(v)) { n++; ver[n] = v; sec[n] = 0; cur = n }
+  }
+  next
+}
+cur && /^### Security[ \t]*$/ { sec[cur] = 1 }
+END { for (i = 1; i <= n; i++) print "release " ver[i] " " sec[i] }
+'
+
+upg_refuse() {
+  echo "ERROR: $*" >&2
+  echo "Nothing was changed." >&2
+  exit 3
+}
+
+upg_fetch_failed() {
+  echo "ERROR: $*" >&2
+  exit 4
+}
+
+# upg_safe <text>: <text> with control characters dropped and cut to 60
+# characters, for a message (it may come from fetched notes).
+upg_safe() {
+  printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177' | cut -c 1-60
+}
+
+# upg_json_str <text>: <text> as a JSON string (control characters dropped).
+upg_json_str() {
+  printf '"%s"' "$(printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177' | sed 's/\\/\\\\/g; s/"/\\"/g')"
+}
+
+# upg_json_opt <text>: upg_json_str, or null for "".
+upg_json_opt() {
+  if [ -n "$1" ]; then upg_json_str "$1"; else printf 'null'; fi
+}
+
+upg_phys() {
+  (cd "$1" 2>/dev/null && pwd -P)
+}
+
+# upg_under <path> <dir>: <path> is <dir> or inside it.
+upg_under() {
+  case "$1" in
+    "$2" | "$2"/*) return 0 ;;
+  esac
+  return 1
+}
+
+upg_sort() {
+  sort -t. -k1,1n -k2,2n -k3,3n
+}
+
+# upg_versions: tag names on stdin → the release versions, without the v, sorted.
+upg_versions() {
+  { grep -xE 'v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}' || true; } | sed 's/^v//' | upg_sort
+}
+
+# upg_lt <a> <b>: version <a> is below <b>.
+upg_lt() {
+  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | upg_sort | head -n 1)" = "$1" ]
+}
+
+# upg_kind: UPG_ROOT (the physical root), UPG_KIND (plugin, codex, checkout or
+# none) and, for a plugin install, UPG_MKT (its marketplace's name).
+upg_kind() {
+  local plugins cache codex top rel
+  UPG_ROOT=$(upg_phys "$SKILL_DIR") || upg_refuse "cannot enter $SKILL_DIR"
+  UPG_MKT=""
+  plugins=$(upg_phys "${HOME:-/nonexistent}/.claude/plugins") || plugins=""
+  cache=$(upg_phys "${CLAUDE_PLUGIN_CACHE:-${HOME:-/nonexistent}/.claude/plugins/cache}") || cache=""
+  codex=$(upg_phys "${CODEX_HOME:-${HOME:-/nonexistent}/.codex}/doc-superpowers") || codex=""
+  if [ -n "$plugins" ] && upg_under "$UPG_ROOT" "$plugins"; then
+    UPG_KIND=plugin
+    case "$UPG_ROOT" in
+      "$plugins"/marketplaces/* | "$plugins"/cache/*)
+        rel=${UPG_ROOT#"$plugins"/*/}
+        UPG_MKT=${rel%%/*}
+        ;;
+    esac
+  elif [ -n "$cache" ] && upg_under "$UPG_ROOT" "$cache"; then
+    UPG_KIND=plugin
+    rel=${UPG_ROOT#"$cache"/}
+    UPG_MKT=${rel%%/*}
+  elif [ -n "$codex" ] && [ "$codex" = "$UPG_ROOT" ]; then
+    UPG_KIND=codex
+  elif top=$(git -C "$UPG_ROOT" rev-parse --show-toplevel 2>/dev/null) && [ "$(upg_phys "$top")" = "$UPG_ROOT" ]; then
+    UPG_KIND=checkout
+  else
+    UPG_KIND=none
+  fi
+}
+
+# upg_fix: the command that upgrades this install.
+upg_fix() {
+  local p="$UPG_ROOT/scripts/hooks/install.sh"
+  if [ "$UPG_KIND" = plugin ]; then
+    printf 'claude plugin update doc-superpowers'
+  elif [[ "$p" =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]]; then
+    printf 'bash %s upgrade' "$p"
+  else
+    printf 'bash %s upgrade' "$(sh_squote "$p")"
+  fi
+}
+
+# upg_clean: refuse a root with uncommitted changes (ignored files do not count).
+upg_clean() {
+  local st
+  st=$(git -C "$UPG_ROOT" status --porcelain 2>/dev/null) || upg_refuse "cannot read the state of $UPG_ROOT (git status)"
+  [ -z "$st" ] || upg_refuse "$UPG_ROOT has uncommitted changes or untracked files (git -C $(sh_squote "$UPG_ROOT") status): commit, stash or remove them, then run upgrade again"
+}
+
+upg_env_file() {
+  UPG_ENV=${DOC_SEARCH_ENV_FILE:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/doc-search/env.sh}
+  case $UPG_ENV in
+    */*) ;;
+    *) UPG_ENV=./$UPG_ENV ;;
+  esac
+}
+
+# upg_env_preflight: refuse an env hook the rewrite cannot change safely.
+upg_env_preflight() {
+  local n
+  if [ -z "${DOC_SEARCH_ENV_FILE:-}" ] && [ -z "${XDG_CONFIG_HOME:-}" ] && [ -z "${HOME:-}" ]; then
+    upg_refuse "HOME is not set: the env hook goes in ~/.config/doc-search/env.sh (or set XDG_CONFIG_HOME or DOC_SEARCH_ENV_FILE)"
+  fi
+  upg_env_file
+  [ ! -L "$UPG_ENV" ] || upg_refuse "$UPG_ENV is a symbolic link, and the upgrade never writes through one: set DOC_SEARCH_ENV_FILE to the file it points to, or change its DOC_SUPERPOWERS_ROOT line by hand after a --check"
+  [ ! -L "$UPG_ENV.bak" ] || upg_refuse "$UPG_ENV.bak is a symbolic link, and the upgrade never writes through one: remove it"
+  [ -e "$UPG_ENV" ] || return 0
+  { [ -f "$UPG_ENV" ] && [ -r "$UPG_ENV" ] && [ -w "$UPG_ENV" ]; } || upg_refuse "$UPG_ENV is not a file you can read and write"
+  n=$(grep -cE "$UPG_ENV_RE" "$UPG_ENV" || true)
+  [ "${n:-0}" -le 1 ] || upg_refuse "$UPG_ENV assigns DOC_SUPERPOWERS_ROOT on $n lines: keep one, then run upgrade again"
+}
+
+# upg_fetch: the release versions (UPG_VERSIONS, sorted) and where they came
+# from (UPG_SOURCE); UPG_GIT is the git that reads their notes.
+upg_fetch() {
+  local mkt url="" top tags
+  if [ "$UPG_KIND" != plugin ]; then
+    UPG_SOURCE=$(git -C "$UPG_ROOT" remote get-url origin 2>/dev/null) || upg_fetch_failed "$UPG_ROOT has no origin remote to fetch the release tags from"
+    GIT_TERMINAL_PROMPT=0 git -C "$UPG_ROOT" fetch --quiet --tags origin </dev/null \
+      || upg_fetch_failed "cannot fetch the release tags from $UPG_SOURCE (git -C $(sh_squote "$UPG_ROOT") fetch --tags origin)"
+    UPG_GIT=(git -C "$UPG_ROOT")
+    UPG_VERSIONS=$(git -C "$UPG_ROOT" tag --list | upg_versions)
+    return 0
+  fi
+  if [ -n "$UPG_MKT" ]; then
+    mkt="${HOME:-/nonexistent}/.claude/plugins/marketplaces/$UPG_MKT"
+    if top=$(git -C "$mkt" rev-parse --show-toplevel 2>/dev/null) && [ "$(upg_phys "$top")" = "$(upg_phys "$mkt")" ]; then
+      url=$(git -C "$mkt" remote get-url origin 2>/dev/null) || url=""
+    fi
+  fi
+  [ -n "$url" ] || url=$(plugin_marketplace_url)
+  [ -n "$url" ] || upg_fetch_failed "no repository to fetch the release tags from: no marketplace clone with an origin, and plugin.json names none"
+  UPG_SOURCE=$url
+  git init -q --bare "$UPG_SCRATCH/tags.git" || upg_fetch_failed "cannot create a scratch repository in $UPG_SCRATCH"
+  UPG_GIT=(git --git-dir="$UPG_SCRATCH/tags.git")
+  tags=$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags --refs -- "$url" </dev/null) \
+    || upg_fetch_failed "cannot list the release tags at $url (git ls-remote --tags)"
+  UPG_VERSIONS=$(printf '%s\n' "$tags" | awk '{ sub(/^refs\/tags\//, "", $2); print $2 }' | upg_versions)
+}
+
+# upg_notes <version> <out>: RELEASE-NOTES.md at tag v<version>, at most
+# UPG_MAX_NOTES bytes of it.
+upg_notes() {
+  if [ "$UPG_KIND" = plugin ]; then
+    GIT_TERMINAL_PROMPT=0 "${UPG_GIT[@]}" fetch --quiet --depth 1 -- "$UPG_SOURCE" "refs/tags/v$1:refs/tags/v$1" </dev/null \
+      || upg_fetch_failed "cannot fetch tag v$1 from $UPG_SOURCE"
+  fi
+  "${UPG_GIT[@]}" show "refs/tags/v$1:RELEASE-NOTES.md" >"$2.raw" 2>/dev/null \
+    || upg_refuse "tag v$1 has no RELEASE-NOTES.md: it is not a release commit"
+  head -c "$UPG_MAX_NOTES" <"$2.raw" >"$2" || die "cannot read the notes of v$1"
+}
+
+# upg_scan <notes file> <version>: refuse notes that do not open with
+# <version>; UPG_SEC is their newest security release ("" for none).
+upg_scan() {
+  local out first
+  out=$(LC_ALL=C awk "$_UPG_NOTES_AWK" <"$1") || die "cannot read $1"
+  first=$(printf '%s\n' "$out" | sed -n 's/^first //p')
+  first=${first%%$'\n'*}
+  [ "$first" = "$2" ] || upg_refuse "tag v$2 is not a release commit: its RELEASE-NOTES.md first release heading is $([ -n "$first" ] && printf 'v%s' "$(upg_safe "$first")" || printf 'missing')"
+  UPG_SEC=$(printf '%s\n' "$out" | awk '$1 == "release" && $3 == 1 { print $2 }' | upg_sort | tail -n 1)
+}
+
+# upg_store_cache <notes file> <tag>: the release-notes cache doc-search check
+# reads, each file written beside it and moved into place.
+upg_store_cache() {
+  local src scheme rest auth fetched tn tj
+  if [ -z "${XDG_CACHE_HOME:-}" ] && [ -z "${HOME:-}" ]; then
+    upg_refuse "neither XDG_CACHE_HOME nor HOME is set: no place for the release-notes cache"
+  fi
+  UPG_CACHE_DIR="${XDG_CACHE_HOME:-${HOME:-}/.cache}/doc-superpowers"
+  [ ! -L "$UPG_CACHE_DIR" ] || upg_refuse "$UPG_CACHE_DIR is a symbolic link, and the release-notes cache is never written through one: remove it, then run upgrade again"
+  mkdir -p "$UPG_CACHE_DIR" || die "cannot create $UPG_CACHE_DIR"
+  [ -O "$UPG_CACHE_DIR" ] || upg_refuse "$UPG_CACHE_DIR is not your own directory: the release-notes cache must be"
+  # The source without a user and password (https://user:token@host/…).
+  src=$UPG_SOURCE
+  case $src in
+    *://*)
+      scheme=${src%%://*}
+      rest=${src#*://}
+      auth=${rest%%/*}
+      case $auth in
+        *@*) src="$scheme://${auth##*@}${rest#"$auth"}" ;;
+      esac
+      ;;
+  esac
+  UPG_CACHE_SOURCE=$src
+  fetched=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  tn=$(mktemp "$UPG_CACHE_DIR/.release-notes.md.XXXXXX") || die "cannot create a temp file in $UPG_CACHE_DIR"
+  _TMPS+=("$tn")
+  tj=$(mktemp "$UPG_CACHE_DIR/.release-notes.json.XXXXXX") || die "cannot create a temp file in $UPG_CACHE_DIR"
+  _TMPS+=("$tj")
+  cat "$1" >"$tn" || die "cannot write $tn"
+  printf '{"tag": %s, "fetched": %s, "source": %s}\n' "$(upg_json_str "$2")" "$(upg_json_str "$fetched")" \
+    "$(upg_json_str "$src")" >"$tj" || die "cannot write $tj"
+  chmod 644 "$tn" "$tj" || die "cannot chmod the release-notes cache"
+  mv -f "$tn" "$UPG_CACHE_DIR/release-notes.md" || die "cannot write $UPG_CACHE_DIR/release-notes.md"
+  mv -f "$tj" "$UPG_CACHE_DIR/release-notes.json" || die "cannot write $UPG_CACHE_DIR/release-notes.json"
+}
+
+# upg_env_write <new root>: the env hook's DOC_SUPERPOWERS_ROOT line set to
+# <new root> (appended, or the file created, when there is none).
+upg_env_write() {
+  local line dir tmp mode=644
+  line="DOC_SUPERPOWERS_ROOT=$(sh_squote "$1")"
+  dir=$(dirname "$UPG_ENV")
+  mkdir -p "$dir" || die "cannot create $dir"
+  tmp=$(mktemp "$dir/.env.sh.XXXXXX") || die "cannot create a temp file in $dir"
+  _TMPS+=("$tmp")
+  if [ -f "$UPG_ENV" ]; then
+    mode=$(file_mode "$UPG_ENV") || mode=644
+    cp -p "$UPG_ENV" "$UPG_ENV.bak" || die "cannot write $UPG_ENV.bak"
+    if grep -qE "$UPG_ENV_RE" "$UPG_ENV"; then
+      # shellcheck disable=SC2016  # awk program, not shell expansion
+      UPG_LINE=$line awk '
+        /^[[:space:]]*(export[[:space:]]+)?DOC_SUPERPOWERS_ROOT=/ {
+          match($0, /^[[:space:]]*(export[[:space:]]+)?/)
+          print substr($0, 1, RLENGTH) ENVIRON["UPG_LINE"]
+          next
+        }
+        { print }' <"$UPG_ENV" >"$tmp" || die "cannot rewrite $UPG_ENV"
+    else
+      cat "$UPG_ENV" >"$tmp" || die "cannot read $UPG_ENV"
+      if [ -n "$(tail -c 1 "$UPG_ENV")" ]; then
+        echo >>"$tmp"
+      fi
+      printf 'export %s\n' "$line" >>"$tmp"
+    fi
+  else
+    printf '# doc-search: the per-user env hook (the launcher sources it)\nexport %s\n' "$line" >"$tmp"
+  fi
+  sh -n "$tmp" 2>/dev/null || die "the rewritten $UPG_ENV would not parse as sh: left as it was"
+  chmod "$mode" "$tmp" || die "cannot chmod $tmp"
+  mv -f "$tmp" "$UPG_ENV" || die "cannot replace $UPG_ENV"
+}
+
+# upg_relink <new root>: ~/.claude/skills/doc-superpowers, when it is a link
+# that resolves inside the old root, pointed at the same place in <new root>.
+upg_relink() {
+  local link="${HOME:-}/.claude/skills/doc-superpowers" to
+  [ -n "${HOME:-}" ] && [ -L "$link" ] || return 0
+  to=$(upg_phys "$link") || return 0
+  upg_under "$to" "$UPG_ROOT" || return 0
+  ln -sfn "$1${to#"$UPG_ROOT"}" "$link" || die "cannot relink $link"
+  echo "  relinked $link -> $1${to#"$UPG_ROOT"}"
+}
+
+# upg_report <action> <new root> (JSON, or text for check and current).
+upg_report() {
+  local fix=""
+  $UPG_BEHIND && fix=$(upg_fix)
+  if $JSON; then
+    printf '{"schema": "doc-superpowers-upgrade/1", "kind": %s, "root": %s, "installed": %s, "latest": %s, "target": %s, "newest_security": %s, "behind": %s, "below_security": %s, "action": %s, "new_root": %s, "fix": %s, "source": %s, "cache": %s}\n' \
+      "$(upg_json_str "$UPG_KIND")" "$(upg_json_str "$UPG_ROOT")" "$(upg_json_str "$UPG_INSTALLED")" \
+      "$(upg_json_str "$UPG_LATEST")" "$(upg_json_str "$UPG_TARGET")" "$(upg_json_opt "$UPG_NEWEST_SEC")" \
+      "$UPG_BEHIND" "$UPG_BELOW" "$(upg_json_str "$1")" "$(upg_json_opt "$2")" "$(upg_json_opt "$fix")" \
+      "$(upg_json_str "$UPG_CACHE_SOURCE")" "$(upg_json_str "$UPG_CACHE_DIR")"
+    return 0
+  fi
+  [ "$1" = upgraded ] && return 0
+  echo "doc-superpowers ($UPG_KIND install: $UPG_ROOT)"
+  echo "  installed $UPG_INSTALLED"
+  echo "  latest $UPG_LATEST"
+  [ "$UPG_TARGET" = "$UPG_LATEST" ] || echo "  target $UPG_TARGET"
+  echo "  newest security ${UPG_NEWEST_SEC:-none}"
+  if $UPG_BEHIND; then
+    echo "  behind: v$UPG_TARGET is available$($UPG_BELOW && printf '; below security release %s' "$UPG_NEWEST_SEC")"
+    echo "  fix: $fix"
+  elif $UPG_BELOW; then
+    echo "  below security release $UPG_NEWEST_SEC"
+  elif upg_lt "$UPG_LATEST" "$UPG_INSTALLED"; then
+    echo "  current: $UPG_INSTALLED is newer than the newest release"
+  else
+    echo "  current: v$UPG_TARGET"
+  fi
+  echo "  cache: $UPG_CACHE_DIR/release-notes.md (v$UPG_LATEST, from $UPG_CACHE_SOURCE)"
+}
+
+cmd_upgrade() {
+  local new="" have
+  # The install's own git, never a caller's (a hook's GIT_DIR, say).
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_NAMESPACE
+  upg_kind
+  [ "$UPG_KIND" != none ] || upg_refuse "$UPG_ROOT is not a git checkout of its own, a Claude Code plugin install or the Codex install, so there is nothing to upgrade in place: install a release checkout (git clone --branch vX.Y.Z $UPG_RELEASE_URL)"
+  UPG_INSTALLED=$("$BASH" "$DOC_TOOLS" tools version 2>/dev/null) || UPG_INSTALLED=""
+  [[ "$UPG_INSTALLED" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || upg_refuse "cannot read the installed version (the first release heading of $UPG_ROOT/RELEASE-NOTES.md)"
+  # Every refusal that needs no fetch, first.
+  if ! $UPG_CHECK; then
+    case $UPG_KIND in
+      plugin)
+        upg_refuse "doc-superpowers $UPG_INSTALLED here is a Claude Code plugin install ($UPG_ROOT), which Claude Code updates: claude plugin update doc-superpowers (upgrade --check says whether it is behind)"
+        ;;
+      codex) upg_clean ;;
+      checkout)
+        upg_clean
+        if git -C "$UPG_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1; then
+          upg_refuse "$UPG_ROOT is on branch $(git -C "$UPG_ROOT" symbolic-ref --short -q HEAD): a branch checkout follows its branch (git pull). upgrade moves a release checkout, one detached at a tag (git clone --branch vX.Y.Z $UPG_RELEASE_URL)"
+        fi
+        upg_env_preflight
+        ;;
+    esac
+  fi
+  UPG_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/doc-superpowers-upgrade.XXXXXX") || die "cannot create a scratch directory"
+  _TMPDIRS+=("$UPG_SCRATCH")
+  upg_fetch
+  [ -n "$UPG_VERSIONS" ] || upg_refuse "$UPG_SOURCE has no release tag (vX.Y.Z)"
+  UPG_LATEST=${UPG_VERSIONS##*$'\n'}
+  UPG_TARGET=$UPG_LATEST
+  if [ -n "$UPG_TO" ]; then
+    UPG_TARGET=${UPG_TO#v}
+    case $'\n'"$UPG_VERSIONS"$'\n' in
+      *$'\n'"$UPG_TARGET"$'\n'*) ;;
+      *) upg_refuse "$UPG_TO is not a release tag at $UPG_SOURCE" ;;
+    esac
+  fi
+  # The newest tag's notes: the cache, and the newest security release.
+  upg_notes "$UPG_LATEST" "$UPG_SCRATCH/latest.md"
+  upg_scan "$UPG_SCRATCH/latest.md" "$UPG_LATEST"
+  UPG_NEWEST_SEC=$UPG_SEC
+  if [ "$UPG_TARGET" != "$UPG_LATEST" ]; then
+    upg_notes "$UPG_TARGET" "$UPG_SCRATCH/target.md"
+    upg_scan "$UPG_SCRATCH/target.md" "$UPG_TARGET"
+  fi
+  UPG_BEHIND=false UPG_BELOW=false
+  upg_lt "$UPG_INSTALLED" "$UPG_TARGET" && UPG_BEHIND=true
+  [ -n "$UPG_NEWEST_SEC" ] && upg_lt "$UPG_INSTALLED" "$UPG_NEWEST_SEC" && UPG_BELOW=true
+  if ! $UPG_CHECK; then
+    if [ -n "$UPG_TO" ] && upg_lt "$UPG_TARGET" "$UPG_INSTALLED" && ! $FORCE; then
+      upg_refuse "$UPG_TO is older than the installed $UPG_INSTALLED: add --force to go back to it"
+    fi
+    if [ "$UPG_KIND" = checkout ] && [ "$UPG_TARGET" != "$UPG_INSTALLED" ]; then
+      new="$(dirname "$UPG_ROOT")/doc-superpowers-v$UPG_TARGET"
+      if [ -e "$new" ] || [ -L "$new" ]; then
+        upg_refuse "$new already exists: remove it, or point DOC_SUPERPOWERS_ROOT at it if it is that release"
+      fi
+    fi
+  fi
+  upg_store_cache "$UPG_SCRATCH/latest.md" "v$UPG_LATEST"
+  if $UPG_CHECK; then
+    upg_report checked ""
+    $UPG_BEHIND && exit 1
+    exit 0
+  fi
+  # Current: the target is what is installed, or (no --to) older than it.
+  if [ "$UPG_TARGET" = "$UPG_INSTALLED" ] || { [ -z "$UPG_TO" ] && upg_lt "$UPG_TARGET" "$UPG_INSTALLED"; }; then
+    upg_report current ""
+    exit 0
+  fi
+  case $UPG_KIND in
+    codex)
+      git -C "$UPG_ROOT" -c core.hooksPath=/dev/null checkout --quiet --detach "refs/tags/v$UPG_TARGET" \
+        || die "git checkout --detach v$UPG_TARGET failed in $UPG_ROOT (still at $UPG_INSTALLED; the cache was written)"
+      new=$UPG_ROOT
+      ;;
+    checkout)
+      git -C "$UPG_ROOT" -c core.hooksPath=/dev/null worktree add --detach "$new" "refs/tags/v$UPG_TARGET" >/dev/null 2>&1 \
+        || die "git worktree add $new v$UPG_TARGET failed (the cache was written; nothing else changed)"
+      ;;
+  esac
+  have=$("$BASH" "$new/scripts/doc-tools.sh" tools version 2>/dev/null) || have=""
+  [ "$have" = "$UPG_TARGET" ] || echo "WARN: $new reads as version ${have:-unknown}, not $UPG_TARGET" >&2
+  if [ "$UPG_KIND" = checkout ]; then
+    upg_env_write "$new"
+  fi
+  if $JSON; then
+    [ "$UPG_KIND" = checkout ] && upg_relink "$new" >/dev/null
+    upg_report upgraded "$new"
+    exit 0
+  fi
+  echo "doc-superpowers upgraded: $UPG_INSTALLED -> $UPG_TARGET ($UPG_KIND install)"
+  if [ "$UPG_KIND" = codex ]; then
+    echo "  $UPG_ROOT is detached at v$UPG_TARGET"
+  else
+    echo "  new root: $new (detached at v$UPG_TARGET)"
+    echo "  DOC_SUPERPOWERS_ROOT set in $UPG_ENV$([ -f "$UPG_ENV.bak" ] && printf ' (the old file: %s.bak)' "$UPG_ENV")"
+    upg_relink "$new"
+    echo "  the old root is left as it is: $UPG_ROOT (git -C $(sh_squote "$UPG_ROOT") worktree list shows it; remove it once nothing uses it)"
+  fi
+  $UPG_BELOW && echo "  note: still below security release $UPG_NEWEST_SEC (--to)"
+  echo "  cache: $UPG_CACHE_DIR/release-notes.md (v$UPG_LATEST, from $UPG_CACHE_SOURCE)"
+  exit 0
+}
+
 # --- Main ------------------------------------------------------------------------------
 
 if [ $# -lt 1 ]; then
@@ -3191,7 +3717,7 @@ case "$COMMAND" in
     usage
     exit 0
     ;;
-  install | uninstall | status) ;;
+  install | uninstall | status | upgrade) ;;
   print-merge-driver)
     # The merge.doc-index.driver value install --git registers, for a host
     # that registers the driver itself. Needs no repository.
@@ -3231,9 +3757,14 @@ SEEN_CI_OPTS=""
 # --json: status as one JSON object.
 DRIVER_ONLY=false JSON=false
 
+# --to vX.Y.Z and --check: upgrade's (it also takes --force and --json).
+UPG_TO="" UPG_CHECK=false
+
 # Which command takes which flag (anything else: exit 2).
 allowed() {
   case "$COMMAND:$1" in
+    upgrade:--to | upgrade:--check | upgrade:--force | upgrade:--json) return 0 ;;
+    upgrade:*) return 1 ;;
     *:--git | *:--claude | *:--ci | *:--all | *:--ledger | *:--ledger-claude | *:--search | *:--search-gate | *:--merge-driver-only) return 0 ;;
     status:--json) return 0 ;;
     install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force | install:--marketplace-url | install:--resolve-test-workflow | install:--resolve-test-pr-input) return 0 ;;
@@ -3251,11 +3782,18 @@ while [ $# -gt 0 ]; do
     *) value="" has_value=0 ;;
   esac
   case "$name" in
-    --git | --claude | --ci | --all | --ledger | --ledger-claude | --search | --search-gate | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input) ;;
+    --git | --claude | --ci | --all | --ledger | --ledger-claude | --search | --search-gate | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input | --to | --check) ;;
     *) usage_error "unknown option: $arg" ;;
   esac
   allowed "$name" || usage_error "$name does not apply to $COMMAND"
   case "$name" in
+    --to)
+      if [ "$has_value" = 0 ]; then
+        [ $# -gt 0 ] || usage_error "--to requires a value: a release tag, vX.Y.Z"
+        value="$1"
+        shift
+      fi
+      ;;
     --base-branch | --cron | --workflows | --helpers | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input)
       if [ "$has_value" = 0 ]; then
         [ $# -gt 0 ] || die "$name requires a value"
@@ -3277,6 +3815,12 @@ while [ $# -gt 0 ]; do
     --search-gate) DO_SEARCH_GATE=true ;;
     --merge-driver-only) DRIVER_ONLY=true ;;
     --json) JSON=true ;;
+    --check) UPG_CHECK=true ;;
+    --to)
+      [[ "$value" =~ ^v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$ ]] \
+        || usage_error "invalid --to '$value': a release tag, vMAJOR.MINOR.PATCH"
+      UPG_TO="$value"
+      ;;
     --base-branch)
       valid_branch "$value" || die "invalid --base-branch '$value': a branch name of letters, digits and . _ / - that git accepts"
       OPT_BASE="$value"
@@ -3329,7 +3873,7 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
-if [ -n "$SEEN_CI_OPTS" ] && [ "$DO_CI" != true ] && [ "$COMMAND" != status ]; then
+if [ -n "$SEEN_CI_OPTS" ] && [ "$DO_CI" != true ] && [ "$COMMAND" != status ] && [ "$COMMAND" != upgrade ]; then
   usage_error "${SEEN_CI_OPTS%% *} applies to the CI tier: add --ci (or --all)"
 fi
 if $DRIVER_ONLY && ! $DO_GIT; then
@@ -3337,6 +3881,12 @@ if $DRIVER_ONLY && ! $DO_GIT; then
 fi
 if $JSON && { $DO_LEDGER || $DO_LEDGER_CLAUDE; }; then
   usage_error "--json reports the git, Claude and CI tiers; the ledger sets have no JSON status (drop --ledger / --ledger-claude)"
+fi
+
+# upgrade acts on the plugin install, not on a repository.
+if [ "$COMMAND" = upgrade ]; then
+  cmd_upgrade
+  exit 0
 fi
 
 enter_repo
