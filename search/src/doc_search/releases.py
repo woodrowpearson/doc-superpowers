@@ -57,10 +57,13 @@ def read_notes(path: Path) -> str | None:
 
 
 def _cap(text: str) -> str:
-    """`text` cut to at most `MAX_NOTES_BYTES` characters, on a line boundary when it was longer."""
-    if len(text) <= MAX_NOTES_BYTES:
+    """`text` cut to at most `MAX_NOTES_BYTES` UTF-8 bytes (the cap `read_notes` and `install.sh` apply), on a
+    line boundary when it was longer. The cut is made at a newline byte, so no character is split; a lone
+    surrogate (text decoded with `surrogateescape`, say) passes through instead of raising."""
+    data = text.encode("utf-8", errors="surrogatepass")
+    if len(data) <= MAX_NOTES_BYTES:
         return text
-    return text[: text.rfind("\n", 0, MAX_NOTES_BYTES) + 1]
+    return data[: data.rfind(b"\n", 0, MAX_NOTES_BYTES) + 1].decode("utf-8", errors="surrogatepass")
 
 
 class _Fence:
@@ -99,8 +102,9 @@ class _Fence:
         return False
 
 
-def parse_releases(text: str) -> list[Release]:
-    """Every release heading outside code fences, newest first by version (file order breaks ties)."""
+def parse_releases(text: str | None) -> list[Release]:
+    """Every release heading outside code fences, newest first by version (file order breaks ties); none for
+    None or any other non-text value (an unreadable cache, a caller's JSON)."""
     if not isinstance(text, str):
         return []
     fence = _Fence()

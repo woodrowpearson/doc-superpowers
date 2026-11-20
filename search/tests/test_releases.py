@@ -122,13 +122,26 @@ def test_a_heading_past_the_cap_is_not_read() -> None:
     assert newest_security(parse_releases(text)) == (3, 18, 0)
 
 
+def test_the_cap_counts_utf8_bytes_not_characters() -> None:
+    # Under MAX_NOTES_BYTES characters, over it in UTF-8 bytes: the heading after the filler is past the cap.
+    filler = "é" * (MAX_NOTES_BYTES // 2 + 10)
+    text = NOTES + filler + "\n## v9.0.0 (2026-01-01)\n### Security\n"
+    assert len(text) < MAX_NOTES_BYTES < len(text.encode())
+    assert newest_security(parse_releases(text)) == (3, 18, 0)
+
+
 def test_hostile_bytes_never_raise() -> None:
     text = "\x00\x1b[31m## v1.0.0 (2026-01-01)\n\ud800\n## v2.0.0 (2026-01-01)\x00\n### Security\n"
     assert parse_releases(text) == []
 
 
+def test_a_lone_surrogate_past_the_cap_never_raises() -> None:
+    text = NOTES + "\ud800" * MAX_NOTES_BYTES + "\n## v9.0.0 (2026-01-01)\n### Security\n"
+    assert newest_security(parse_releases(text)) == (3, 18, 0)
+
+
 def test_not_a_string_gives_nothing() -> None:
-    assert parse_releases(None) == []  # type: ignore[arg-type]
+    assert parse_releases(None) == []
 
 
 def test_no_headings() -> None:
