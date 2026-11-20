@@ -13216,6 +13216,178 @@ test_setup_tui_scope_and_build
 test_setup_tui_traps_kept
 test_setup_tui_tty_restore
 
+# --- install.sh status --check -----------------------------------------------------
+#
+# status --check compares each committed copy (the installed workflows, the
+# vendored doc-tools.sh and helpers, the search launcher) with what install
+# would write now: a copy that differs is listed under drift, and a drift or
+# a workflow recorded installed but missing exits 1.
+
+# ck_fixture: a project with docs/search/config.json and the CI tier (the
+# default workflows) and the --search set installed, all committed.
+ck_fixture() {
+  srh_fixture
+  inst install --ci --search
+  [ "$IRC" = 0 ] || echo "ck_fixture: install --ci --search failed: $IOUT" >&2
+  git add -A && git commit -qm "install --ci --search"
+}
+
+test_status_check_reports_drift() {
+  echo "test: status --check — exit 0 on a fresh install --ci --search; a byte appended to the vendored doc-tools.sh, a changed launcher stamp, an edited workflow or step script: exit 1, the path named drifted; --json lists them under drift, the workflow and launcher states unchanged"
+  ck_fixture
+  inst status --check --ci --search
+  assert_eq "0" "$IRC" "a fresh install: exit 0 (output: $IOUT)"
+  assert_contains "$IOUT" "no copy drifted" "…and says so"
+  inst status --check --ci --search --json
+  assert_eq "0" "$IRC" "--json: exit 0 too"
+  assert_eq "[]|checked" "$(srh_json '"\(.drift | tojson)|\(.tiers.ci.drift_check)"')" "…drift is [] and the CI tier was checked"
+  printf 'x' >> .github/scripts/doc-tools.sh
+  inst status --check --ci --search
+  assert_eq "1" "$IRC" "a byte appended to .github/scripts/doc-tools.sh: exit 1"
+  assert_contains "$IOUT" "drifted: .github/scripts/doc-tools.sh" "…naming that path as drifted"
+  awk 'NR == 2 { print "# doc-search launcher v0.0.1"; next } { print }' .claude/doc-superpowers/search-mcp.sh > ck.tmp
+  cat ck.tmp > .claude/doc-superpowers/search-mcp.sh
+  rm -f ck.tmp
+  inst status --check --ci --search
+  assert_eq "1" "$IRC" "the launcher's stamp line changed: exit 1"
+  assert_contains "$IOUT" "drifted: .claude/doc-superpowers/search-mcp.sh" "…the launcher named drifted"
+  inst status --check --ci --search --json
+  assert_eq "1" "$IRC" "--json: exit 1"
+  assert_eq '[".github/scripts/doc-tools.sh",".claude/doc-superpowers/search-mcp.sh"]' "$(srh_json '.drift | tojson')" "…both paths under drift"
+  assert_eq "installed|installed|outdated" \
+    "$(srh_json '"\(.tiers.ci.workflows["doc-freshness-pr"].state)|\(.tiers.ci.workflows["doc-freshness-schedule"].state)|\(.tiers.search.launcher)"')" \
+    "…the workflow states keep their values, the launcher its outdated"
+  git checkout -q -- .github/scripts/doc-tools.sh .claude/doc-superpowers/search-mcp.sh
+  echo "# edited" >> .github/workflows/doc-freshness-pr.yml
+  echo "# edited" >> .github/scripts/doc-superpowers-steps/freshness-check.sh
+  inst status --check --ci --search --json
+  assert_eq "1" "$IRC" "an edited workflow and step script: exit 1"
+  assert_eq '[".github/workflows/doc-freshness-pr.yml",".github/scripts/doc-superpowers-steps/freshness-check.sh"]' "$(srh_json '.drift | tojson')" "…both under drift"
+  inst status --check
+  assert_eq "1" "$IRC" "status --check with no tier named checks the CI tier and the --search set: exit 1"
+  assert_contains "$IOUT" "drifted: .github/workflows/doc-freshness-pr.yml" "…naming the workflow"
+  inst status --ci --search --json
+  assert_eq "0" "$IRC" "status --json without --check: exit 0 whatever drifted"
+  assert_eq "false" "$(srh_json 'has("drift")')" "…and no drift key"
+  inst status --ci --search
+  assert_eq "0" "$IRC" "plain status: exit 0"
+  assert_not_contains "$IOUT" "drifted:" "…with no drift lines"
+  git checkout -q -- .github
+  inst status --check --ci --search
+  assert_eq "0" "$IRC" "restored: exit 0"
+  inst install --check --ci
+  assert_eq "2" "$IRC" "--check on install: a usage error (exit 2)"
+  teardown
+}
+
+test_status_check_untracked_and_missing() {
+  echo "test: status --check — with no install record the CI copies are untracked (exit 0); a workflow recorded installed but missing exits 1; the launcher's compare needs no record; an unreadable record exits 1"
+  srh_fixture
+  mkdir -p .github/scripts .claude/doc-superpowers
+  printf 'not the plugin copy\n' > .github/scripts/doc-tools.sh
+  cp "$SCRIPT_DIR/search/launch.sh" .claude/doc-superpowers/search-mcp.sh
+  inst status --check --ci --search
+  assert_eq "0" "$IRC" "copies made by hand, no installed.json: exit 0 (output: $IOUT)"
+  assert_contains "$IOUT" "untracked" "…the CI tier is untracked"
+  inst status --check --ci --search --json
+  assert_eq "0" "$IRC" "--json: exit 0"
+  assert_eq "untracked|[]" "$(srh_json '"\(.tiers.ci.drift_check)|\(.drift | tojson)"')" "…drift_check untracked, drift []"
+  echo "# edited" >> .claude/doc-superpowers/search-mcp.sh
+  inst status --check --search --json
+  assert_eq "1" "$IRC" "an edited launcher with no record: exit 1"
+  assert_eq '[".claude/doc-superpowers/search-mcp.sh"]' "$(srh_json '.drift | tojson')" "…the launcher under drift"
+  rm -rf .github .claude
+  inst install --ci
+  git add -A && git commit -qm ci
+  rm -f .github/workflows/doc-freshness-schedule.yml
+  inst status --check --ci --json
+  assert_eq "1" "$IRC" "a workflow recorded installed but missing: exit 1"
+  assert_eq "recorded-missing|[]" "$(srh_json '"\(.tiers.ci.workflows["doc-freshness-schedule"].state)|\(.drift | tojson)"')" "…its state recorded-missing, nothing drifted"
+  inst status --check --ci
+  assert_eq "1" "$IRC" "…the human form exits 1 too"
+  assert_contains "$IOUT" "recorded installed but missing" "…and says so"
+  git checkout -q -- .github
+  printf '<<<<<<< ours\n{}\n' > .claude/doc-superpowers/installed.json
+  inst status --check --ci --json
+  assert_eq "1" "$IRC" "an unreadable install record: exit 1 (nothing can be checked)"
+  assert_eq "unreadable" "$(srh_json .tiers.ci.drift_check)" "…drift_check unreadable"
+  teardown
+}
+
+test_status_check_reads_the_pin_offline() {
+  echo "test: status --check renders an AI workflow with the DOC_SUPERPOWERS_COMMIT its committed file holds, and never reads the marketplace (no git ls-remote)"
+  srh_fixture
+  local pin shim real
+  pin=0123456789abcdef0123456789abcdef01234567
+  DOC_SUPERPOWERS_PLUGIN_COMMIT=$pin inst install --ci --workflows=doc-review-pr --marketplace-url https://example.invalid/market.git
+  assert_eq "0" "$IRC" "install --ci doc-review-pr with a given commit: exit 0 ($IOUT)"
+  git add -A && git commit -qm ci
+  shim=$(harness_mktemp_d git-shim)
+  real=$(command -v git)
+  printf '#!/bin/sh\nif [ "$1" = ls-remote ]; then : > "%s/ls-remote-ran"; exit 128; fi\nexec "%s" "$@"\n' "$TEST_DIR" "$real" > "$shim/git"
+  chmod +x "$shim/git"
+  IRC=0
+  IOUT=$(PATH="$shim:$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/install.sh" status --check --ci 2>&1) || IRC=$?
+  assert_eq "0" "$IRC" "status --check: exit 0 ($IOUT)"
+  assert_true "…git ls-remote never ran" test ! -e "$TEST_DIR/ls-remote-ran"
+  assert_contains "$(cat .github/workflows/doc-review-pr.yml)" "DOC_SUPERPOWERS_COMMIT: \"$pin\"" "…the workflow holds the pin"
+  teardown
+}
+
+# ck_repo_copy <dest>: what check-self-install.sh and status --check read of
+# this checkout (its working tree, untracked files too), as a new repository.
+ck_repo_copy() {
+  local root f
+  root=$(cd "$SCRIPT_DIR/.." && pwd)
+  mkdir -p "$1"
+  git -C "$root" ls-files -co --exclude-standard -z -- scripts .github .claude/doc-superpowers .claude-plugin \
+    RELEASE-NOTES.md skills/doc-superpowers/SKILL.md .gitattributes \
+    | while IFS= read -r -d '' f; do
+      [ -f "$root/$f" ] || continue
+      mkdir -p "$1/$(dirname "$f")"
+      cp -p "$root/$f" "$1/$f"
+    done
+  git -C "$1" init -q
+}
+
+test_status_check_agrees_with_check_self_install() {
+  echo "test: on a copy of this repository, check-self-install.sh and status --check --ci both exit 0; with a byte appended to its .github/scripts/doc-tools.sh, or a changed workflow, both exit 1"
+  setup
+  local repo="$TEST_DIR/repo" rc
+  ck_repo_copy "$repo"
+  rc=0
+  (cd "$repo" && BASH_BIN="$BASH_BIN" PATH="$REAL_PATH" "$BASH_BIN" scripts/check-self-install.sh >/dev/null 2>&1) || rc=$?
+  assert_eq "0" "$rc" "check-self-install.sh on the copy: exit 0"
+  IRC=0
+  IOUT=$(cd "$repo" && PATH="$REAL_PATH" "$BASH_BIN" scripts/hooks/install.sh status --check --ci 2>&1) || IRC=$?
+  assert_eq "0" "$IRC" "status --check --ci on the copy: exit 0 ($IOUT)"
+  printf 'x' >> "$repo/.github/scripts/doc-tools.sh"
+  rc=0
+  (cd "$repo" && BASH_BIN="$BASH_BIN" PATH="$REAL_PATH" "$BASH_BIN" scripts/check-self-install.sh >/dev/null 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a byte appended to .github/scripts/doc-tools.sh: check-self-install.sh exits 1"
+  IRC=0
+  IOUT=$(cd "$repo" && PATH="$REAL_PATH" "$BASH_BIN" scripts/hooks/install.sh status --check --ci 2>&1) || IRC=$?
+  assert_eq "1" "$IRC" "…and status --check --ci exits 1"
+  assert_contains "$IOUT" "drifted: .github/scripts/doc-tools.sh" "…naming it"
+  cp -p "$repo/scripts/doc-tools.sh" "$repo/.github/scripts/doc-tools.sh"
+  echo "# edited" >> "$repo/.github/workflows/doc-freshness-schedule.yml"
+  rc=0
+  (cd "$repo" && BASH_BIN="$BASH_BIN" PATH="$REAL_PATH" "$BASH_BIN" scripts/check-self-install.sh >/dev/null 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an edited workflow: check-self-install.sh exits 1"
+  IRC=0
+  IOUT=$(cd "$repo" && PATH="$REAL_PATH" "$BASH_BIN" scripts/hooks/install.sh status --check --ci 2>&1) || IRC=$?
+  assert_eq "1" "$IRC" "…and status --check --ci exits 1"
+  assert_contains "$IOUT" "drifted: .github/workflows/doc-freshness-schedule.yml" "…naming it"
+  teardown
+}
+
+echo ""
+echo "=== install.sh status --check ==="
+test_status_check_reports_drift
+test_status_check_untracked_and_missing
+test_status_check_reads_the_pin_offline
+test_status_check_agrees_with_check_self_install
+
 # --- install.sh upgrade ---------------------------------------------------------
 #
 # The fixtures never touch the network: a local bare "origin" of

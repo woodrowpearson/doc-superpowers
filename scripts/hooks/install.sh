@@ -249,7 +249,7 @@ doc-superpowers hooks installer
 Usage:
   install.sh install   [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [CI options]
   install.sh uninstall [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--workflows=<csv|all|none>] [--transient]
-  install.sh status    [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--json]
+  install.sh status    [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--json] [--check]
   install.sh upgrade   [--to vX.Y.Z] [--check] [--force] [--json]
   install.sh print-merge-driver
   install.sh help
@@ -363,6 +363,14 @@ Machine-readable:
                       references/hooks.md lists every state); exit 0.
                       --search adds the doc-search set and --search-gate the
                       gate set (alone, when they are the only ones named)
+  status --check      the drift check: each committed copy (the installed
+                      workflows, the vendored doc-tools.sh and helpers, the
+                      --search launcher) against what install writes now;
+                      the CI tier and --search, or those named. Exit 1 when
+                      a copy drifted, a workflow is recorded-missing, or
+                      installed.json cannot be read; with no installed.json
+                      the CI copies are untracked (exit 0). With --json, the
+                      object gains .drift and .tiers.ci.drift_check
   print-merge-driver  the merge.doc-index.driver value install --git registers
 
 Upgrade (the doc-superpowers install this installer runs from; it needs no
@@ -2057,6 +2065,7 @@ status_search() {
   search_state
   if $JSON; then
     st_rec search.state "$SR_LAUNCHER" "$SR_ENTRY"
+    if $CHECK && [ "$SR_LAUNCHER" = outdated ]; then ck_drift "$SEARCH_LAUNCHER_DEST" --search; fi
     return 0
   fi
   echo "doc-search MCP (the opt-in --search set):"
@@ -2080,6 +2089,8 @@ status_search() {
   if [ -n "$(mcp_problem)" ]; then
     echo "  ⚠ $MCP_FILE $(mcp_problem): no server can be read from it"
   fi
+  # The launcher is a byte copy: its compare needs no install record.
+  if $CHECK && [ "$SR_LAUNCHER" = outdated ]; then ck_drift "$SEARCH_LAUNCHER_DEST" --search; fi
 }
 
 # --- doc-search's gate set (--search-gate) ---------------------------------------
@@ -3054,6 +3065,154 @@ uninstall_ci() {
   echo "CI/CD workflows: $removed removed"
 }
 
+# --- Drift (status --check) ------------------------------------------------------
+#
+# status --check compares each committed copy with the bytes install would
+# write now: CK_DRIFT holds the paths that differ, one a line, and CK_FAIL is
+# 1 once anything fails the check (a drift, a workflow recorded installed but
+# missing, an install record that cannot be read). The CI tier's workflows are
+# rendered with the choices the install record holds, so without one they are
+# not judged (untracked); the search launcher is a byte copy and needs none.
+CK_DRIFT="" CK_FAIL=0 CK_READY=0
+
+# ck_drift <path> <tier flag>: <path> drifted; install <tier flag> rewrites it.
+ck_drift() {
+  CK_DRIFT="$CK_DRIFT$1"$'\n'
+  CK_FAIL=1
+  if $JSON; then
+    st_rec drift "$1"
+  else
+    printf "  ⚠ drifted: %s (differs from what install %s writes now: re-run install %s)\n" "$1" "$2" "$2"
+  fi
+}
+
+# ck_choices: the R_* render values install --ci would use with no flag (the
+# recorded choice, else one read back from the workflows, else the default),
+# once. The version and the marketplace URL are looked up only when a template
+# needs them; the plugin commit is never looked up (expected_copy reads it from
+# the committed file).
+ck_choices() {
+  local b c s
+  [ "$CK_READY" = 0 ] || return 0
+  CK_READY=1
+  b="${STATE_BASE:-$(infer_choice branch)}"
+  c="${STATE_CRON:-$(infer_choice cron)}"
+  s="${STATE_STRICT:-$(infer_choice strict)}"
+  R_BASE=$(sed_repl "${b:-main}") R_CRON=$(sed_repl "${c:-0 9 * * 1}") R_STRICT=0
+  [ "${s:-false}" != true ] || R_STRICT=1
+  R_RTW=$(sed_repl "$STATE_RTW") R_RPI=$(sed_repl "$STATE_RPI")
+  R_VERSION="" R_MARKET="" R_COMMIT=""
+  CK_MARKET_DONE=0 CK_VERSION_DONE=0
+}
+
+# expected_copy <project-relative path> <out file>: the bytes install would
+# write to <path> today, into <out file>; returns 1 (writing nothing) when no
+# install writes <path>. A workflow (.github/workflows/<name>.yml) is its
+# template rendered with the recorded choices (render_workflow) and the
+# DOC_SUPERPOWERS_COMMIT the committed file holds, as
+# scripts/check-self-install.sh reads it: the commit install --ci would pin is
+# read from the marketplace (git ls-remote), which a check never does. A
+# vendored file is the plugin's own copy: doc-tools.sh, a step script (or a
+# step companion, a script of scripts/), a doc-pr-release helper, the ledger
+# set and its adapters. The search launcher is scripts/search/launch.sh.
+expected_copy() {
+  local p="$1" out="$2" w d n src=""
+  case "$p" in
+    .github/workflows/*.yml)
+      w="${p#.github/workflows/}"
+      w="${w%.yml}"
+      in_list "$w" "$KNOWN_WORKFLOWS" || return 1
+      src="$SCRIPT_DIR/ci/$w.yml"
+      ck_choices
+      if [ "$CK_VERSION_DONE" = 0 ] && grep -q '__VERSION__' "$src"; then
+        ci_version
+        R_VERSION=$(sed_repl "$VERSION") CK_VERSION_DONE=1
+      fi
+      if [ "$CK_MARKET_DONE" = 0 ] && grep -q '__MARKETPLACE_URL__' "$src"; then
+        n="$STATE_MARKET"
+        [ -n "$n" ] || n=$(plugin_marketplace_url)
+        if [ -n "$n" ] && valid_marketplace_url "$n"; then
+          R_MARKET=$(sed_repl "$n")
+        fi
+        CK_MARKET_DONE=1
+      fi
+      R_COMMIT=""
+      if [ -f "$p" ]; then
+        R_COMMIT=$(sed -n 's/^ *DOC_SUPERPOWERS_COMMIT: "\([0-9a-f]*\)".*/\1/p' "$p" | head -n 1)
+      fi
+      render_workflow "$src" > "$out"
+      return 0
+      ;;
+    "$VENDOR_DEST/doc-tools.sh") src="$DOC_TOOLS" ;;
+    "$VENDOR_DEST"/*/*)
+      d="${p#"$VENDOR_DEST"/}"
+      n="${d#*/}"
+      d="${d%%/*}"
+      case "$n" in */*) return 1 ;; esac
+      case "$d" in
+        ledger | adapters) src="$SKILL_DIR/scripts/$d/$n" ;;
+        doc-superpowers-steps)
+          src="$STEPS_SRC/$n"
+          if [ ! -f "$src" ] && in_list "$n" "$STEP_COMPANIONS"; then
+            src="$SKILL_DIR/scripts/$n"
+          fi
+          ;;
+        doc-pr-release) src="$SCRIPT_DIR/ci/$d/$n" ;;
+        *) return 1 ;;
+      esac
+      ;;
+    "$SEARCH_LAUNCHER_DEST") src="$SEARCH_LAUNCHER_SRC" ;;
+    *) return 1 ;;
+  esac
+  [ -f "$src" ] || return 1
+  cat "$src" > "$out"
+}
+
+# ck_compare <path>: <path> drifted when it is not what expected_copy writes.
+# A path no install writes (your own adapter, say) is not judged.
+ck_compare() {
+  local want
+  want=$(mktemp "${TMPDIR:-/tmp}/doc-sp-expected.XXXXXX") || die "cannot create a temp file"
+  _TMPS+=("$want")
+  if expected_copy "$1" "$want" && ! cmp -s "$1" "$want"; then
+    ck_drift "$1" --ci
+  fi
+  /bin/rm -f "$want"
+}
+
+# ck_ci <workflows on disk> <record readable: 1|0>: the CI tier's drift check
+# (CK_CI: checked | untracked | unreadable). Each managed workflow on disk,
+# then each vendored file, in a fixed order.
+ck_ci() {
+  local w f d
+  if [ "$2" != 1 ]; then
+    CK_CI=unreadable CK_FAIL=1
+  elif [ "$STATE_HAS_CI" != 1 ]; then
+    CK_CI=untracked
+  else
+    CK_CI=checked
+    for w in $1; do
+      ck_compare ".github/workflows/$w.yml"
+    done
+    [ ! -f "$VENDOR_DEST/doc-tools.sh" ] || ck_compare "$VENDOR_DEST/doc-tools.sh"
+    for d in doc-pr-release doc-superpowers-steps ledger adapters; do
+      [ -d "$VENDOR_DEST/$d" ] || continue
+      for f in "$VENDOR_DEST/$d"/*; do
+        [ -f "$f" ] || continue
+        ck_compare "$f"
+      done
+    done
+  fi
+  if $JSON; then
+    st_rec ci.check "$CK_CI"
+    return 0
+  fi
+  case "$CK_CI" in
+    unreadable) echo "  ✗ drift check: $STATE_FILE cannot be read, so no copy can be checked against what install --ci writes" ;;
+    untracked) echo "  ✓ drift check: untracked: no $STATE_FILE records what install --ci wrote, so its copies are not checked" ;;
+  esac
+}
+
 status_ci() {
   local w line state_ok=1 on_disk st
   $JSON || echo "CI/CD Workflows:"
@@ -3081,6 +3240,7 @@ status_ci() {
         st=uninstalled-transient
       elif [ "$WF_STATE" = installed ]; then
         st=recorded-missing
+        ! $CHECK || CK_FAIL=1
       else
         st=absent
       fi
@@ -3163,6 +3323,7 @@ status_ci() {
       echo "  doc-tools.sh: vendored at $VENDOR_DEST/doc-tools.sh"
     fi
   fi
+  if $CHECK; then ck_ci "$on_disk" "$state_ok"; fi
   return 0
 }
 
@@ -3198,11 +3359,14 @@ _STATUS_JSON_JQ='
     elif $r[0] == "ci.helpers" then .tiers.ci.helpers[$r[1]] = ($r[2] | tonumber)
     elif $r[0] == "ci.removable" then .tiers.ci.removable_vendored += [$r[1]]
     elif $r[0] == "ci.vendored" then .tiers.ci.doc_tools_vendored = $r[1]
+    elif $r[0] == "ci.check" then .tiers.ci.drift_check = $r[1]
+    elif $r[0] == "drift" then .drift += [$r[1]]
     elif $r[0] == "search.state" then .tiers.search = {launcher: $r[1], mcp_entry: $r[2]}
     elif $r[0] == "search_gate.state" then .tiers.search_gate = {claude_settings: $r[1], codex_hooks: $r[2], search_rule: $r[3],
                                                                  search_rule_copies: {}}
     elif $r[0] == "search_gate.rule" then .tiers.search_gate.search_rule_copies[$r[1]] = {state: $r[2], version: ($r[3] // "" | n)}
     else . end)
+  | if $check then .drift = (.drift // []) else . end
   | .env = {DOC_SUPERPOWERS_STRICT: ($strict | n), DOC_SUPERPOWERS_SKIP: ($skip | n),
             DOC_SUPERPOWERS_QUIET: ($quiet | n), DOC_SUPERPOWERS_HOOK_BUDGET: ($budget | n),
             DOC_SUPERPOWERS_ADVICE: ($advice | n)}'
@@ -3210,7 +3374,7 @@ status_json() {
   jq -n --arg rec "$ST_REC" --arg repo "$TOP_ABS" --arg plugin "$SKILL_DIR" \
     --arg strict "${DOC_SUPERPOWERS_STRICT:-}" --arg skip "${DOC_SUPERPOWERS_SKIP:-}" \
     --arg quiet "${DOC_SUPERPOWERS_QUIET:-}" --arg budget "${DOC_SUPERPOWERS_HOOK_BUDGET:-}" \
-    --arg advice "${DOC_SUPERPOWERS_ADVICE:-}" "$_STATUS_JSON_JQ"
+    --arg advice "${DOC_SUPERPOWERS_ADVICE:-}" --argjson check "$CHECK" "$_STATUS_JSON_JQ"
 }
 
 # --- Upgrade -------------------------------------------------------------------
@@ -3813,7 +3977,8 @@ SEEN_CI_OPTS=""
 DRIVER_ONLY=false JSON=false
 
 # --to vX.Y.Z and --check: upgrade's (it also takes --force and --json).
-UPG_TO="" UPG_CHECK=false
+# --check is status's too (CHECK: the drift check).
+UPG_TO="" UPG_CHECK=false CHECK=false
 
 # Which command takes which flag (anything else: exit 2).
 allowed() {
@@ -3821,7 +3986,7 @@ allowed() {
     upgrade:--to | upgrade:--check | upgrade:--force | upgrade:--json) return 0 ;;
     upgrade:*) return 1 ;;
     *:--git | *:--claude | *:--ci | *:--all | *:--ledger | *:--ledger-claude | *:--search | *:--search-gate | *:--merge-driver-only) return 0 ;;
-    status:--json) return 0 ;;
+    status:--json | status:--check) return 0 ;;
     install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force | install:--marketplace-url | install:--resolve-test-workflow | install:--resolve-test-pr-input) return 0 ;;
     uninstall:--workflows | uninstall:--transient) return 0 ;;
   esac
@@ -3870,7 +4035,7 @@ while [ $# -gt 0 ]; do
     --search-gate) DO_SEARCH_GATE=true ;;
     --merge-driver-only) DRIVER_ONLY=true ;;
     --json) JSON=true ;;
-    --check) UPG_CHECK=true ;;
+    --check) UPG_CHECK=true CHECK=true ;;
     --to)
       [[ "$value" =~ ^v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$ ]] \
         || usage_error "invalid --to '$value': a release tag, vMAJOR.MINOR.PATCH"
@@ -4039,11 +4204,19 @@ case "$COMMAND" in
     ;;
 
   status)
+    # --check: the drift check of the committed copies (the CI tier and the
+    # --search set, or those of them named); exit 1 on a drift, a workflow
+    # recorded installed but missing, or an install record that cannot be
+    # read, else 0. With no tier named it checks both.
+    if $CHECK && ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE && ! $DO_SEARCH && ! $DO_SEARCH_GATE; then
+      DO_CI=true DO_SEARCH=true
+    fi
     if $JSON; then
       # The three tiers (all of them, or those named), one JSON object on
-      # stdout, exit 0: the states are the verdict. --search and --search-gate
-      # add doc-search's sets (never part of the default, or of --all; the
-      # only members when they are the only ones named).
+      # stdout, exit 0: the states are the verdict (under --check, the drift
+      # check's exit). --search and --search-gate add doc-search's sets
+      # (never part of the default, or of --all; the only members when they
+      # are the only ones named).
       if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_SEARCH && ! $DO_SEARCH_GATE; then
         DO_GIT=true DO_CLAUDE=true DO_CI=true
       fi
@@ -4053,7 +4226,7 @@ case "$COMMAND" in
       if $DO_SEARCH; then status_search; fi
       if $DO_SEARCH_GATE; then status_search_gate; fi
       status_json
-      exit 0
+      exit "$CK_FAIL"
     fi
     if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE && ! $DO_SEARCH && ! $DO_SEARCH_GATE; then
       DO_GIT=true DO_CLAUDE=true DO_CI=true DO_LEDGER=true DO_LEDGER_CLAUDE=true DO_SEARCH=true DO_SEARCH_GATE=true
@@ -4098,5 +4271,15 @@ case "$COMMAND" in
       echo ""
     fi
     echo "Env overrides: DOC_SUPERPOWERS_STRICT=${DOC_SUPERPOWERS_STRICT:-unset} DOC_SUPERPOWERS_SKIP=${DOC_SUPERPOWERS_SKIP:-unset} DOC_SUPERPOWERS_LEDGER_SKIP=${DOC_SUPERPOWERS_LEDGER_SKIP:-unset}"
+    if $CHECK; then
+      if [ "$CK_FAIL" = 0 ]; then
+        echo "Drift check: no copy drifted"
+      else
+        n=0
+        [ -z "$CK_DRIFT" ] || n=$(printf '%s' "$CK_DRIFT" | grep -c .)
+        echo "Drift check: failed ($n drifted; see the ⚠ and ✗ lines above)"
+      fi
+      exit "$CK_FAIL"
+    fi
     ;;
 esac
