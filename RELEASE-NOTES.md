@@ -1,5 +1,21 @@
 # Release Notes
 
+## v3.19.1 (2026-11-20)
+
+This release updates doc-search's lockfile to semble 0.7.3 and google-genai 3.6.1. It also keeps the cloud leg retrying client-side timeouts under google-genai 3.x. It replaces Dependabot's #89 and #87.
+
+3.19.1 is not a security release: no package it moves closes a known advisory, so it raises no project's floor.
+
+### Dependencies
+- **`search/uv.lock`:** `semble` 0.7.0 → 0.7.3 (the newest 0.7.x; `pyproject.toml` keeps `>=0.7,<0.8`) and `google-genai` 2.31.0 → 3.6.1, which replaces `httpx` with `httpx2`, so `httpx` and `httpcore` leave the lock. The lock was written with the project's uv: it stays at revision 3 and keeps its platform markers. Dependabot's lock had moved to revision 5 and dropped the onnxruntime and httpcore2 markers.
+
+### Fixes
+- **The cloud leg retries a client-side timeout under google-genai 3.x** (`search/src/doc_search/cloud/vertex.py`). `_transient` imported `httpx`, which google-genai 3.x no longer installs, so the import failed and a timeout counted as final. It now checks `httpx2`, then `httpx`. The bug never shipped: the lock held google-genai 2.31.0 until this release (`test_vertex_retry_policy`).
+
+### Other
+- `references/search.md`'s example status line shows semble 0.7.3.
+- Verified locally, since GitHub Actions does not run on this account. The doc-search pytest suite passed (985, the 2 live tests skipped). `dep-audit` found no known vulnerabilities, `zizmor` no findings and `gitleaks` no leaks, and `check-version` passed. The diagram renderer's lock had 0 npm audit findings. The shell suites did not run: no shell script changed.
+
 ## v3.19.0 (2026-11-20)
 
 This release tells a project when the doc-superpowers it runs is below a security release, without anyone reading the release notes by hand. A release is a security release when its section of `RELEASE-NOTES.md` holds a `### Security` heading. doc-search's `check` now reads that marker from release notes already on disk, and a project that sets `"security_floor": true` halts below it. A checkout install moves to a release tag with one command, `install.sh upgrade`. `install.sh status --check` names each committed copy that differs from what the installer writes today.

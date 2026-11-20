@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "generated_by": "doc-superpowers",
-  "generated_at": "2026-11-20T18:59:40Z",
+  "generated_at": "2026-11-20T19:45:51Z",
   "build_commit": "97134e0157964068ac3bb9a54f7bda24381095c2",
   "docs": {
     "docs/architecture/system-overview.md": {
@@ -952,14 +952,14 @@
       "implementation": []
     },
     "references/writing-rule.md": {
-      "content_hash": "sha256:dcece2734e85f09bff37d838b7598fb76657ed5f463f41dfbfe3beaa5026da22",
+      "content_hash": "sha256:c425a0de3a12b3f55cfb6275db943d9a9867c55f18b08b5e3e783a437a12b484",
       "code_refs": [],
       "code_oids": {},
       "code_commit": null,
       "doc_type": "reference",
       "replaces": null,
       "superseded_by": null,
-      "last_verified": "2026-11-20T07:36:47Z",
+      "last_verified": "2026-11-20T19:45:51Z",
       "implementation": []
     },
     "docs/issues/2026-11-04-writing-engine-followups.md": {
