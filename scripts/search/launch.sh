@@ -230,14 +230,41 @@ root_version() {
   printf '%s' "${RV:-(version unknown)}"
 }
 
+# pf_squote <text>: <text> as one shell word, as it is when it needs no
+# quoting, else single-quoted (install.sh's sh_squote, check.py's _sh_quote).
+pf_squote() {
+  case $1 in
+    *[!A-Za-z0-9_@%+=:,./-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# pf_branch_checkout: PF_ROOT is what install.sh's upg_kind calls a checkout
+# (a git checkout whose top is PF_ROOT, not the Codex root) and its HEAD is a
+# branch, which install.sh upgrade refuses. Local git only, the caller's
+# GIT_DIR and the like unset.
+pf_branch_checkout() {
+  PF_CODEX=$(cd "${CODEX_HOME:-${HOME:-/nonexistent}/.codex}/doc-superpowers" 2>/dev/null && pwd -P) || PF_CODEX=""
+  [ "$PF_ROOT" != "$PF_CODEX" ] || return 1
+  (
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+    PF_TOP=$(git -C "$PF_ROOT" rev-parse --show-toplevel 2>/dev/null) || exit 1
+    PF_TOP=$(cd "$PF_TOP" 2>/dev/null && pwd -P) || exit 1
+    [ "$PF_TOP" = "$PF_ROOT" ] || exit 1
+    git -C "$PF_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1
+  )
+}
+
 # plugin_fix: how the root is updated, as doc-search check's _plugin_fix says
 # it: a Claude Code plugin install (a root under $HOME/.claude/plugins/ or
-# ${CLAUDE_PLUGIN_CACHE:-$HOME/.claude/plugins/cache}) by Claude Code; any
-# other root, a checkout or the Codex install, by its own install.sh upgrade
-# (by its physical path, single-quoted when it needs quoting, as install.sh's
-# sh_squote does). Only a root that predates the readiness gate gets here, and
-# such a root predates upgrade (3.19.0) too: one whose install.sh has no
-# upgrade verb is pulled instead, the one update its own tools carry.
+# ${CLAUDE_PLUGIN_CACHE:-$HOME/.claude/plugins/cache}) by Claude Code; a
+# checkout on a branch, which install.sh upgrade refuses, by git -C <root>
+# pull; any other root, a release checkout or the Codex install, by its own
+# install.sh upgrade (by its physical path, single-quoted when it needs
+# quoting, as install.sh's sh_squote does). Only a root that predates the
+# readiness gate gets here, and such a root predates upgrade (3.19.0) too: one
+# whose install.sh has no upgrade verb is pulled instead, the one update its
+# own tools carry.
 plugin_fix() {
   PF_ROOT=$(cd "$ROOT" 2>/dev/null && pwd -P) || PF_ROOT=$ROOT
   for PF_DIR in "${HOME:-/nonexistent}/.claude/plugins" "${CLAUDE_PLUGIN_CACHE:-${HOME:-/nonexistent}/.claude/plugins/cache}"; do
@@ -250,11 +277,11 @@ plugin_fix() {
     esac
   done
   if grep '^cmd_upgrade()' "$ROOT/scripts/hooks/install.sh" >/dev/null 2>&1; then
-    PF_SH=$PF_ROOT/scripts/hooks/install.sh
-    case $PF_SH in
-      *[!A-Za-z0-9_@%+=:,./-]*) PF_SH="'$(printf '%s' "$PF_SH" | sed "s/'/'\\\\''/g")'" ;;
-    esac
-    printf 'bash %s upgrade' "$PF_SH"
+    if pf_branch_checkout; then
+      printf 'git -C %s pull' "$(pf_squote "$PF_ROOT")"
+    else
+      printf 'bash %s upgrade' "$(pf_squote "$PF_ROOT/scripts/hooks/install.sh")"
+    fi
     return 0
   fi
   # The tilde is in the format string: it is the text shown, not expanded.

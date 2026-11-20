@@ -8116,9 +8116,9 @@ test_launcher_check_keeps_the_verdict_file() {
 }
 
 test_launcher_pre_gate_root() {
-  echo "test: launcher: a root that predates the readiness gate (no search/src/doc_search/gate.py) — required: check says not ready, '<X> predates the readiness gate', the root's update as the fix (a plugin install: claude plugin update; an install.sh with upgrade: that; else git pull), exit 1, and gate session-start|prompt answer as with no uv; not required: check exit 4, gate silent; uv is never run"
+  echo "test: launcher: a root that predates the readiness gate (no search/src/doc_search/gate.py) — required: check says not ready, '<X> predates the readiness gate', the root's update as the fix (a plugin install: claude plugin update; an install.sh with upgrade: that, or git pull for a checkout on a branch; else git pull), exit 1, and gate session-start|prompt answer as with no uv; not required: check exit 4, gate silent; uv is never run"
   srh_fixture '{"required": true}'
-  local envroot vf want reason fix codex cached upg
+  local envroot vf want reason fix codex cached upg pull
   envroot=$(harness_mktemp_d pregate)
   srl_pregate_root "$envroot" 3.10.0
   vf=$(git rev-parse --git-path doc-search-gate)
@@ -8174,6 +8174,31 @@ test_launcher_pre_gate_root() {
   upg="bash $upg upgrade"
   srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check --format json
   assert_eq "$(srg_check_json not-ready 1 "$reason" "$upg")" "$(srg_compact)" "a checkout whose install.sh has upgrade: install.sh upgrade as the fix"
+  # …but a checkout of its own on a branch, which upgrade refuses, is pulled: by the physical path, quoted as
+  # install.sh's sh_squote quotes it (check.py's PULL_FIX).
+  git init -q -b main "$envroot" 2>/dev/null || { git init -q "$envroot" && git -C "$envroot" symbolic-ref HEAD refs/heads/main; }
+  pull="$(cd "$envroot" && pwd -P)"
+  case $pull in
+    *[!A-Za-z0-9_@%+=:,./-]*) pull="'$pull'" ;;
+  esac
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "$reason" "git -C $pull pull")" "$(srg_compact)" "a branch checkout whose install.sh has upgrade: git pull as the fix, the path quoted"
+  # Detached: HEAD set to a commit of the empty tree.
+  git -C "$envroot" update-ref --no-deref HEAD "$(git -C "$envroot" -c user.name=t -c user.email=t@t commit-tree -m c "$(git -C "$envroot" write-tree)")"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "$reason" "$upg")" "$(srg_compact)" "…detached (a release checkout): install.sh upgrade again"
+  rm -rf "$envroot/.git"
+  # The Codex root on a branch is upgraded in place, so it keeps install.sh upgrade.
+  mkdir -p "$codex/scripts/hooks"
+  printf 'cmd_upgrade() {\n  :\n}\n' > "$codex/scripts/hooks/install.sh"
+  git init -q -b main "$codex" 2>/dev/null || { git init -q "$codex" && git -C "$codex" symbolic-ref HEAD refs/heads/main; }
+  upg="$(cd "$codex" && pwd -P)/scripts/hooks/install.sh"
+  case $upg in
+    *[!A-Za-z0-9_@%+=:,./-]*) upg="'$upg'" ;;
+  esac
+  srg_run /dev/null -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "doc-superpowers 3.9.0 predates the readiness gate" "bash $upg upgrade")" "$(srg_compact)" "the Codex root on a branch, its install.sh with upgrade: install.sh upgrade, not a pull"
+  rm -rf "$codex/.git" "$codex/scripts"
   rm -rf "$envroot/scripts"
   # No package.json: the version is unknown.
   srl_pregate_root "$envroot/../pregate-nopkg" none
@@ -13883,7 +13908,7 @@ test_upgrade_relinks_the_skill_link() {
 }
 
 test_upgrade_refuses_a_dirty_or_branch_root() {
-  echo "test: upgrade refuses a dirty root and a branch checkout (exit 3) and touches nothing; --check still reports"
+  echo "test: upgrade refuses a dirty root and a branch checkout (exit 3) and touches nothing; --check still reports, a branch checkout's fix a git pull"
   setup
   upg_origin
   upg_release_root
@@ -13904,6 +13929,10 @@ test_upgrade_refuses_a_dirty_or_branch_root() {
   assert_contains "$RUN_ERR" "branch" "…and says why"
   assert_true "…no new worktree" test ! -e "$UPG_NEW"
   assert_true "…no cache" test ! -e "$UPG_CACHE"
+  git -C "$UPG_ROOT" reset -q --hard v3.18.0
+  upg_run -- --check
+  assert_eq "1" "$RUN_RC" "--check on a branch checkout behind (main at v3.18.0): exit 1"
+  assert_contains "$RUN_OUT" "fix: git -C '$UPG_BASE_P/doc-superpowers' pull" "…its fix is a pull, which upgrade does not refuse (check.py's PULL_FIX), the path sh-quoted"
   teardown
 }
 

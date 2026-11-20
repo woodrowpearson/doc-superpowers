@@ -41,6 +41,7 @@ from .config import CONFIG_REL, Config, ConfigError, load_config
 from .engines import Building, IndexPool
 from .progress import read_progress
 from .releases import newest_security, parse_releases
+from .repo import GitError, git
 from .version import launcher_stamp, plugin_root, plugin_version
 
 State = Literal["ready", "degraded", "not-ready", "not-in-force"]
@@ -57,8 +58,11 @@ LAUNCHER_REL = ".claude/doc-superpowers/search-mcp.sh"
 INDEX_FIX = f"sh {LAUNCHER_REL} index"
 PLUGIN_FIX = "claude plugin update doc-superpowers"
 UPGRADE_FIX = "bash {install_sh} upgrade"
-"""The fix for any install that is not a Claude Code plugin (a checkout, the Codex root): the plugin's own
-`install.sh upgrade`, by its path (`_plugin_fix` renders it, quoted when the path needs it)."""
+"""The fix for any install that is neither a Claude Code plugin nor a branch checkout (a release checkout, the
+Codex root): the plugin's own `install.sh upgrade`, by its path (`_plugin_fix` renders it, quoted when the path
+needs it)."""
+PULL_FIX = "git -C {root} pull"
+"""The fix for a checkout on a branch, which `install.sh upgrade` refuses (it follows its branch)."""
 CONFIG_FIX = f"edit {CONFIG_REL}, then run sh {LAUNCHER_REL} check"
 TRANSFORMER_NOT_BUILT = "transformer index not built"
 """Row 5's reason when nothing serves the docs: its fix, INDEX_FIX, is a first transformer build that takes hours,
@@ -330,13 +334,33 @@ def _security(version: tuple[int, int, int] | None, env: Mapping[str, str]) -> s
 
 def _plugin_fix(env: Mapping[str, str]) -> str:
     """How this install is updated: a Claude Code plugin install (a root under `~/.claude/plugins/`, or under
-    `${CLAUDE_PLUGIN_CACHE:-~/.claude/plugins/cache}`) by Claude Code; any other root, a checkout or the Codex
-    root, by its own `install.sh upgrade` (UPGRADE_FIX), which moves it to the newest release tag. launch.sh's
-    `plugin_fix` is the shell twin."""
+    `${CLAUDE_PLUGIN_CACHE:-~/.claude/plugins/cache}`) by Claude Code; a checkout on a branch, which
+    `install.sh upgrade` refuses, by `git -C <root> pull` (PULL_FIX); any other root, a release checkout or the
+    Codex root, by its own `install.sh upgrade` (UPGRADE_FIX), which moves it to the newest release tag.
+    launch.sh's `plugin_fix` and install.sh's `upg_fix` are the shell twins."""
     root = plugin_root()
     if release_cache.plugin_install(env, root)[0]:
         return PLUGIN_FIX
+    if _branch_checkout(root, env):
+        return PULL_FIX.format(root=_sh_quote(str(root)))
     return UPGRADE_FIX.format(install_sh=_sh_quote(str(root / "scripts" / "hooks" / "install.sh")))
+
+
+def _branch_checkout(root: Path, env: Mapping[str, str]) -> bool:
+    """Whether `root` is what `install.sh`'s `upg_kind` calls a `checkout` (a git checkout whose top is `root`,
+    not the Codex root `${CODEX_HOME:-~/.codex}/doc-superpowers`) and its HEAD is a branch. Local git only."""
+    home = Path(env.get("HOME") or Path.home())
+    codex = Path(env.get("CODEX_HOME") or home / ".codex") / "doc-superpowers"
+    if codex.resolve() == root:
+        return False
+    try:
+        top = Path(git(root, "rev-parse", "--show-toplevel").strip()).resolve()
+        if top != root:
+            return False
+        git(root, "symbolic-ref", "-q", "HEAD")
+    except GitError:
+        return False
+    return True
 
 
 def _sh_quote(text: str) -> str:

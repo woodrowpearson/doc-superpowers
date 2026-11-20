@@ -357,6 +357,64 @@ def test_plugin_fix_by_install_kind(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert fix(spaced, env) == f"bash {quoted} upgrade", "a path that needs quoting is quoted whole"
 
 
+def local_git(*args: str | Path) -> None:
+    """A local git call, with no user config, for a fixture checkout."""
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
+        env.pop(key, None)
+    subprocess.run(["git", *map(str, args)], check=True, capture_output=True, env=env)
+
+
+def checkout(root: Path, *, detached: bool = False) -> Path:
+    """A git checkout at `root` on branch `main` with one commit, or detached at that commit."""
+    root.mkdir(parents=True)
+    local_git("init", "-q", "-b", "main", root)
+    local_git("-C", root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c")
+    if detached:
+        local_git("-C", root, "checkout", "-q", "--detach")
+    return root.resolve()
+
+
+def test_plugin_fix_for_a_branch_checkout_is_a_pull(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`install.sh upgrade` refuses a checkout on a branch (exit 3): such a root follows its branch, so the fix is
+    `git -C <root> pull`, the root quoted as `install.sh`'s `sh_squote` quotes it. A release checkout (detached),
+    the Codex root (upgraded in place, on a branch too), and a root that is no checkout of its own keep the
+    upgrade, as `install.sh`'s `upg_kind` decides the kind."""
+    from doc_search.check import _plugin_fix
+
+    home = tmp_path / "fix-home"
+    env = {"HOME": str(home), "CODEX_HOME": str(home / ".codex")}
+
+    def fix(root: Path) -> str:
+        monkeypatch.setattr("doc_search.check.plugin_root", lambda: root.resolve())
+        return _plugin_fix(env)
+
+    branch = checkout(tmp_path / "branch" / "doc-superpowers")
+    assert fix(branch) == f"git -C {branch} pull", "a branch checkout: pulled"
+    spaced = checkout(tmp_path / "a dir" / "doc-superpowers")
+    assert fix(spaced) == f"git -C '{spaced}' pull", "…the root quoted whole when it needs it"
+    release = checkout(tmp_path / "release" / "doc-superpowers-v3.19.0", detached=True)
+    assert fix(release) == upgrade_fix(release), "a release checkout (detached): upgraded"
+    codex = checkout(home / ".codex" / "doc-superpowers")
+    assert fix(codex) == upgrade_fix(codex), "the Codex root on a branch: upgraded in place"
+    inner = branch / "vendored" / "doc-superpowers"
+    inner.mkdir(parents=True)
+    assert fix(inner) == upgrade_fix(inner.resolve()), "inside another checkout, no checkout of its own: no pull"
+
+
+def test_check_plugin_below_floor_in_a_branch_checkout_is_pulled(
+    gated, run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = fake_root(tmp_path / "ds-branch", monkeypatch)
+    local_git("init", "-q", "-b", "main", root)
+    configure(gated, requires=">=99.0.0")
+
+    code, payload = check(run)
+
+    assert code == 1 and payload["reason"] == "doc-superpowers 3.18.0 is below requires >=99.0.0"
+    assert payload["fix"] == f"git -C {root} pull"
+
+
 # --- the security floor -----------------------------------------------------------------------------------
 
 SECURITY_NOTES = (

@@ -3545,11 +3545,19 @@ upg_kind() {
   fi
 }
 
-# upg_fix: the command that upgrades this install.
+# upg_fix: the command that upgrades this install (check.py's _plugin_fix and
+# launch.sh's plugin_fix say the same): a checkout on a branch, which upgrade
+# refuses, is pulled.
 upg_fix() {
   local p="$UPG_ROOT/scripts/hooks/install.sh"
   if [ "$UPG_KIND" = plugin ]; then
     printf 'claude plugin update doc-superpowers'
+  elif [ "$UPG_KIND" = checkout ] && git -C "$UPG_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1; then
+    if [[ "$UPG_ROOT" =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]]; then
+      printf 'git -C %s pull' "$UPG_ROOT"
+    else
+      printf 'git -C %s pull' "$(sh_squote "$UPG_ROOT")"
+    fi
   elif [[ "$p" =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]]; then
     printf 'bash %s upgrade' "$p"
   else
