@@ -53,6 +53,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "required": False,  # true: doc-search is a gate in this repository (it must be ready)
     "requires": None,  # ">=X.Y.Z": the version floor for the plugin and the committed launcher copy
+    "security_floor": False,  # true: below the newest security release in the release notes is not-ready
 }
 
 _VERSION = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)")
@@ -153,6 +154,7 @@ class Config:
     search: SearchCfg
     required: bool  # doc-search is a gate in this repository
     requires: tuple[int, int, int] | None  # the version floor, from `">=X.Y.Z"`
+    security_floor: bool = False  # below the newest security release is not-ready (else degraded)
 
 
 def load_config(top: Path, env: Mapping[str, str] = os.environ) -> Config | None:
@@ -189,8 +191,17 @@ def load_config(top: Path, env: Mapping[str, str] = os.environ) -> Config | None
     required = merged["required"]
     if not isinstance(required, bool):
         raise ConfigError("required must be true or false")
+    security_floor = merged["security_floor"]
+    if not isinstance(security_floor, bool):
+        raise ConfigError("security_floor must be true or false")
     return Config(
-        docs=docs, code=code, cloud=cloud, search=search, required=required, requires=_requires(merged["requires"])
+        docs=docs,
+        code=code,
+        cloud=cloud,
+        search=search,
+        required=required,
+        requires=_requires(merged["requires"]),
+        security_floor=security_floor,
     )
 
 

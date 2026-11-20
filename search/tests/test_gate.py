@@ -182,6 +182,7 @@ def test_agent_can_run_is_the_launchers_allowlist() -> None:
         CONFIG_FIX,
         "install uv",
         "claude plugin update doc-superpowers",
+        "bash /a/doc-superpowers/scripts/hooks/install.sh upgrade",
         f"{INDEX_FIX}\n",
         f"{INDEX_FIX}; ls",
         "sh .claude/doc-superpowers/search-mcp.sh serve",

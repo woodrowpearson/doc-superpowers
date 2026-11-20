@@ -1,5 +1,5 @@
 #!/bin/sh
-# doc-search launcher v3.18.0
+# doc-search launcher v3.19.0
 # doc-search launcher (POSIX sh): runs the doc-search CLI / MCP server through
 # uv, from wherever doc-superpowers is installed.
 #
@@ -79,8 +79,7 @@
 #   - a root that predates the readiness gate (no search/src/doc_search/gate.py,
 #     so its doc-search has neither check nor gate): answered as with no uv,
 #     the reason "doc-superpowers <its package.json version> predates the
-#     readiness gate" and the fix the plugin update doc-search check names
-#     (git -C <the Codex root> pull for the Codex install);
+#     readiness gate" and the fix plugin_fix names (below);
 #   - no uv, where the raw text of docs/search/config.json (at the repository
 #     top) matches "required"\s*:\s*true, across lines, as doc-search's own
 #     test does: check prints "not ready: uv not found" and exits 1; gate
@@ -231,17 +230,63 @@ root_version() {
   printf '%s' "${RV:-(version unknown)}"
 }
 
-# plugin_fix: how the root is updated, as doc-search check says it: the Codex
-# install (${CODEX_HOME:-$HOME/.codex}/doc-superpowers, a git checkout) is
-# pulled; anything else is taken to be the Claude Code plugin.
+# pf_squote <text>: <text> as one shell word, as it is when it needs no
+# quoting, else single-quoted (install.sh's sh_squote, check.py's _sh_quote).
+pf_squote() {
+  case $1 in
+    *[!A-Za-z0-9_@%+=:,./-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# pf_branch_checkout: PF_ROOT is what install.sh's upg_kind calls a checkout
+# (a git checkout whose top is PF_ROOT, not the Codex root) and its HEAD is a
+# branch, which install.sh upgrade refuses. Local git only, the caller's
+# GIT_DIR and the like unset.
+pf_branch_checkout() {
+  PF_CODEX=$(cd "${CODEX_HOME:-${HOME:-/nonexistent}/.codex}/doc-superpowers" 2>/dev/null && pwd -P) || PF_CODEX=""
+  [ "$PF_ROOT" != "$PF_CODEX" ] || return 1
+  (
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+    PF_TOP=$(git -C "$PF_ROOT" rev-parse --show-toplevel 2>/dev/null) || exit 1
+    PF_TOP=$(cd "$PF_TOP" 2>/dev/null && pwd -P) || exit 1
+    [ "$PF_TOP" = "$PF_ROOT" ] || exit 1
+    git -C "$PF_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1
+  )
+}
+
+# plugin_fix: how the root is updated, as doc-search check's _plugin_fix says
+# it: a Claude Code plugin install (a root under $HOME/.claude/plugins/ or
+# ${CLAUDE_PLUGIN_CACHE:-$HOME/.claude/plugins/cache}) by Claude Code; a
+# checkout on a branch, which install.sh upgrade refuses, by git -C <root>
+# pull; any other root, a release checkout or the Codex install, by its own
+# install.sh upgrade (by its physical path, single-quoted when it needs
+# quoting, as install.sh's sh_squote does). Only a root that predates the
+# readiness gate gets here, and such a root predates upgrade (3.19.0) too: one
+# whose install.sh has no upgrade verb is pulled instead, the one update its
+# own tools carry.
 plugin_fix() {
-  if [ "$ROOT" != "${CODEX_HOME:-$HOME/.codex}/doc-superpowers" ]; then
-    printf 'claude plugin update doc-superpowers'
+  PF_ROOT=$(cd "$ROOT" 2>/dev/null && pwd -P) || PF_ROOT=$ROOT
+  for PF_DIR in "${HOME:-/nonexistent}/.claude/plugins" "${CLAUDE_PLUGIN_CACHE:-${HOME:-/nonexistent}/.claude/plugins/cache}"; do
+    PF_DIR=$(cd "$PF_DIR" 2>/dev/null && pwd -P) || continue
+    case $PF_ROOT/ in
+      "$PF_DIR"/*)
+        printf 'claude plugin update doc-superpowers'
+        return 0
+        ;;
+    esac
+  done
+  if grep '^cmd_upgrade()' "$ROOT/scripts/hooks/install.sh" >/dev/null 2>&1; then
+    if pf_branch_checkout; then
+      printf 'git -C %s pull' "$(pf_squote "$PF_ROOT")"
+    else
+      printf 'bash %s upgrade' "$(pf_squote "$PF_ROOT/scripts/hooks/install.sh")"
+    fi
     return 0
   fi
   # The tilde is in the format string: it is the text shown, not expanded.
   case $ROOT in
-    "$HOME"/*) printf 'git -C ~/%s pull' "${ROOT#"$HOME"/}" ;;
+    "${HOME:-/nonexistent}"/*) printf 'git -C ~/%s pull' "${ROOT#"$HOME"/}" ;;
     *) printf 'git -C %s pull' "$ROOT" ;;
   esac
 }
@@ -436,7 +481,26 @@ case ${1:-} in
   check | gate) answer_check_gate "$@" ;;
 esac
 
-[ -n "$ROOT" ] || fail "cannot find doc-superpowers (set DOC_SUPERPOWERS_ROOT)"
+# No root: name the env hook to set DOC_SUPERPOWERS_ROOT in and a release
+# checkout to point it at, at the floor the project's requires names (">=X.Y.Z",
+# read without jq as config_required reads "required"; none: no --branch).
+if [ -z "$ROOT" ]; then
+  FLOOR=""
+  if [ -n "$TOP" ] && [ -f "$TOP/docs/search/config.json" ]; then
+    FLOOR=$(tr '\t\n\v\f\r' '     ' 2>/dev/null <"$TOP/docs/search/config.json" |
+      sed -n 's/.*"requires" *: *">=\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/p' | head -n 1)
+  fi
+  ENV_SHOWN=$ENV_HOOK
+  if [ -n "${HOME:-}" ]; then
+    case $ENV_HOOK in
+      "$HOME"/*)
+        # shellcheck disable=SC2088  # the tilde is the text shown, not expanded
+        ENV_SHOWN=$(printf '~/%s' "${ENV_HOOK#"$HOME"/}")
+        ;;
+    esac
+  fi
+  fail "cannot find doc-superpowers: set DOC_SUPERPOWERS_ROOT in $ENV_SHOWN to a release checkout (git clone ${FLOOR:+--branch v$FLOOR }https://github.com/woodrowpearson/doc-superpowers.git), or install the plugin"
+fi
 command -v uv >/dev/null 2>&1 || fail "uv not found (https://docs.astral.sh/uv/)"
 
 EXTRAS=""

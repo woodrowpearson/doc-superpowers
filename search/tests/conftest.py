@@ -85,6 +85,16 @@ def doc_search_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterato
 
 
 @pytest.fixture(autouse=True)
+def release_notes_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the developer's release notes out of `check`'s security floor, in every suite: a per-test
+    XDG_CACHE_HOME (the `install.sh upgrade` cache lives under it), and no DOC_SEARCH_RELEASE_NOTES or
+    CLAUDE_PLUGIN_CACHE. HOME is a fixture's own wherever a test reaches the marketplace clones."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    monkeypatch.delenv("DOC_SEARCH_RELEASE_NOTES", raising=False)
+    monkeypatch.delenv("CLAUDE_PLUGIN_CACHE", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def shared_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """No test shares a server unless it asks (DOC_SEARCH_SHARED=1); every daemon a test starts is stopped.
 

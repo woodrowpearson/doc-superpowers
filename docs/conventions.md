@@ -41,6 +41,7 @@ Each scan pattern carries a planted sample it must match, so a pattern that stop
 
 - **Scheme**: Semantic versioning (MAJOR.MINOR.PATCH)
 - **Changelog**: `RELEASE-NOTES.md` with date, features, fixes per version (see there for current version)
+- **Security releases**: a `### Security` heading under a `## vX.Y.Z (YYYY-MM-DD)` section makes that release a security release, and it is only for a fix users must upgrade for. doc-search's `check` holds a project that sets `security_floor` below it, and `doc-security-schedule` fails its run; anything users need not take goes under another heading. `doc-tools.sh tools security-floor RELEASE-NOTES.md` shows how the notes read
 - **Git tags**: `v1.0.0` format
 
 ### When to bump
@@ -295,7 +296,7 @@ Search-enabled projects only: `docs/search/config.json` turns doc-search on, and
 | CLI verbs | `doc-search serve`, `init`, `index` (`--cloud` for the cloud write path), `query`, `status`, `eval`, `check`, `gate` |
 | The local transformer | `docs.model: "transformer:<name>"` (one registry entry, `gte-modernbert-base`), `docs.threads`; the uv extra `local-transformer`; the encode cache `<cache root>/encode/<name>.sqlite` and its lock `<name>.lock` |
 | Environment | `DOC_SEARCH_CLOUD=0` (turns the cloud leg off on one machine; nothing turns it on), `DOC_SEARCH_CACHE_LOCATION` (the cache root for the encode cache, the host lock and build progress; an absolute path), `DOC_SEARCH_LIVE=1` (live tests only), `DOC_SEARCH_MCP=0` (this developer's client cannot run the MCP server: `check` reports `mcp` `off`), `DOC_SEARCH_GATE=0` (the gate hooks allow everything for this developer) |
-| The readiness gate | config keys `required` (`true` makes doc-search a gate) and `requires` (`">=X.Y.Z"`, the version floor); the verdict file `$(git rev-parse --git-path doc-search-gate)`; the hooks `gate session-start --client claude\|codex`, `gate prompt`, `gate tool`; the launcher stamp `# doc-search launcher vX.Y.Z`; the agent rule `references/search-rule.md`, copied between `<!-- doc-superpowers:search-rule vX.Y.Z -->` and `<!-- /doc-superpowers:search-rule -->` |
+| The readiness gate | config keys `required` (`true` makes doc-search a gate) and `requires` (`">=X.Y.Z"`, the version floor), and `security_floor` (`true` halts a required repository below the newest security release in the release notes on disk); the verdict file `$(git rev-parse --git-path doc-search-gate)`; the hooks `gate session-start --client claude\|codex`, `gate prompt`, `gate tool`; the launcher stamp `# doc-search launcher vX.Y.Z`; the agent rule `references/search-rule.md`, copied between `<!-- doc-superpowers:search-rule vX.Y.Z -->` and `<!-- /doc-superpowers:search-rule -->` |
 | Cloud corpus | Firestore collection `doc_chunks` and meta collection `corpus_meta` (both configurable: `cloud.firestore.collection`, `cloud.firestore.meta_collection`); in the meta collection, the stamp document `index` and the lease document `catch_up_lease` (fixed ids) |
 
 ### This repo's exemptions from the Scope → Generated Docs Matrix
@@ -324,7 +325,7 @@ Hooks are organized into three tiers, each independently installable, plus the w
 |------|------|---------|
 | Git | `--git` | pre-commit, post-merge, post-checkout, prepare-commit-msg, pre-push |
 | Claude Code | `--claude` | pre-commit-gate.sh, post-commit-sync.sh, session-summary.sh (and hook-lib.sh, which all three source, as does ledger-session-notices.sh) |
-| CI/CD | `--ci` | doc-freshness-pr.yml, doc-freshness-schedule.yml (the default set); doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml, doc-ledger-publish.yml, doc-index-resolve.yml (by name) |
+| CI/CD | `--ci` | doc-freshness-pr.yml, doc-freshness-schedule.yml (the default set); doc-audit-update.yml, doc-review-pr.yml, doc-release.yml, doc-spec-verify.yml, doc-pr-full-cycle.yml, doc-pr-release.yml, doc-ledger-publish.yml, doc-security-schedule.yml, doc-index-resolve.yml (by name) |
 | Work-ledger git legs | `--ledger` | ledger-pre-commit, ledger-pre-push, ledger-post-commit, installed as `# ledger-superpowers:begin` … `:end` blocks in pre-commit, pre-push and post-commit |
 | Work-ledger Claude events | `--ledger-claude` | ledger-session-notices.sh (SessionStart), ledger-state-watch.sh (PostToolUse, matcher `Write\|Edit\|MultiEdit`), with hook-lib.sh |
 | doc-search MCP server | `--search` | `.claude/doc-superpowers/search-mcp.sh` (a byte copy of `scripts/search/launch.sh`) and the `doc-search` entry in the project's `.mcp.json`, both committed |
@@ -368,17 +369,18 @@ The Claude tier is **per-user**. It **copies** hook scripts to `.claude/hooks/do
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--workflows=<csv\|all\|none>` | the recorded set; first install: the 2 shell workflows | Which workflows; the Claude-powered ones and the shell `doc-ledger-publish` and `doc-index-resolve` are opt-in by name (`all` skips `doc-ledger-publish` without `docs/ledger/config.json`, with a note, and never installs `doc-index-resolve`, which pushes to pull request branches) |
+| `--workflows=<csv\|all\|none>` | the recorded set; first install: the 2 shell workflows | Which workflows; the Claude-powered ones and the shell `doc-ledger-publish`, `doc-security-schedule` and `doc-index-resolve` are opt-in by name (`all` skips `doc-ledger-publish` without `docs/ledger/config.json`, with a note, and never installs `doc-index-resolve`, which pushes to pull request branches) |
 | `--base-branch NAME` | `main` | Target branch for PR checks (validated: git ref name of `A-Za-z0-9._/-`) |
 | `--cron EXPR` | `0 9 * * 1` | Schedule for weekly freshness audit (5 fields) |
 | `--ci-strict[=true\|false]` | `false` | Fail the PR checks on what is otherwise a warning (exit non-zero): `doc-freshness-pr` on stale docs or a freshness check that cannot run, `doc-spec-verify`'s `claims` job on a claims check that cannot run |
 | `--resolve-test-workflow=<file>` | none | The workflow file `doc-index-resolve` dispatches on a branch it merged (a push with the job token starts none): letters, digits and `. _ -`, ending `.yml` or `.yaml`, else exit 2; `=` alone clears it |
 | `--resolve-test-pr-input=<name>` | none | That workflow's `workflow_dispatch` input for the pull request's number, sent as `inputs[<name>]=<number>` (opt-in: GitHub refuses an undeclared input): a letter or `_`, then letters, digits, `_` and `-`, else exit 2; no effect without `--resolve-test-workflow`; `=` alone clears it |
+| `--resolve-pr-runs=approved` | empty | A later step approves the pull request runs the resolver's push holds: rendered as `RESOLVE_PR_RUNS`, the comment says the merge's own checks start once the workflow approves them and asks for no push; `approved` or empty, else exit 2; `=` alone clears it |
 | `--helpers=<true\|false>` | `true` | Deprecated, and inert: the helper directories ship exactly while an installed workflow runs them (the ledger set, `ledger/` and `adapters/`, with `doc-ledger-publish` and every claims-running workflow, on a ledger host only — `docs/ledger/config.json` exists). Its only effect: `--helpers=false` is refused while `doc-pr-release` is selected or installed (the workflow runs the producer helpers) |
 | `--force` | off | Also re-install workflows uninstalled on purpose |
 | `--transient` | off | `uninstall` only: record the removal as temporary (`intentional: false`), so the next plain `install --ci` puts the workflow back. Without it the removal is intentional, and a plain `install --ci` leaves the workflow out |
 
-The choices are recorded in `.claude/doc-superpowers/installed.json` (schema 2: `.tiers.ci.{base_branch,cron,ci_strict,workflows}`, plus `marketplace_url`, `resolve_test_workflow` and `resolve_test_pr_input` when their flags gave them; a top-level `setup` object beside it is setup's team record, which the installer keeps); a plain `install --ci` reproduces them. Vendoring goes through `doc-tools.sh tools install|uninstall --helper <set>` (`doc-pr-release`, `ledger`) and `--step <script>` (each step script of `doc-superpowers-steps` the installed workflows run, read from the workflow files), per installed workflow.
+The choices are recorded in `.claude/doc-superpowers/installed.json` (schema 2: `.tiers.ci.{base_branch,cron,ci_strict,workflows}`, plus `marketplace_url`, `resolve_test_workflow`, `resolve_test_pr_input` and `resolve_pr_runs` when their flags gave them; a top-level `setup` object beside it is setup's team record, which the installer keeps); a plain `install --ci` reproduces them. Vendoring goes through `doc-tools.sh tools install|uninstall --helper <set>` (`doc-pr-release`, `ledger`) and `--step <script>` (each step script of `doc-superpowers-steps` the installed workflows run, read from the workflow files), per installed workflow.
 
 **Retired workflows.** `doc-index-update` was retired in v3.0.0 (it re-baselined every doc edited on the base branch, unread, and failed every run). It is in `install.sh`'s `RETIRED_WORKFLOWS`: any `install --ci` (and a full `uninstall --ci`, or `uninstall --ci --workflows=doc-index-update`) removes a copy that carries the workflow marker and drops its state entry; a file of that name without the marker is kept and reported. `install --ci --workflows=doc-index-update` is an error.
 

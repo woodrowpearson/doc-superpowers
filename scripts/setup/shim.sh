@@ -41,7 +41,7 @@ else
 fi
 
 if [ -z "$root" ]; then
-  echo "doc-superpowers: cannot find doc-superpowers (set DOC_SUPERPOWERS_ROOT, or install the plugin)" >&2
+  echo "doc-superpowers: cannot find doc-superpowers: set DOC_SUPERPOWERS_ROOT to a release checkout (git clone --branch vX.Y.Z https://github.com/woodrowpearson/doc-superpowers.git), or install the plugin" >&2
   exit 2
 fi
 exec bash "$root/scripts/doc-superpowers" "$@"

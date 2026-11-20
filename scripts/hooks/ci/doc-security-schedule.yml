@@ -1,0 +1,58 @@
+# doc-superpowers workflow v1
+# Weekly security-floor check (opt-in: install --ci --workflows=doc-security-schedule)
+# Installed by doc-superpowers hooks installer
+#
+# Reads the newest doc-superpowers release's RELEASE-NOTES.md and fails when
+# the "requires" floor of docs/search/config.json is below the newest
+# security release (a release whose notes section holds "### Security"), so
+# a project learns of a security release without anyone noticing it by hand.
+# Without the config, or with no requires, it passes with a warning.
+#
+# The notes come from the repository the installer records (--marketplace-url,
+# else the plugin's own): fetch-release-notes.sh reads the newest vX.Y.Z tag
+# (git ls-remote), fetches that tag alone (--depth 1) and `git show`s
+# RELEASE-NOTES.md alone.
+# Nothing it fetches runs: the vendored doc-tools.sh reads the notes' headings
+# as data. No secret, read-only token, no write anywhere.
+
+name: Doc Security Floor (Scheduled)
+
+on:
+  schedule:
+    - cron: '__CRON_SCHEDULE__'
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: read
+
+env:
+  # Where the release tags and notes are read from (--marketplace-url, else
+  # the plugin's own repository).
+  DOC_SUPERPOWERS_MARKETPLACE_URL: "__MARKETPLACE_URL__"
+
+jobs:
+  security-floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Pin jq (checksum-verified)
+        run: .github/scripts/doc-superpowers-steps/install-jq.sh
+
+      # Data only: the newest release tag's RELEASE-NOTES.md (one shallow
+      # fetch of that tag, hooks off; at most 2,000,000 bytes) into $RUNNER_TEMP.
+      - name: Fetch the newest release's notes
+        id: notes
+        run: .github/scripts/doc-superpowers-steps/fetch-release-notes.sh "$DOC_SUPERPOWERS_MARKETPLACE_URL" "$RUNNER_TEMP/doc-superpowers-release-notes.md"
+
+      - name: Check requires against the newest security release
+        env:
+          # The tag the notes came from, checked against their first heading.
+          DOC_SUPERPOWERS_RELEASE_TAG: ${{ steps.notes.outputs.tag }}
+        run: .github/scripts/doc-superpowers-steps/security-floor.sh "$RUNNER_TEMP/doc-superpowers-release-notes.md" docs/search/config.json

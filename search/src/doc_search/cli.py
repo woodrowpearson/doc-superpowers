@@ -273,8 +273,9 @@ def _serve(args: argparse.Namespace) -> int:
 # -- init ----------------------------------------------------------------------------------------------------
 
 # Top-level keys `init` leaves out of the file it writes: absent, they take their defaults. A plugin older
-# than 3.11.0 rejects them as unknown, so a repository that never opted into the gate must not carry them.
-INIT_OMITS = ("required", "requires")
+# than 3.11.0 rejects the first two as unknown, and one older than 3.19.0 `security_floor`, so a repository that
+# never opted into the gate must not carry them.
+INIT_OMITS = ("required", "requires", "security_floor")
 
 
 def init_config() -> dict[str, Any]:

@@ -3081,6 +3081,22 @@ tools version|cmd_tools_version|none|
   Print the doc-superpowers version this doc-tools.sh belongs to: the
   first release heading of the plugin's RELEASE-NOTES.md (as check-version
   reads it). Exits 1 from a vendored copy, whose version is unknown.
+tools security-floor|cmd_tools_security_floor|none|floor= ceiling=
+  [--floor X.Y.Z] [--ceiling X.Y.Z] <release-notes file>
+  Read a RELEASE-NOTES.md as data (its headings only; nothing in it runs;
+  at most its first 2,000,000 bytes, cut on a line boundary). A release is
+  a security release when its "## vX.Y.Z (YYYY-MM-DD)" section holds a
+  "### Security" heading before the next "## " heading; nothing inside a
+  code fence counts. Prints "first X.Y.Z" for the first release heading
+  (check-version's; a draft heading above it never counts), "release
+  X.Y.Z 1|0" per release section in file order (1: a security release),
+  then "newest-security X.Y.Z", the newest security release no newer than
+  the first release heading's (a release is never newer than the notes
+  that carry it) nor than --ceiling (the tag the notes came from), when
+  there is one. With --floor, a last line "floor X.Y.Z below|meets"
+  and exit 1 when X.Y.Z is below that release; else exit 0. Exit 2 for a
+  file that cannot be read or a malformed --floor or --ceiling. Runs from a vendored
+  copy too: the doc-security-schedule workflow's step does.
 writing check|cmd_writing|none|
   [--profile terse|full] [--github] [--format text|json] [--name <label>] <file>...
   Lint whole Markdown files, or standard input for "-" (which needs
@@ -8108,6 +8124,111 @@ cmd_tools_version() {
     exit 1
   fi
   _release_notes_version "$_TOOLS_ROOT/RELEASE-NOTES.md" || exit 1
+}
+
+# tools security-floor: the security-release marker (doc_search.releases
+# applies the same rule, and install.sh upgrade runs this verb). The awk
+# program prints "first <X.Y.Z>" for the first release heading (a whole
+# "## vX.Y.Z (YYYY-MM-DD)" line, as releases.first_release reads it: a draft
+# or suffixed heading above it never counts), then "release <X.Y.Z> <0|1>"
+# per release section; a version field over 9 digits is not a release
+# (install.sh's tag rule).
+# shellcheck disable=SC2016  # awk program, not shell expansion
+_AWK_SECURITY="$_AWK_FENCE"'
+function short_fields(v,    p, k, i) {
+  k = split(v, p, ".")
+  for (i = 1; i <= k; i++) if (length(p[i]) > 9) return 0
+  return 1
+}
+{ sub(/\r$/, "") }
+blk_fence($0) || fence_c != "" { next }
+$0 == "##" || /^## / {
+  cur = 0
+  if ($0 ~ /^## v[0-9]+\.[0-9]+\.[0-9]+ \([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\)$/) {
+    v = substr($0, 5)
+    sub(/ .*$/, "", v)
+    if (short_fields(v)) {
+      n++; ver[n] = v; sec[n] = 0; cur = n
+      if (n == 1) print "first " v
+    }
+  }
+  next
+}
+cur && /^### Security[ \t]*$/ { sec[cur] = 1 }
+END { for (i = 1; i <= n; i++) print "release " ver[i] " " sec[i] }
+'
+# The most of a RELEASE-NOTES.md read (doc_search.releases.MAX_NOTES_BYTES).
+_SECURITY_NOTES_MAX=2000000
+
+# _version_lt <a> <b>: release version <a> (X.Y.Z, fields of at most 9
+# digits) is below <b>, per numeric field.
+_version_lt() {
+  local a1 a2 a3 b1 b2 b3
+  IFS=. read -r a1 a2 a3 <<<"$1"
+  IFS=. read -r b1 b2 b3 <<<"$2"
+  [ "$((10#$a1))" -lt "$((10#$b1))" ] && return 0
+  [ "$((10#$a1))" -gt "$((10#$b1))" ] && return 1
+  [ "$((10#$a2))" -lt "$((10#$b2))" ] && return 0
+  [ "$((10#$a2))" -gt "$((10#$b2))" ] && return 1
+  [ "$((10#$a3))" -lt "$((10#$b3))" ]
+}
+
+# _security_notes <file>: the notes as the marker reads them, on stdout: the
+# whole file, or past the cap its first _SECURITY_NOTES_MAX bytes cut after
+# the last whole line (doc_search.releases.notes_text).
+_security_notes() {
+  local size last
+  size=$(wc -c < "$1" | tr -d ' ') || return 1
+  if [ "$size" -le "$_SECURITY_NOTES_MAX" ]; then
+    cat "$1"
+    return
+  fi
+  last=$(head -c "$_SECURITY_NOTES_MAX" "$1" | tail -c 1 | od -An -tx1 | tr -d ' \n')
+  if [ "$last" = 0a ]; then
+    head -c "$_SECURITY_NOTES_MAX" "$1"
+  else
+    head -c "$_SECURITY_NOTES_MAX" "$1" | sed '$d'
+  fi
+}
+
+cmd_tools_security_floor() {
+  local file out first ceiling="" v newest="" floor="${_OPT_floor:-}" cap="${_OPT_ceiling:-}"
+  [ $# -eq 1 ] || _usage_error "tools security-floor" "takes one release-notes file (got $#)"
+  file=$1
+  if [ -n "$floor" ] && ! [[ "$floor" =~ ^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$ ]]; then
+    _usage_error "tools security-floor" "--floor takes a release version X.Y.Z (got '$floor')"
+  fi
+  if [ -n "$cap" ] && ! [[ "$cap" =~ ^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$ ]]; then
+    _usage_error "tools security-floor" "--ceiling takes a release version X.Y.Z (got '$cap')"
+  fi
+  if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+    echo "ERROR: tools security-floor: $file is not a file that can be read" >&2
+    exit 2
+  fi
+  out=$(_security_notes "$file" | LC_ALL=C awk "$_AWK_SECURITY") || {
+    echo "ERROR: tools security-floor: cannot read $file" >&2
+    exit 2
+  }
+  [ -z "$out" ] || printf '%s\n' "$out"
+  first=$(printf '%s\n' "$out" | sed -n 's/^first //p')
+  if [[ "$first" =~ ^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$ ]]; then ceiling=$first; fi
+  # The lower of the two (doc_search.release_cache: min(first, tag)).
+  if [ -n "$cap" ] && { [ -z "$ceiling" ] || _version_lt "$cap" "$ceiling"; }; then ceiling=$cap; fi
+  while IFS=' ' read -r _ v _; do
+    [ -n "$v" ] || continue
+    if [ -n "$ceiling" ] && _version_lt "$ceiling" "$v"; then continue; fi
+    if [ -z "$newest" ] || _version_lt "$newest" "$v"; then newest=$v; fi
+  done <<SECURITY
+$(printf '%s\n' "$out" | awk '$1 == "release" && $3 == 1')
+SECURITY
+  [ -z "$newest" ] || echo "newest-security $newest"
+  [ -n "$floor" ] || _exit_ok
+  if [ -n "$newest" ] && _version_lt "$floor" "$newest"; then
+    echo "floor $floor below $newest"
+    exit 1
+  fi
+  echo "floor $floor meets"
+  _exit_ok
 }
 
 # --- Spec claims -----------------------------------------------------------------

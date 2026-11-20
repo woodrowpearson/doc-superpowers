@@ -20,6 +20,8 @@ The main skill definition is `skills/doc-superpowers/SKILL.md`. Activate it when
 | `help` | One-screen help: every feature and command, or one topic |
 | `hooks install` | Install workflow hooks |
 | `hooks status` | Show installed hooks |
+| `hooks status --check` | The drift check: each committed CI copy and the `--search` launcher against what `install` writes now (exit 1 on drift; `references/hooks.md`) |
+| `hooks upgrade` | `scripts/hooks/install.sh upgrade [--to vX.Y.Z] [--check]`: move a checkout install to a release tag (a plugin install updates with `claude plugin update doc-superpowers`; README → *Installing without a plugin marketplace*) |
 | `hooks uninstall` | Remove installed hooks |
 | `hooks install --search` | Register doc-search, the opt-in MCP server over docs and code (`docs/search/config.json`, `references/search.md`; the server is the `search/` uv package) |
 | `hooks install --search-gate` | Register doc-search's readiness gate as Claude Code and Codex hooks (`.claude/settings.json`, `.codex/hooks.json`; needs the `--search` launcher, the plugin's own copy; `references/hooks.md`) |

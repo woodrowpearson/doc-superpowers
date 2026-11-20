@@ -39,11 +39,16 @@
 # then read them current on the final tree. Any refusal is a skip. The index
 # need not conflict as well.
 #
-# A push with the job token starts no workflow: with TEST_WORKFLOW set, that
-# workflow is dispatched on the branch after the push. A dispatch starts that
-# one workflow only; the pull request's other checks wait for the author's
-# next push (or a close and reopen), which the comment asks for when nothing
-# was dispatched. A re-run would check the original commit, not the merge.
+# A push with the job token starts no workflow, except pull_request runs GitHub
+# holds for approval: with TEST_WORKFLOW set, that workflow is dispatched on
+# the branch after the push. By default (RESOLVE_PR_RUNS empty) nothing
+# approves the held runs: a dispatch starts that one workflow only, the pull
+# request's other checks wait for the author's next push (or a close and
+# reopen), and the comment asks for one when nothing was dispatched. A re-run
+# would check the original commit, not the merge. With
+# RESOLVE_PR_RUNS=approved a later step of the workflow approves them: the
+# comment says the merge's own checks start once the workflow approves them,
+# and asks for no push (an empty commit would start a second set of runs).
 # Each merged or skipped pull request gets one comment marked
 # <!-- doc-superpowers:index-resolve -->, the resolver's own (author login
 # github-actions[bot]) updated in place.
@@ -57,6 +62,9 @@
 #   TEST_PR_INPUT      that workflow's workflow_dispatch input for the pull
 #                      request's number, sent as inputs[<name>]=<number>
 #                      (empty: the dispatch sends no inputs)
+#   RESOLVE_PR_RUNS    approved: a later step approves the pull request runs
+#                      the push holds (empty: nothing does; the comment asks
+#                      for a push)
 #   GH_TOKEN           for gh api
 #   DOC_SUPERPOWERS_GIT_TOKEN  for the fetches and pushes (the git-token block)
 #   GIT_USER_NAME / GIT_USER_EMAIL  the merge commit's author and committer
@@ -105,6 +113,7 @@ REPO="${GITHUB_REPOSITORY:-}"
 PR="${PR:-}"
 TEST_WORKFLOW="${TEST_WORKFLOW:-}"
 TEST_PR_INPUT="${TEST_PR_INPUT:-}"
+RESOLVE_PR_RUNS="${RESOLVE_PR_RUNS:-}"
 RETRY="${RESOLVE_RETRY_SECONDS:-10}"
 GIT_USER_NAME="${GIT_USER_NAME:-github-actions[bot]}"
 GIT_USER_EMAIL="${GIT_USER_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}"
@@ -140,6 +149,10 @@ fi
 if [ -n "$TEST_PR_INPUT" ] && ! [[ "$TEST_PR_INPUT" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]]; then
   usage "TEST_PR_INPUT '$TEST_PR_INPUT' is not an input name (install --ci --resolve-test-pr-input=<name>)"
 fi
+case "$RESOLVE_PR_RUNS" in
+  "" | approved) ;;
+  *) usage "RESOLVE_PR_RUNS '$RESOLVE_PR_RUNS' is not approved or empty (install --ci --resolve-pr-runs=approved)" ;;
+esac
 case "$RETRY" in
   "" | *[!0-9]*) usage "RESOLVE_RETRY_SECONDS '$RETRY' is not a number of seconds" ;;
 esac
@@ -297,15 +310,21 @@ fail() {
 # What starts checks on the merge commit. A re-run does not: it checks the
 # commit its run first checked.
 PUSH_FOR_CHECKS="Before you merge, push a commit (\`git pull\`, then \`git commit --allow-empty -m 'Run the checks'\` and \`git push\`), or close and reopen the pull request."
+# RESOLVE_PR_RUNS=approved: a later step approves the runs the push holds, so
+# no push is asked for (an empty commit would start a second set of runs).
+APPROVED_CHECKS="This merge's own checks start once the workflow approves them; pull before your next push."
 
 # merged <n> <branch> <merge commit> <checks: started | not-started | none>
 # [<note>]: the sentence after the merge commit when docs had their cites
 # recomputed (R6), naming them; the index-only sentence without it.
 merged() {
   local checks
-  case "$4" in
-    started) checks="The \`$(tick "$TEST_WORKFLOW")\` workflow was started on this branch for the merge. The pull request's other checks start on your next push." ;;
-    not-started) checks="The \`$(tick "$TEST_WORKFLOW")\` workflow could not be started for the merge (the resolver's run log says why). $PUSH_FOR_CHECKS" ;;
+  case "$RESOLVE_PR_RUNS:$4" in
+    approved:started) checks="The \`$(tick "$TEST_WORKFLOW")\` workflow was started on this branch for the merge. $APPROVED_CHECKS" ;;
+    approved:not-started) checks="The \`$(tick "$TEST_WORKFLOW")\` workflow could not be started for the merge (the resolver's run log says why). $APPROVED_CHECKS" ;;
+    approved:*) checks="$APPROVED_CHECKS" ;;
+    *:started) checks="The \`$(tick "$TEST_WORKFLOW")\` workflow was started on this branch for the merge. The pull request's other checks start on your next push." ;;
+    *:not-started) checks="The \`$(tick "$TEST_WORKFLOW")\` workflow could not be started for the merge (the resolver's run log says why). $PUSH_FOR_CHECKS" ;;
     *) checks="A push by the workflow token starts no workflow, so this merge has no checks yet. $PUSH_FOR_CHECKS" ;;
   esac
   {

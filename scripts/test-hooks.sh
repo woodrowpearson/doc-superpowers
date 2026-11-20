@@ -3335,6 +3335,55 @@ test_ci_resolve_test_pr_input_choice() {
   teardown
 }
 
+test_ci_resolve_pr_runs_choice() {
+  # --resolve-pr-runs=approved: a later step approves the runs the resolver's
+  # push holds, so its comment says the merge's own checks start then.
+  echo "test: --resolve-pr-runs — empty by default and not recorded; =approved rendered into RESOLVE_PR_RUNS, recorded, reproduced by a plain install, shown by status (and status --check reads no drift), cleared by an empty value; any other value exits 2 and writes nothing; an invalid recorded value exits 1"
+  local before bad
+  setup
+  inst install --ci --workflows=doc-index-resolve
+  assert_eq "0" "$IRC" "install --ci --workflows=doc-index-resolve exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'RESOLVE_PR_RUNS: ""' "not given: RESOLVE_PR_RUNS is empty"
+  assert_eq "null" "$(jq -r '.tiers.ci.resolve_pr_runs' .claude/doc-superpowers/installed.json)" "…and nothing is recorded"
+  inst install --ci --resolve-pr-runs=approved
+  assert_eq "0" "$IRC" "--resolve-pr-runs=approved exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'RESOLVE_PR_RUNS: "approved"' "rendered into RESOLVE_PR_RUNS"
+  assert_eq "approved" "$(jq -r '.tiers.ci.resolve_pr_runs' .claude/doc-superpowers/installed.json)" "recorded as .tiers.ci.resolve_pr_runs"
+  assert_contains "$IOUT" "pr runs approved" "the install's choices line names it"
+  inst install --ci
+  assert_eq "0" "$IRC" "a plain install --ci exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'RESOLVE_PR_RUNS: "approved"' "…and keeps the recorded choice"
+  inst install --ci --resolve-pr-runs approved
+  assert_eq "0" "$IRC" "--resolve-pr-runs approved (a separate value) exits 0"
+  inst status --ci
+  assert_contains "$IOUT" "pr runs approved" "status --ci shows the recorded choice"
+  inst status --ci --json
+  assert_eq "approved" "$(jq -r .tiers.ci.choices.resolve_pr_runs <<<"$IOUT" 2>/dev/null || true)" "…and status --json, under choices"
+  inst status --check --ci
+  assert_eq "0" "$IRC" "status --check --ci reads the rendered copy as current"
+  before=$(_tree_state)
+  for bad in 'yes' 'Approved' 'approved ' 'none' '$(x)' 'a"b'; do
+    inst install --ci "--resolve-pr-runs=$bad"
+    assert_eq "2" "$IRC" "'$bad' is not approved or empty: exit 2"
+  done
+  assert_contains "$IOUT" "--resolve-pr-runs" "…the error names the option"
+  assert_eq "$before" "$(_tree_state)" "…and nothing is written"
+  inst install --resolve-pr-runs=approved
+  assert_eq "2" "$IRC" "without --ci: exit 2 (it applies to the CI tier)"
+  printf '%s\n' "$(jq '.tiers.ci.resolve_pr_runs = "yes"' .claude/doc-superpowers/installed.json)" > .claude/doc-superpowers/installed.json
+  before=$(_tree_state)
+  inst install --ci
+  assert_eq "1" "$IRC" "an invalid recorded value: install --ci exits 1"
+  assert_contains "$IOUT" "pass --resolve-pr-runs" "…and names the flag that fixes it"
+  assert_eq "$before" "$(_tree_state)" "…writing nothing"
+  inst install --ci --resolve-pr-runs=
+  assert_eq "0" "$IRC" "--resolve-pr-runs= (empty) exits 0"
+  assert_contains "$(cat .github/workflows/doc-index-resolve.yml)" 'RESOLVE_PR_RUNS: ""' "…and clears RESOLVE_PR_RUNS"
+  assert_eq "null" "$(jq -r '.tiers.ci.resolve_pr_runs' .claude/doc-superpowers/installed.json)" "…and the record"
+  assert_not_contains "$IOUT" "pr runs" "…and the choices line no longer names it"
+  teardown
+}
+
 test_install_help_lists_index_resolve_as_shell_optin() {
   echo "test: install.sh help — doc-index-resolve under 'shell, opt-in by name'; --workflows=all's help says it never installs it; --resolve-test-workflow is described"
   local out optin claude
@@ -3346,6 +3395,7 @@ test_install_help_lists_index_resolve_as_shell_optin() {
   assert_contains "$out" "never doc-index-resolve" "--workflows=all's help names it"
   assert_contains "$out" "--resolve-test-workflow" "the option is described"
   assert_contains "$out" "--resolve-test-pr-input" "…and --resolve-test-pr-input"
+  assert_contains "$out" "--resolve-pr-runs=approved" "…and --resolve-pr-runs=approved"
 }
 
 test_ci_index_resolve_vendors_the_driver() {
@@ -3409,6 +3459,14 @@ test_install_ci_version_comes_from_doc_tools() {
   assert_contains "$(cat .github/workflows/doc-release.yml 2>/dev/null)" 'DOC_SUPERPOWERS_MARKETPLACE_URL: ""' \
     "a plugin.json naming no repository: an empty marketplace URL, never an abort"
   assert_eq "1" "$(grep -c 'WARN.*DOC_SUPERPOWERS_MARKETPLACE_URL' <<<"$out" || true)" "…one WARN about it"
+  # doc-security-schedule reads the same URL, and fails each week without one.
+  rm -rf .github .claude
+  exit_code=0
+  out=$("$BASH_BIN" "$root/scripts/hooks/install.sh" install --ci --workflows=doc-security-schedule 2>&1) || exit_code=$?
+  assert_eq "0" "$exit_code" "doc-security-schedule from that copy: install exits 0"
+  assert_contains "$(cat .github/workflows/doc-security-schedule.yml 2>/dev/null)" 'DOC_SUPERPOWERS_MARKETPLACE_URL: ""' \
+    "…with an empty marketplace URL"
+  assert_eq "1" "$(grep -c 'WARN.*DOC_SUPERPOWERS_MARKETPLACE_URL.*doc-security-schedule' <<<"$out" || true)" "…one WARN, naming doc-security-schedule"
   rm -rf .github .claude "$root/RELEASE-NOTES.md"
   exit_code=0
   out=$("$BASH_BIN" "$root/scripts/hooks/install.sh" install --ci --workflows=doc-release 2>&1) || exit_code=$?
@@ -4398,6 +4456,7 @@ test_install_help_groups_publish_as_shell_optin
 test_ci_index_resolve_is_opt_in_by_name
 test_ci_resolve_test_workflow_choice
 test_ci_resolve_test_pr_input_choice
+test_ci_resolve_pr_runs_choice
 test_install_help_lists_index_resolve_as_shell_optin
 test_install_ci_helpers_false_still_wires_steps
 test_install_ci_version_comes_from_doc_tools
@@ -6206,6 +6265,15 @@ srl_pregate_root() {
 # CLAUDE_PLUGIN_CACHE and CODEX_HOME are empty unless given (an empty
 # CODEX_HOME is $HOME/.codex, under the fixture's HOME). Sets RUN_RC and
 # RUN_OUT (stdout + stderr).
+# srl_no_root_line [floor]: the launcher's one line when it finds no root,
+# with the env hook path this test's environment gives it (XDG_CONFIG_HOME is
+# outside HOME here, so no "~/") and "--branch v<floor>" when the config has a
+# requires floor.
+srl_no_root_line() {
+  printf 'doc-search: cannot find doc-superpowers: set DOC_SUPERPOWERS_ROOT in %s/doc-search/env.sh to a release checkout (git clone %shttps://github.com/woodrowpearson/doc-superpowers.git), or install the plugin' \
+    "$XDG_CONFIG_HOME" "${1:+--branch v$1 }"
+}
+
 srl_run() {
   local envs=()
   while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
@@ -6242,7 +6310,7 @@ test_launcher_resolution_order() {
   # No root anywhere (an empty plugin cache too).
   srl_run -- serve
   assert_eq "2" "$RUN_RC" "no root: exit 2"
-  assert_eq "doc-search: cannot find doc-superpowers (set DOC_SUPERPOWERS_ROOT)" "$RUN_OUT" "…one stderr line, naming the variable"
+  assert_eq "$(srl_no_root_line)" "$RUN_OUT" "…one stderr line, naming the variable, the env hook and a release checkout"
   # The plugin cache: the newest numeric version dir with search/pyproject.toml.
   cache="$HOME/.claude/plugins/cache"
   for c in mkt/doc-superpowers/9.9.9 mkt/doc-superpowers/10.0.0 mkt/doc-superpowers/10.0.0-rc1 mkt/doc-superpowers/latest other/doc-superpowers/2.0.0; do
@@ -6286,6 +6354,27 @@ test_launcher_resolution_order() {
   srl_run DOC_SUPERPOWERS_ROOT="$envroot" -- query "a b" --limit 3
   assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search query a b --limit 3" "$RUN_OUT" "arguments are passed on after doc-search"
   assert_eq "10" "$(cat "$SRL_BIN/argc")" "…each as one word (\"a b\" is not split)"
+  teardown
+}
+
+test_launcher_no_root_message() {
+  echo "test: launcher: no root — the line names the env hook and a release checkout, at the config's requires floor (none: no --branch)"
+  srh_fixture '{"requires": ">=3.18.0"}'
+  srl_run -- serve
+  assert_eq "2:$(srl_no_root_line 3.18.0)" "$RUN_RC:$RUN_OUT" "requires >=3.18.0: git clone --branch v3.18.0"
+  printf '{\n  "requires":\n    ">=3.19.2"\n}\n' > docs/search/config.json
+  srl_run -- serve
+  assert_eq "2:$(srl_no_root_line 3.19.2)" "$RUN_RC:$RUN_OUT" "…the floor read across lines, without jq"
+  printf '{"requires": null}\n' > docs/search/config.json
+  srl_run -- serve
+  assert_eq "2:$(srl_no_root_line)" "$RUN_RC:$RUN_OUT" "requires null: no --branch"
+  printf '{"requires": ">=3.18.0; rm -rf /"}\n' > docs/search/config.json
+  srl_run -- serve
+  assert_eq "2:$(srl_no_root_line)" "$RUN_RC:$RUN_OUT" "a requires that is not >=X.Y.Z: no --branch, nothing of it shown"
+  srl_run XDG_CONFIG_HOME="$HOME/.config" -- serve
+  assert_contains "$RUN_OUT" "set DOC_SUPERPOWERS_ROOT in ~/.config/doc-search/env.sh to" "an env hook under HOME is shown with ~/"
+  srl_run DOC_SEARCH_ENV_FILE="$TEST_DIR/my env.sh" -- serve
+  assert_contains "$RUN_OUT" "set DOC_SUPERPOWERS_ROOT in $TEST_DIR/my env.sh to" "DOC_SEARCH_ENV_FILE is the file named"
   teardown
 }
 
@@ -7630,7 +7719,7 @@ test_launcher_check_gate_without_a_root() {
   assert_eq "0::" "$RUN_RC:$RUN_OUT:$RUN_ERR" "gate tool, a not-ready verdict, rg: silent, exit 0"
   assert_true "…and leaves the verdict file alone" test -f "$vf"
   srg_run /dev/null -- serve
-  assert_eq "2:doc-search: cannot find doc-superpowers (set DOC_SUPERPOWERS_ROOT)" "$RUN_RC:$RUN_ERR" "serve keeps its failure: exit 2, one stderr line"
+  assert_eq "2:$(srl_no_root_line)" "$RUN_RC:$RUN_ERR" "serve keeps its failure: exit 2, one stderr line"
   teardown
 }
 
@@ -8027,14 +8116,15 @@ test_launcher_check_keeps_the_verdict_file() {
 }
 
 test_launcher_pre_gate_root() {
-  echo "test: launcher: a root that predates the readiness gate (no search/src/doc_search/gate.py) — required: check says not ready, '<X> predates the readiness gate', the plugin update as the fix, exit 1, and gate session-start|prompt answer as with no uv; not required: check exit 4, gate silent; uv is never run"
+  echo "test: launcher: a root that predates the readiness gate (no search/src/doc_search/gate.py) — required: check says not ready, '<X> predates the readiness gate', the root's update as the fix (a plugin install: claude plugin update; an install.sh with upgrade: that, or git pull for a checkout on a branch; else git pull), exit 1, and gate session-start|prompt answer as with no uv; not required: check exit 4, gate silent; uv is never run"
   srh_fixture '{"required": true}'
-  local envroot vf want reason fix codex
+  local envroot vf want reason fix codex cached upg pull
   envroot=$(harness_mktemp_d pregate)
   srl_pregate_root "$envroot" 3.10.0
   vf=$(git rev-parse --git-path doc-search-gate)
   reason="doc-superpowers 3.10.0 predates the readiness gate"
-  fix="claude plugin update doc-superpowers"
+  # Not a plugin install, and its install.sh has no upgrade verb: pulled.
+  fix="git -C $envroot pull"
   rm -f "$SRL_BIN/argc"
   srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check
   assert_eq "1:doc-search: not ready: $reason:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "check: not ready, exit 1"
@@ -8064,6 +8154,52 @@ test_launcher_pre_gate_root() {
   srl_pregate_root "$codex" 3.9.0
   srg_run /dev/null -- check --format json
   assert_eq "$(srg_check_json not-ready 1 "doc-superpowers 3.9.0 predates the readiness gate" "git -C ~/.codex/doc-superpowers pull")" "$(srg_compact)" "the Codex root: its version, git pull as the fix"
+  # A plugin install (a root under CLAUDE_PLUGIN_CACHE): the plugin update, as check.py's _plugin_fix says.
+  cached=$(harness_mktemp_d pregate-cache)
+  srl_pregate_root "$cached/doc-superpowers/doc-superpowers/3.10.0" 3.10.0
+  srg_run /dev/null CLAUDE_PLUGIN_CACHE="$cached" DOC_SUPERPOWERS_ROOT="$cached/doc-superpowers/doc-superpowers/3.10.0" -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "$reason" "claude plugin update doc-superpowers")" "$(srg_compact)" "a plugin install under CLAUDE_PLUGIN_CACHE: claude plugin update as the fix"
+  srl_pregate_root "$HOME/.claude/plugins/marketplaces/doc-superpowers" 3.10.0
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$HOME/.claude/plugins/marketplaces/doc-superpowers" -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "$reason" "claude plugin update doc-superpowers")" "$(srg_compact)" "a root under ~/.claude/plugins/: claude plugin update as the fix"
+  rm -rf "$HOME/.claude/plugins/marketplaces/doc-superpowers"
+  # A root whose install.sh has the upgrade verb: that verb, by the physical path, as check.py's UPGRADE_FIX,
+  # single-quoted when the path needs it (the harness's scratch root holds a space, so it does here).
+  mkdir -p "$envroot/scripts/hooks"
+  printf 'cmd_upgrade() {\n  :\n}\n' > "$envroot/scripts/hooks/install.sh"
+  upg="$(cd "$envroot" && pwd -P)/scripts/hooks/install.sh"
+  case $upg in
+    *[!A-Za-z0-9_@%+=:,./-]*) upg="'$upg'" ;;
+  esac
+  upg="bash $upg upgrade"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "$reason" "$upg")" "$(srg_compact)" "a checkout whose install.sh has upgrade: install.sh upgrade as the fix"
+  # …but a checkout of its own on a branch, which upgrade refuses, is pulled: by the physical path, quoted as
+  # install.sh's sh_squote quotes it (check.py's PULL_FIX).
+  git init -q -b main "$envroot" 2>/dev/null || { git init -q "$envroot" && git -C "$envroot" symbolic-ref HEAD refs/heads/main; }
+  pull="$(cd "$envroot" && pwd -P)"
+  case $pull in
+    *[!A-Za-z0-9_@%+=:,./-]*) pull="'$pull'" ;;
+  esac
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "$reason" "git -C $pull pull")" "$(srg_compact)" "a branch checkout whose install.sh has upgrade: git pull as the fix, the path quoted"
+  # Detached: HEAD set to a commit of the empty tree.
+  git -C "$envroot" update-ref --no-deref HEAD "$(git -C "$envroot" -c user.name=t -c user.email=t@t commit-tree -m c "$(git -C "$envroot" write-tree)")"
+  srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot" -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "$reason" "$upg")" "$(srg_compact)" "…detached (a release checkout): install.sh upgrade again"
+  rm -rf "$envroot/.git"
+  # The Codex root on a branch is upgraded in place, so it keeps install.sh upgrade.
+  mkdir -p "$codex/scripts/hooks"
+  printf 'cmd_upgrade() {\n  :\n}\n' > "$codex/scripts/hooks/install.sh"
+  git init -q -b main "$codex" 2>/dev/null || { git init -q "$codex" && git -C "$codex" symbolic-ref HEAD refs/heads/main; }
+  upg="$(cd "$codex" && pwd -P)/scripts/hooks/install.sh"
+  case $upg in
+    *[!A-Za-z0-9_@%+=:,./-]*) upg="'$upg'" ;;
+  esac
+  srg_run /dev/null -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "doc-superpowers 3.9.0 predates the readiness gate" "bash $upg upgrade")" "$(srg_compact)" "the Codex root on a branch, its install.sh with upgrade: install.sh upgrade, not a pull"
+  rm -rf "$codex/.git" "$codex/scripts"
+  rm -rf "$envroot/scripts"
   # No package.json: the version is unknown.
   srl_pregate_root "$envroot/../pregate-nopkg" none
   srg_run /dev/null DOC_SUPERPOWERS_ROOT="$envroot/../pregate-nopkg" -- check
@@ -8090,6 +8226,7 @@ test_launcher_pre_gate_root() {
 echo ""
 echo "=== doc-search: the launcher and the opt-in --search set ==="
 test_launcher_resolution_order
+test_launcher_no_root_message
 test_launcher_codex_root
 test_launcher_cloud_extra
 test_launcher_transformer_extra
@@ -9242,7 +9379,7 @@ setup_lib() {
 }
 
 test_setup_catalog() {
-  echo "test: #51 setup's catalog: the 15 items of the shared table, in order, with their groups, kinds, options, defaults, scopes and per-user flags; ci.workflows is install.sh's 10 workflows in its order; every item says its scope, whether it blocks a commit and whether it reaches the network, and how to undo it"
+  echo "test: #51 setup's catalog: the 15 items of the shared table, in order, with their groups, kinds, options, defaults, scopes and per-user flags; ci.workflows is install.sh's 11 workflows in its order; every item says its scope, whether it blocks a commit and whether it reaches the network, and how to undo it"
   local cat="$SETUP_ROOT/scripts/setup/catalog.json" got want wf_help id
   assert_true "catalog.json is one JSON object" jq -e 'type == "object"' "$cat"
   got=$(jq -r '[.items[].id] | join(" ")' "$cat" 2>/dev/null || true)
@@ -9283,7 +9420,7 @@ ledger.claude: on,off
 claims: on,off
 bin: on,off"
   assert_eq "$want" "$got" "the options of every toggle, choice and multi (ci.workflows: install.sh help's list)"
-  assert_eq "10" "$(tr ',' '\n' <<<"$wf_help" | grep -c .)" "install.sh lists 10 workflows"
+  assert_eq "11" "$(tr ',' '\n' <<<"$wf_help" | grep -c .)" "install.sh lists 11 workflows"
   for id in $(jq -r '.items[].id' "$cat" 2>/dev/null); do
     got=$(jq -r --arg id "$id" '.items[] | select(.id == $id) | .details' "$cat")
     case "$(jq -r --arg id "$id" '.items[] | select(.id == $id) | .scope' "$cat")" in
@@ -12558,8 +12695,8 @@ test_setup_prompt_items() {
   assert_not_contains "$RUN_OUT" "harness=claude-code" "…and no --list catalog"
   run_setup_prompt 'c\n5\n1\n010\n0\n99999999999999999999\nx\n\n\n\nq\n' --
   assert_eq "0" "$RUN_RC" "the CI multi: 010, 0, a huge number, a word, then q: exit 0 (stderr: $RUN_ERR)"
-  assert_contains "$RUN_OUT" "  10) [x] doc-spec-verify" "…010 ticked the 10th workflow (decimal, not octal 8)"
-  assert_eq "3" "$(grep -c 'answer a number from 1 to 10, or an empty line' <<<"$RUN_OUT")" "…0, the huge number and the word asked again"
+  assert_contains "$RUN_OUT" "  10) [x] doc-review-pr" "…010 ticked the 10th workflow (decimal, not octal 8)"
+  assert_eq "3" "$(grep -c 'answer a number from 1 to 11, or an empty line' <<<"$RUN_OUT")" "…0, the huge number and the word asked again"
   assert_eq "" "$RUN_ERR" "…nothing on stderr (no integer expression error)"
   assert_contains "$RUN_OUT" "Quit: nothing was written." "…q quit"
   assert_not_contains "$RUN_OUT" "harness=claude-code" "…and no --list catalog"
@@ -12868,9 +13005,9 @@ test_setup_tui_same_plan() {
   assert_eq "$yes" "$tui" "…the same files as --yes --set search=on"
   teardown
   # Git hooks opened (row 2): merge-driver (row 5) chosen; CI workflows (row 8)
-  # opened: the cron (row 21) edited, doc-spec-verify (row 19) ticked.
+  # opened: the cron (row 22) edited, doc-spec-verify (row 20) ticked.
   setup
-  run_setup_tui "\\033[B\\n$(tui_downs 2)\\n$(tui_downs 3)\\n$(tui_downs 3)\\n$(tui_downs 13)e0 6 * * 1\\n\\033[A\\033[A \\033\\n\\n" --
+  run_setup_tui "\\033[B\\n$(tui_downs 2)\\n$(tui_downs 3)\\n$(tui_downs 3)\\n$(tui_downs 14)e0 6 * * 1\\n\\033[A\\033[A \\033\\n\\n" --
   assert_eq "0" "$RUN_RC" "git, the cron, a workflow: exit 0 (stderr: $RUN_ERR)"
   assert_contains "$RUN_OUT" "(*) merge-driver" "the choice's options shown, merge-driver chosen"
   assert_contains "$RUN_OUT" "Schedule (cron): 0 6 * * 1 (changed)" "the value edited"
@@ -12883,7 +13020,7 @@ test_setup_tui_same_plan() {
   yes=$(tui_state_untimed)
   assert_eq "$yes" "$tui" "…the same files as --yes with those --set values (the CI record's install times aside)"
   # An invalid value says why and changes nothing; ? shows the item's help.
-  run_setup_tui "\\033[B\\n$(tui_downs 4)\\n$(tui_downs 13)enot a cron\\n?" --
+  run_setup_tui "\\033[B\\n$(tui_downs 4)\\n$(tui_downs 14)enot a cron\\n?" --
   assert_contains "$RUN_OUT" "ci.cron takes" "an invalid cron: the reason"
   assert_contains "$(tui_frame last)" "Undo: " "?: the item's help, its undo"
   # A locked item says why.
@@ -13162,6 +13299,1074 @@ test_setup_tui_same_plan
 test_setup_tui_scope_and_build
 test_setup_tui_traps_kept
 test_setup_tui_tty_restore
+
+# --- install.sh status --check -----------------------------------------------------
+#
+# status --check compares each committed copy (the installed workflows, the
+# vendored doc-tools.sh and helpers, the search launcher) with what install
+# would write now: a copy that differs is listed under drift, and a drift or
+# a workflow recorded installed but missing exits 1.
+
+# ck_fixture: a project with docs/search/config.json and the CI tier (the
+# default workflows) and the --search set installed, all committed.
+ck_fixture() {
+  srh_fixture
+  inst install --ci --search
+  [ "$IRC" = 0 ] || echo "ck_fixture: install --ci --search failed: $IOUT" >&2
+  git add -A && git commit -qm "install --ci --search"
+}
+
+test_status_check_reports_drift() {
+  echo "test: status --check — exit 0 on a fresh install --ci --search; a byte appended to the vendored doc-tools.sh, a changed launcher stamp, an edited workflow or step script: exit 1, the path named drifted; --json lists them under drift, the workflow and launcher states unchanged"
+  ck_fixture
+  inst status --check --ci --search
+  assert_eq "0" "$IRC" "a fresh install: exit 0 (output: $IOUT)"
+  assert_contains "$IOUT" "no copy drifted" "…and says so"
+  inst status --check --ci --search --json
+  assert_eq "0" "$IRC" "--json: exit 0 too"
+  assert_eq "[]|checked" "$(srh_json '"\(.drift | tojson)|\(.tiers.ci.drift_check)"')" "…drift is [] and the CI tier was checked"
+  printf 'x' >> .github/scripts/doc-tools.sh
+  inst status --check --ci --search
+  assert_eq "1" "$IRC" "a byte appended to .github/scripts/doc-tools.sh: exit 1"
+  assert_contains "$IOUT" "drifted: .github/scripts/doc-tools.sh" "…naming that path as drifted"
+  awk 'NR == 2 { print "# doc-search launcher v0.0.1"; next } { print }' .claude/doc-superpowers/search-mcp.sh > ck.tmp
+  cat ck.tmp > .claude/doc-superpowers/search-mcp.sh
+  rm -f ck.tmp
+  inst status --check --ci --search
+  assert_eq "1" "$IRC" "the launcher's stamp line changed: exit 1"
+  assert_contains "$IOUT" "drifted: .claude/doc-superpowers/search-mcp.sh" "…the launcher named drifted"
+  inst status --check --ci --search --json
+  assert_eq "1" "$IRC" "--json: exit 1"
+  assert_eq '[".github/scripts/doc-tools.sh",".claude/doc-superpowers/search-mcp.sh"]' "$(srh_json '.drift | tojson')" "…both paths under drift"
+  assert_eq "installed|installed|outdated" \
+    "$(srh_json '"\(.tiers.ci.workflows["doc-freshness-pr"].state)|\(.tiers.ci.workflows["doc-freshness-schedule"].state)|\(.tiers.search.launcher)"')" \
+    "…the workflow states keep their values, the launcher its outdated"
+  git checkout -q -- .github/scripts/doc-tools.sh .claude/doc-superpowers/search-mcp.sh
+  echo "# edited" >> .github/workflows/doc-freshness-pr.yml
+  echo "# edited" >> .github/scripts/doc-superpowers-steps/freshness-check.sh
+  inst status --check --ci --search --json
+  assert_eq "1" "$IRC" "an edited workflow and step script: exit 1"
+  assert_eq '[".github/workflows/doc-freshness-pr.yml",".github/scripts/doc-superpowers-steps/freshness-check.sh"]' "$(srh_json '.drift | tojson')" "…both under drift"
+  inst status --check
+  assert_eq "1" "$IRC" "status --check with no tier named checks the CI tier and the --search set: exit 1"
+  assert_contains "$IOUT" "drifted: .github/workflows/doc-freshness-pr.yml" "…naming the workflow"
+  inst status --ci --search --json
+  assert_eq "0" "$IRC" "status --json without --check: exit 0 whatever drifted"
+  assert_eq "false" "$(srh_json 'has("drift")')" "…and no drift key"
+  inst status --ci --search
+  assert_eq "0" "$IRC" "plain status: exit 0"
+  assert_not_contains "$IOUT" "drifted:" "…with no drift lines"
+  git checkout -q -- .github
+  inst status --check --ci --search
+  assert_eq "0" "$IRC" "restored: exit 0"
+  inst install --check --ci
+  assert_eq "2" "$IRC" "--check on install: a usage error (exit 2)"
+  teardown
+}
+
+test_status_check_untracked_and_missing() {
+  echo "test: status --check — with no install record the CI copies are untracked (exit 0); a workflow recorded installed but missing exits 1; the launcher's compare needs no record; an unreadable record exits 1"
+  srh_fixture
+  mkdir -p .github/scripts .claude/doc-superpowers
+  printf 'not the plugin copy\n' > .github/scripts/doc-tools.sh
+  cp "$SCRIPT_DIR/search/launch.sh" .claude/doc-superpowers/search-mcp.sh
+  inst status --check --ci --search
+  assert_eq "0" "$IRC" "copies made by hand, no installed.json: exit 0 (output: $IOUT)"
+  assert_contains "$IOUT" "untracked" "…the CI tier is untracked"
+  inst status --check --ci --search --json
+  assert_eq "0" "$IRC" "--json: exit 0"
+  assert_eq "untracked|[]" "$(srh_json '"\(.tiers.ci.drift_check)|\(.drift | tojson)"')" "…drift_check untracked, drift []"
+  echo "# edited" >> .claude/doc-superpowers/search-mcp.sh
+  inst status --check --search --json
+  assert_eq "1" "$IRC" "an edited launcher with no record: exit 1"
+  assert_eq '[".claude/doc-superpowers/search-mcp.sh"]' "$(srh_json '.drift | tojson')" "…the launcher under drift"
+  rm -rf .github .claude
+  inst install --ci
+  git add -A && git commit -qm ci
+  rm -f .github/workflows/doc-freshness-schedule.yml
+  inst status --check --ci --json
+  assert_eq "1" "$IRC" "a workflow recorded installed but missing: exit 1"
+  assert_eq "recorded-missing|[]" "$(srh_json '"\(.tiers.ci.workflows["doc-freshness-schedule"].state)|\(.drift | tojson)"')" "…its state recorded-missing, nothing drifted"
+  inst status --check --ci
+  assert_eq "1" "$IRC" "…the human form exits 1 too"
+  assert_contains "$IOUT" "recorded installed but missing" "…and says so"
+  git checkout -q -- .github
+  printf '<<<<<<< ours\n{}\n' > .claude/doc-superpowers/installed.json
+  inst status --check --ci --json
+  assert_eq "1" "$IRC" "an unreadable install record: exit 1 (nothing can be checked)"
+  assert_eq "unreadable" "$(srh_json .tiers.ci.drift_check)" "…drift_check unreadable"
+  teardown
+}
+
+test_status_check_names_no_checked_tier() {
+  echo "test: status --check naming only tiers it does not check (--git, --claude, --ledger, --ledger-claude, --search-gate): a usage error, exit 2, saying nothing was checked and what --check covers; with --ci or --search beside them it runs"
+  srh_fixture
+  local t
+  for t in --git --claude --ledger --ledger-claude --search-gate "--git --claude"; do
+    # shellcheck disable=SC2086  # one or two flags
+    inst status --check $t
+    assert_eq "2" "$IRC" "status --check $t: exit 2"
+    assert_contains "$IOUT" "nothing checked (the drift check covers --ci and --search)" "…saying nothing was checked"
+    assert_not_contains "$IOUT" "no copy drifted" "…never that no copy drifted"
+  done
+  inst status --check --git --json
+  assert_eq "2" "$IRC" "status --check --git --json: exit 2 too"
+  inst status --check --git --ci
+  assert_eq "0" "$IRC" "status --check --git --ci: runs, exit 0 ($IOUT)"
+  assert_contains "$IOUT" "Drift check:" "…with a drift-check line"
+  teardown
+}
+
+test_status_check_reads_the_pin_offline() {
+  echo "test: status --check renders an AI workflow with the DOC_SUPERPOWERS_COMMIT its committed file holds, and never reads the marketplace (no git ls-remote)"
+  srh_fixture
+  local pin shim real
+  pin=0123456789abcdef0123456789abcdef01234567
+  DOC_SUPERPOWERS_PLUGIN_COMMIT=$pin inst install --ci --workflows=doc-review-pr --marketplace-url https://example.invalid/market.git
+  assert_eq "0" "$IRC" "install --ci doc-review-pr with a given commit: exit 0 ($IOUT)"
+  git add -A && git commit -qm ci
+  shim=$(harness_mktemp_d git-shim)
+  real=$(command -v git)
+  printf '#!/bin/sh\nif [ "$1" = ls-remote ]; then : > "%s/ls-remote-ran"; exit 128; fi\nexec "%s" "$@"\n' "$TEST_DIR" "$real" > "$shim/git"
+  chmod +x "$shim/git"
+  IRC=0
+  IOUT=$(PATH="$shim:$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/install.sh" status --check --ci 2>&1) || IRC=$?
+  assert_eq "0" "$IRC" "status --check: exit 0 ($IOUT)"
+  assert_true "…git ls-remote never ran" test ! -e "$TEST_DIR/ls-remote-ran"
+  assert_contains "$(cat .github/workflows/doc-review-pr.yml)" "DOC_SUPERPOWERS_COMMIT: \"$pin\"" "…the workflow holds the pin"
+  teardown
+}
+
+# ck_repo_copy <dest>: what check-self-install.sh and status --check read of
+# this checkout (its working tree, untracked files too), as a new repository.
+ck_repo_copy() {
+  local root f
+  root=$(cd "$SCRIPT_DIR/.." && pwd)
+  mkdir -p "$1"
+  git -C "$root" ls-files -co --exclude-standard -z -- scripts .github .claude/doc-superpowers .claude-plugin \
+    RELEASE-NOTES.md skills/doc-superpowers/SKILL.md .gitattributes \
+    | while IFS= read -r -d '' f; do
+      [ -f "$root/$f" ] || continue
+      mkdir -p "$1/$(dirname "$f")"
+      cp -p "$root/$f" "$1/$f"
+    done
+  git -C "$1" init -q
+}
+
+test_status_check_agrees_with_check_self_install() {
+  echo "test: on a copy of this repository, check-self-install.sh and status --check --ci both exit 0; with a byte appended to its .github/scripts/doc-tools.sh, or a changed workflow, both exit 1"
+  setup
+  local repo="$TEST_DIR/repo" rc
+  ck_repo_copy "$repo"
+  rc=0
+  (cd "$repo" && BASH_BIN="$BASH_BIN" PATH="$REAL_PATH" "$BASH_BIN" scripts/check-self-install.sh >/dev/null 2>&1) || rc=$?
+  assert_eq "0" "$rc" "check-self-install.sh on the copy: exit 0"
+  IRC=0
+  IOUT=$(cd "$repo" && PATH="$REAL_PATH" "$BASH_BIN" scripts/hooks/install.sh status --check --ci 2>&1) || IRC=$?
+  assert_eq "0" "$IRC" "status --check --ci on the copy: exit 0 ($IOUT)"
+  printf 'x' >> "$repo/.github/scripts/doc-tools.sh"
+  rc=0
+  (cd "$repo" && BASH_BIN="$BASH_BIN" PATH="$REAL_PATH" "$BASH_BIN" scripts/check-self-install.sh >/dev/null 2>&1) || rc=$?
+  assert_eq "1" "$rc" "a byte appended to .github/scripts/doc-tools.sh: check-self-install.sh exits 1"
+  IRC=0
+  IOUT=$(cd "$repo" && PATH="$REAL_PATH" "$BASH_BIN" scripts/hooks/install.sh status --check --ci 2>&1) || IRC=$?
+  assert_eq "1" "$IRC" "…and status --check --ci exits 1"
+  assert_contains "$IOUT" "drifted: .github/scripts/doc-tools.sh" "…naming it"
+  cp -p "$repo/scripts/doc-tools.sh" "$repo/.github/scripts/doc-tools.sh"
+  echo "# edited" >> "$repo/.github/workflows/doc-freshness-schedule.yml"
+  rc=0
+  (cd "$repo" && BASH_BIN="$BASH_BIN" PATH="$REAL_PATH" "$BASH_BIN" scripts/check-self-install.sh >/dev/null 2>&1) || rc=$?
+  assert_eq "1" "$rc" "an edited workflow: check-self-install.sh exits 1"
+  IRC=0
+  IOUT=$(cd "$repo" && PATH="$REAL_PATH" "$BASH_BIN" scripts/hooks/install.sh status --check --ci 2>&1) || IRC=$?
+  assert_eq "1" "$IRC" "…and status --check --ci exits 1"
+  assert_contains "$IOUT" "drifted: .github/workflows/doc-freshness-schedule.yml" "…naming it"
+  teardown
+}
+
+echo ""
+echo "=== install.sh status --check ==="
+test_status_check_reports_drift
+test_status_check_untracked_and_missing
+test_status_check_names_no_checked_tier
+test_status_check_reads_the_pin_offline
+test_status_check_agrees_with_check_self_install
+
+# --- doc-security-schedule: the weekly security-floor check -------------------------
+
+# sf_step <config JSON or "-" for no config> <notes file>: run the step script
+# on <notes file> and docs/search/config.json. Sets RUN_RC and RUN_OUT (both
+# streams: a GitHub annotation is a stdout line).
+sf_step() {
+  rm -f docs/search/config.json
+  if [ "$1" != - ]; then
+    mkdir -p docs/search
+    printf '%s\n' "$1" > docs/search/config.json
+  fi
+  RUN_RC=0
+  RUN_OUT=$(env DOC_TOOLS="$DOC_TOOLS" DOC_SUPERPOWERS_RELEASE_TAG="${SF_TAG:-}" PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/ci/doc-superpowers-steps/security-floor.sh" "$2" docs/search/config.json 2>&1) || RUN_RC=$?
+}
+
+test_security_floor_step() {
+  echo "test: security-floor.sh — requires below the newest security release: exit 1 naming both versions; meeting it: exit 0; a fenced ### Security does not count; no requires (or no config): exit 0 with a warning"
+  setup
+  local fixture="$SCRIPT_DIR/../search/tests/fixtures/release-notes-security.md"
+  sf_step '{"requires": ">=3.18.0"}' "$fixture"
+  assert_eq "1" "$RUN_RC" "requires >=3.18.0, newest security release 3.19.0: exit 1 ($RUN_OUT)"
+  assert_contains "$RUN_OUT" "::error::" "…an error annotation"
+  assert_contains "$RUN_OUT" "3.18.0" "…naming the floor"
+  assert_contains "$RUN_OUT" "3.19.0" "…and the security release"
+  sf_step '{"requires": ">=3.19.0"}' "$fixture"
+  assert_eq "0" "$RUN_RC" "requires >=3.19.0: exit 0 ($RUN_OUT)"
+  assert_not_contains "$RUN_OUT" "::error::" "…no error"
+  printf '# Release Notes\n\n## v3.20.0 (2026-11-20)\n\n```\n### Security\n```\n\n## v3.19.0 (2026-11-19)\n\n### Changed\n- x\n' > fenced.md
+  sf_step '{"requires": ">=3.18.0"}' fenced.md
+  assert_eq "0" "$RUN_RC" "a ### Security inside a code fence is no security release: exit 0 ($RUN_OUT)"
+  sf_step '{"required": true}' "$fixture"
+  assert_eq "0" "$RUN_RC" "no requires: exit 0"
+  assert_contains "$RUN_OUT" "::warning::" "…with a warning"
+  assert_contains "$RUN_OUT" "requires" "…that names requires"
+  sf_step '{"requires": null}' "$fixture"
+  assert_eq "0" "$RUN_RC" "requires null: exit 0"
+  assert_contains "$RUN_OUT" "::warning::" "…with a warning"
+  sf_step - "$fixture"
+  assert_eq "0" "$RUN_RC" "no docs/search/config.json: exit 0"
+  assert_contains "$RUN_OUT" "::warning::" "…with a warning"
+  sf_step '{"requires": "3.18"}' "$fixture"
+  assert_eq "1" "$RUN_RC" "a requires that is not >=X.Y.Z: exit 1"
+  sf_step '{"requires": ">=3.18.0"}' "$TEST_DIR/no such notes.md"
+  assert_eq "1" "$RUN_RC" "notes that cannot be read: exit 1"
+  teardown
+}
+
+test_security_floor_step_checks_the_tag() {
+  echo "test: security-floor.sh — DOC_SUPERPOWERS_RELEASE_TAG (the tag fetch-release-notes.sh chose): notes whose first release heading is another version warn and are clamped to the tag, as install.sh upgrade's upg_scan does; the same version, no warning; a malformed tag, exit 1"
+  setup
+  local fixture="$SCRIPT_DIR/../search/tests/fixtures/release-notes-security.md"
+  SF_TAG=3.19.0 sf_step '{"requires": ">=3.18.0"}' "$fixture"
+  assert_eq "1" "$RUN_RC" "tag 3.19.0, notes opening 3.19.0, requires >=3.18.0: exit 1 as before"
+  assert_not_contains "$RUN_OUT" "::warning::" "…no warning"
+  SF_TAG=3.18.0 sf_step '{"requires": ">=3.18.0"}' "$fixture"
+  assert_contains "$RUN_OUT" "::warning::" "tag 3.18.0, notes opening 3.19.0: a warning"
+  assert_contains "$RUN_OUT" "v3.18.0" "…naming the tag"
+  assert_contains "$RUN_OUT" "3.19.0" "…and the notes' first release heading"
+  assert_eq "0" "$RUN_RC" "…clamped to the tag: 3.19.0's security section dropped, requires >=3.18.0 meets 3.18.0 ($RUN_OUT)"
+  printf '# Release Notes\n\nno release heading\n' > bare.md
+  SF_TAG=3.19.0 sf_step '{"requires": ">=3.18.0"}' bare.md
+  assert_contains "$RUN_OUT" "::warning::" "notes with no release heading under tag 3.19.0: a warning"
+  assert_eq "0" "$RUN_RC" "…and no security release, exit 0"
+  SF_TAG='3.19.0;x' sf_step '{"requires": ">=3.19.0"}' "$fixture"
+  assert_eq "1" "$RUN_RC" "a tag that is not X.Y.Z (requires >=3.19.0, which meets): exit 1"
+  assert_contains "$RUN_OUT" "is not a release version" "…saying why"
+  teardown
+}
+
+# frn_tag <repo> <tag> [<notes text>]: commit (RELEASE-NOTES.md holding the
+# text, or no such file without one) and tag it.
+frn_tag() {
+  if [ "$#" -ge 3 ]; then printf '%s' "$3" > "$1/RELEASE-NOTES.md"; else rm -f "$1/RELEASE-NOTES.md"; printf '%s\n' "$2" > "$1/other.txt"; fi
+  git -C "$1" add -A >/dev/null
+  git -C "$1" -c user.name=t -c user.email=t@example.invalid commit -q -m "$2"
+  git -C "$1" tag "$2"
+}
+
+# frn_run <URL>: run fetch-release-notes.sh into notes.out. Sets RUN_RC, RUN_OUT.
+frn_run() {
+  rm -f notes.out
+  RUN_RC=0
+  rm -f gh-output
+  RUN_OUT=$(env RUNNER_TEMP="$PWD/runner-temp" GITHUB_OUTPUT="$PWD/gh-output" PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/ci/doc-superpowers-steps/fetch-release-notes.sh" "$1" notes.out 2>&1) || RUN_RC=$?
+}
+
+test_fetch_release_notes_step() {
+  echo "test: fetch-release-notes.sh — the highest vX.Y.Z tag (numeric order, other names ignored), fetched alone and shallow; its RELEASE-NOTES.md, capped at 2,000,000 bytes; an empty URL, no release tag, a tag without notes: exit 1"
+  setup
+  local rel="$PWD/releases" url
+  mkdir -p "$rel" runner-temp
+  git init -q "$rel"
+  url="file://$rel"
+  frn_tag "$rel" v3.9.0 "notes of 3.9.0"
+  frn_tag "$rel" v3.10.0 "notes of 3.10.0"
+  frn_tag "$rel" v4.0.0-rc1 "notes of an rc"
+  frn_tag "$rel" latest "notes of a moving tag"
+  frn_run "$url"
+  assert_eq "0" "$RUN_RC" "a repository with release tags: exit 0 ($RUN_OUT)"
+  assert_eq "notes of 3.10.0" "$(cat notes.out 2>/dev/null || true)" "…v3.10.0's notes (3.10 above 3.9; v4.0.0-rc1 and latest ignored)"
+  assert_contains "$RUN_OUT" "v3.10.0" "…naming the tag"
+  assert_true "…fetched shallow" test -f runner-temp/doc-superpowers-releases.git/shallow
+  assert_eq "1" "$(git -C runner-temp/doc-superpowers-releases.git for-each-ref --format='%(refname)' | grep -c . || true)" "…that tag alone"
+  assert_eq "tag=3.10.0" "$(cat gh-output 2>/dev/null || true)" "…and the chosen tag recorded as the step output tag (GITHUB_OUTPUT)"
+  # Over the cap: the first 2,000,000 bytes.
+  frn_tag "$rel" v3.11.0 "$(head -c 2100000 /dev/zero | tr '\0' 'x')"
+  frn_run "$url"
+  assert_eq "0" "$RUN_RC" "notes over 2,000,000 bytes: exit 0"
+  assert_eq "2000000" "$(wc -c < notes.out | tr -d ' ')" "…cut to 2,000,000 bytes"
+  frn_tag "$rel" v3.12.0
+  frn_run "$url"
+  assert_eq "1" "$RUN_RC" "the newest tag holds no RELEASE-NOTES.md: exit 1"
+  assert_contains "$RUN_OUT" "::error::" "…an error annotation"
+  assert_contains "$RUN_OUT" "v3.12.0" "…naming the tag"
+  frn_run ""
+  assert_eq "1" "$RUN_RC" "an empty URL: exit 1"
+  assert_contains "$RUN_OUT" "--marketplace-url" "…saying how to set one"
+  frn_run "file://$PWD/no-such-repository"
+  assert_eq "1" "$RUN_RC" "a URL that cannot be listed: exit 1"
+  local bare="$PWD/untagged"
+  git init -q "$bare"
+  frn_tag "$bare" latest "notes"
+  frn_run "file://$bare"
+  assert_eq "1" "$RUN_RC" "no vX.Y.Z tag: exit 1"
+  assert_contains "$RUN_OUT" "no release tag" "…saying so"
+  teardown
+}
+
+test_security_schedule_is_opt_in() {
+  echo "test: doc-security-schedule — not in the default set; installed by name (and by --workflows=all), with its step script and install-jq.sh vendored; read-only, no secret, pinned actions; it fetches only RELEASE-NOTES.md and runs nothing it fetched"
+  local tpl="$HOOKS_DIR/ci/doc-security-schedule.yml" body
+  assert_file_exists "$tpl" "the template exists"
+  assert_eq "# doc-superpowers workflow v1" "$(head -n 1 "$tpl" 2>/dev/null || true)" "it carries the workflow marker"
+  body=$(cat "$tpl")
+  assert_contains "$body" "workflow_dispatch" "…runs by hand"
+  assert_contains "$body" "- cron: '__CRON_SCHEDULE__'" "…and on the recorded cron"
+  assert_not_contains "$body" 'secrets.' "…uses no secret"
+  assert_eq "" "$(grep -E ':[[:space:]]*write' "$tpl" || true)" "…grants no write permission"
+  assert_contains "$body" "contents: read" "…contents: read"
+  assert_eq "" "$(grep -E '^[[:space:]]*-?[[:space:]]*uses:' "$tpl" | grep -vE '@[0-9a-f]{40}( |$)' || true)" "…every action pinned by commit"
+  assert_contains "$body" ".github/scripts/doc-superpowers-steps/fetch-release-notes.sh \"\$DOC_SUPERPOWERS_MARKETPLACE_URL\"" "…its fetch is fetch-release-notes.sh, on the rendered URL"
+  assert_contains "$body" 'DOC_SUPERPOWERS_RELEASE_TAG: ${{ steps.notes.outputs.tag }}' "…and the check reads the tag it chose"
+  setup
+  inst install --ci
+  assert_eq "0" "$IRC" "install --ci: exit 0"
+  assert_file_not_exists ".github/workflows/doc-security-schedule.yml" "the default set does not install it"
+  inst install --ci --workflows=doc-security-schedule
+  assert_eq "0" "$IRC" "install --ci --workflows=doc-security-schedule: exit 0 ($IOUT)"
+  assert_file_exists ".github/workflows/doc-security-schedule.yml" "the named workflow is installed"
+  assert_true "its step script is vendored executable" test -x .github/scripts/doc-superpowers-steps/security-floor.sh
+  assert_true "…and install-jq.sh" test -x .github/scripts/doc-superpowers-steps/install-jq.sh
+  assert_true "…and fetch-release-notes.sh" test -x .github/scripts/doc-superpowers-steps/fetch-release-notes.sh
+  assert_contains "$(cat .github/workflows/doc-security-schedule.yml)" '"https://github.com/woodrowpearson/doc-superpowers.git"' "the release notes' repository: the marketplace URL, plugin.json's by default"
+  _assert_installed_workflows_wired "install --ci --workflows=doc-security-schedule"
+  inst status --check --ci
+  assert_eq "0" "$IRC" "status --check --ci: exit 0 ($IOUT)"
+  teardown
+  setup
+  inst install --ci --workflows=all
+  assert_eq "0" "$IRC" "install --ci --workflows=all: exit 0"
+  assert_file_exists ".github/workflows/doc-security-schedule.yml" "--workflows=all installs it"
+  teardown
+}
+
+echo ""
+echo "=== doc-security-schedule ==="
+test_security_floor_step
+test_security_floor_step_checks_the_tag
+test_fetch_release_notes_step
+test_security_schedule_is_opt_in
+
+# --- install.sh upgrade ---------------------------------------------------------
+#
+# The fixtures never touch the network: a local bare "origin" of
+# doc-superpowers, built once per suite under the scratch root, with tags
+# v3.17.0, v3.18.0 and v3.19.0 (only v3.19.0 has a ### Security section).
+# Every commit holds this checkout's installer and doc-tools.sh, so each tag's
+# installer is the one under test.
+
+UPG_ORIGIN=""
+
+# upg_release_notes <version> <date> [security]: a RELEASE-NOTES.md whose first
+# release is <version>; a fenced security heading and an older release follow.
+upg_release_notes() {
+  printf '# Release Notes\n\n## v%s (%s)\n\nThe release.\n' "$1" "$2"
+  if [ "${3:-}" = security ]; then
+    printf '\n### Security\n- A fix users must upgrade for.\n'
+  fi
+  printf '\n```\n## v99.0.0 (2026-01-01)\n### Security\n```\n\n## v3.0.0 (2026-01-01)\n\nAn old release.\n'
+}
+
+# upg_tag_release <work tree> <version> <date> [security]: commit a release and tag it.
+upg_tag_release() {
+  upg_release_notes "$2" "$3" ${4+"$4"} > "$1/RELEASE-NOTES.md"
+  git -C "$1" add -A
+  git -C "$1" commit -qm "release v$2"
+  git -C "$1" tag "v$2"
+}
+
+upg_origin() {
+  [ -z "$UPG_ORIGIN" ] || return 0
+  local src
+  src=$(harness_mktemp_d upg-src)
+  git -C "$src" init -q -b main 2>/dev/null || { git -C "$src" init -q && git -C "$src" symbolic-ref HEAD refs/heads/main; }
+  mkdir -p "$src/scripts" "$src/.claude-plugin" "$src/skills/doc-superpowers"
+  # doc-tools.sh tools version reads a plugin's notes only beside its SKILL.md.
+  printf -- '---\nname: doc-superpowers\n---\n' > "$src/skills/doc-superpowers/SKILL.md"
+  cp -R "$HOOKS_DIR" "$src/scripts/hooks"
+  cp "$SCRIPT_DIR/doc-tools.sh" "$src/scripts/doc-tools.sh"
+  printf '{"name": "doc-superpowers", "repository": "https://example.invalid/doc-superpowers"}\n' > "$src/.claude-plugin/plugin.json"
+  upg_tag_release "$src" 3.17.0 2026-11-17
+  upg_tag_release "$src" 3.18.0 2026-11-18
+  upg_tag_release "$src" 3.19.0 2026-11-19 security
+  UPG_ORIGIN="$(harness_mktemp_d upg-origin)/doc-superpowers.git"
+  git clone -q --bare "$src" "$UPG_ORIGIN"
+}
+
+# upg_bare_copy <name>: a per-test bare copy of the origin (tags and all) → UPG_BARE.
+upg_bare_copy() {
+  UPG_BARE="$TEST_DIR/$1.git"
+  git clone -q --bare "$UPG_ORIGIN" "$UPG_BARE"
+}
+
+# upg_release_root [origin] [base name]: a clone of <origin> (default the
+# suite's) at <base>/doc-superpowers, on main, and a detached worktree of it at
+# the v3.18.0 tag, <base>/doc-superpowers-v3.18.0: UPG_ROOT. UPG_BASE is <base>,
+# UPG_BASE_P its physical path, UPG_NEW the worktree upgrade makes for v3.19.0.
+upg_release_root() {
+  UPG_BASE="$TEST_DIR/${2:-releases}"
+  mkdir -p "$UPG_BASE"
+  git clone -q "${1:-$UPG_ORIGIN}" "$UPG_BASE/doc-superpowers"
+  git -C "$UPG_BASE/doc-superpowers" worktree add --detach "$UPG_BASE/doc-superpowers-v3.18.0" v3.18.0 >/dev/null 2>&1
+  UPG_ROOT="$UPG_BASE/doc-superpowers-v3.18.0"
+  UPG_BASE_P=$(cd "$UPG_BASE" && pwd -P)
+  UPG_NEW="$UPG_BASE_P/doc-superpowers-v3.19.0"
+  UPG_CACHE="$HOME/.cache/doc-superpowers"
+  UPG_ENV="$XDG_CONFIG_HOME/doc-search/env.sh"
+}
+
+# upg_run [VAR=value …] -- <upgrade args…>: run UPG_ROOT's installer's upgrade
+# from the test's directory, with the per-user variables cleared (a VAR=value
+# pair sets one). Sets RUN_RC, RUN_OUT and RUN_ERR.
+upg_run() {
+  local envs=() errf
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    envs+=("$1")
+    shift
+  done
+  [ "$#" -gt 0 ] && shift
+  errf=$(harness_mktemp upg.err)
+  RUN_RC=0
+  RUN_OUT=$(env PATH="$REAL_PATH" CLAUDE_PLUGIN_CACHE= CODEX_HOME= XDG_CACHE_HOME= DOC_SEARCH_ENV_FILE= \
+    DOC_SUPERPOWERS_ROOT= ${envs[@]+"${envs[@]}"} \
+    "$BASH_BIN" "$UPG_ROOT/scripts/hooks/install.sh" upgrade "$@" </dev/null 2>"$errf") || RUN_RC=$?
+  RUN_ERR=$(cat "$errf")
+  rm -f "$errf"
+}
+
+# upg_snapshot <dir>: a checksum line per file under <dir>, .git left out.
+upg_snapshot() {
+  (cd "$1" && LC_ALL=C find . -name .git -prune -o -type f -print | LC_ALL=C sort | while IFS= read -r f; do cksum "$f"; done)
+}
+
+# upg_detached <dir>: HEAD of <dir> is no branch.
+upg_detached() {
+  ! git -C "$1" symbolic-ref -q HEAD >/dev/null 2>&1
+}
+
+# upg_env_root <env hook>: the DOC_SUPERPOWERS_ROOT the file sets, sourced as the launcher sources it.
+upg_env_root() {
+  (
+    unset DOC_SUPERPOWERS_ROOT
+    # shellcheck disable=SC1090  # the env hook under test
+    . "$1" >/dev/null 2>&1
+    printf '%s' "${DOC_SUPERPOWERS_ROOT:-}"
+  )
+}
+
+# upg_name_root [env hook]: the env hook (default UPG_ENV) holds one line,
+# DOC_SUPERPOWERS_ROOT set to UPG_ROOT, as the README's release-checkout
+# install writes it: the root a checkout upgrade moves (D6).
+upg_name_root() {
+  local f=${1:-$UPG_ENV}
+  mkdir -p "$(dirname "$f")"
+  printf "export DOC_SUPERPOWERS_ROOT='%s'\n" "$UPG_ROOT" > "$f"
+}
+
+# upg_tag_commit <repo> <tag>: the commit <tag> names.
+upg_tag_commit() {
+  git -C "$1" rev-parse "$2^{commit}"
+}
+
+test_upgrade_check_reports_and_caches() {
+  echo "test: upgrade --check from a v3.18.0 release worktree — installed, latest and newest security named, exit 1; the newest tag's notes cached with a sidecar; nothing else changed"
+  setup
+  upg_origin
+  upg_release_root
+  local before notes
+  before=$(upg_snapshot "$UPG_ROOT")
+  upg_run -- --check
+  assert_eq "1" "$RUN_RC" "behind: exit 1"
+  assert_contains "$RUN_OUT" "installed 3.18.0" "…names the installed version"
+  assert_contains "$RUN_OUT" "latest 3.19.0" "…the newest release tag"
+  assert_contains "$RUN_OUT" "newest security 3.19.0" "…and the newest security release (the fenced v99.0.0 is ignored)"
+  assert_contains "$RUN_OUT" "below security release 3.19.0" "…says the install is below it"
+  assert_contains "$RUN_OUT" "fix: bash '$UPG_BASE_P/doc-superpowers-v3.18.0/scripts/hooks/install.sh' upgrade" "…and names the fix, the path sh-quoted"
+  notes=$(harness_mktemp upg-notes)
+  git -C "$UPG_ORIGIN" show v3.19.0:RELEASE-NOTES.md > "$notes"
+  assert_true "the newest tag's RELEASE-NOTES.md is cached" cmp -s "$notes" "$UPG_CACHE/release-notes.md"
+  assert_eq "v3.19.0" "$(jq -r .tag "$UPG_CACHE/release-notes.json" 2>/dev/null)" "…the sidecar's tag"
+  assert_eq "$UPG_ORIGIN" "$(jq -r .source "$UPG_CACHE/release-notes.json" 2>/dev/null)" "…its source: the root's origin"
+  assert_true "…fetched: ISO-8601 UTC" grep -Eq '"fetched": *"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"' "$UPG_CACHE/release-notes.json"
+  assert_eq "$before" "$(upg_snapshot "$UPG_ROOT")" "the root's files are unchanged"
+  assert_true "no worktree is made" test ! -e "$UPG_NEW"
+  assert_true "no env hook is written" test ! -e "$UPG_ENV"
+  upg_run -- --check --json
+  assert_eq "1" "$RUN_RC" "--check --json: exit 1 too"
+  assert_eq "checkout|3.18.0|3.19.0|3.19.0|true|true|checked" \
+    "$(jq -r '"\(.kind)|\(.installed)|\(.latest)|\(.newest_security)|\(.behind)|\(.below_security)|\(.action)"' <<<"$RUN_OUT" 2>/dev/null)" \
+    "…one JSON object: kind, versions, behind, below_security, action"
+  upg_run XDG_CACHE_HOME="$TEST_DIR/xdg cache" -- --check
+  assert_true "XDG_CACHE_HOME is honoured" test -f "$TEST_DIR/xdg cache/doc-superpowers/release-notes.json"
+  git -C "$UPG_BASE/doc-superpowers" worktree add --detach "$UPG_BASE/current" v3.19.0 >/dev/null 2>&1
+  UPG_ROOT="$UPG_BASE/current"
+  upg_run -- --check
+  assert_eq "0" "$RUN_RC" "a v3.19.0 root: current, exit 0"
+  assert_contains "$RUN_OUT" "current" "…and says so"
+  teardown
+}
+
+test_upgrade_makes_a_sibling_release_worktree() {
+  echo "test: upgrade from a v3.18.0 release worktree the env hook names — a detached worktree at <parent>/doc-superpowers-v3.19.0, the old root byte-identical, the env hook pointed at it; again from the new root: current"
+  setup
+  upg_origin
+  upg_release_root
+  local before old
+  upg_name_root
+  cp "$UPG_ENV" "$TEST_DIR/env.orig"
+  before=$(upg_snapshot "$UPG_ROOT")
+  upg_run --
+  assert_eq "0" "$RUN_RC" "upgrade: exit 0"
+  assert_true "the new worktree exists" test -f "$UPG_NEW/RELEASE-NOTES.md"
+  assert_eq "$(upg_tag_commit "$UPG_ORIGIN" v3.19.0)" "$(git -C "$UPG_NEW" rev-parse HEAD 2>/dev/null)" "…at the tag's commit"
+  assert_true "…detached" upg_detached "$UPG_NEW"
+  assert_eq "$before" "$(upg_snapshot "$UPG_ROOT")" "the old root's files are byte-identical"
+  assert_eq "$UPG_NEW" "$(upg_env_root "$UPG_ENV")" "the env hook sets DOC_SUPERPOWERS_ROOT to the new root"
+  assert_true "…its .bak the old file" cmp -s "$UPG_ENV.bak" "$TEST_DIR/env.orig"
+  assert_true "…and it parses as sh" sh -n "$UPG_ENV"
+  assert_contains "$RUN_OUT" "$UPG_NEW" "the output names the new root"
+  assert_eq "v3.19.0" "$(jq -r .tag "$UPG_CACHE/release-notes.json" 2>/dev/null)" "the cache is written on upgrade too"
+  old=$UPG_ROOT
+  UPG_ROOT=$UPG_NEW
+  upg_run --
+  assert_eq "0" "$RUN_RC" "from the new root: exit 0"
+  assert_contains "$RUN_OUT" "current" "…already current"
+  UPG_ROOT=$old
+  upg_run --
+  assert_eq "3" "$RUN_RC" "from the old root again: the target directory exists, refused (exit 3)"
+  assert_contains "$RUN_ERR" "already exists" "…and says why"
+  teardown
+}
+
+test_upgrade_rewrites_only_the_root_line() {
+  echo "test: upgrade rewrites only the DOC_SUPERPOWERS_ROOT line of the env hook (export X= or X=), sh-quoted, a .bak first; DOC_SEARCH_ENV_FILE is honoured; two assignments or a link are refused"
+  setup
+  upg_origin
+  upg_release_root
+  local want custom
+  mkdir -p "$(dirname "$UPG_ENV")"
+  printf '# doc-search settings\nUV_PYTHON=3.14\nexport DOC_SUPERPOWERS_ROOT="%s"\nexport OTHER="a b"\n' "$UPG_ROOT" > "$UPG_ENV"
+  cp "$UPG_ENV" "$TEST_DIR/env.orig"
+  upg_run --
+  assert_eq "0" "$RUN_RC" "upgrade: exit 0"
+  assert_true "the .bak is the old file" cmp -s "$UPG_ENV.bak" "$TEST_DIR/env.orig"
+  want=$(printf "# doc-search settings\nUV_PYTHON=3.14\nexport DOC_SUPERPOWERS_ROOT='%s'\nexport OTHER=\"a b\"" "$UPG_NEW")
+  assert_eq "$want" "$(cat "$UPG_ENV")" "only the export line changed, its form kept"
+  # The X= form, in the file DOC_SEARCH_ENV_FILE names.
+  upg_release_root "" second
+  custom="$TEST_DIR/my env.sh"
+  printf "  DOC_SUPERPOWERS_ROOT='%s'\nUV_PYTHON=3.14\n" "$UPG_ROOT" > "$custom"
+  upg_run DOC_SEARCH_ENV_FILE="$custom" --
+  assert_eq "0" "$RUN_RC" "DOC_SEARCH_ENV_FILE: exit 0"
+  want=$(printf "  DOC_SUPERPOWERS_ROOT='%s'\nUV_PYTHON=3.14" "$UPG_NEW")
+  assert_eq "$want" "$(cat "$custom")" "…the X= form kept, its indent too"
+  assert_true "…the default env hook is left alone" cmp -s "$UPG_ENV.bak" "$TEST_DIR/env.orig"
+  # Two assignments: refused before anything is written.
+  upg_release_root "" third
+  printf 'DOC_SUPERPOWERS_ROOT=/a\nexport DOC_SUPERPOWERS_ROOT=/b\n' > "$custom"
+  cp "$custom" "$TEST_DIR/custom.orig"
+  /bin/rm -f "$custom.bak"
+  upg_run DOC_SEARCH_ENV_FILE="$custom" --
+  assert_eq "3" "$RUN_RC" "two DOC_SUPERPOWERS_ROOT assignments: refused (exit 3)"
+  assert_contains "$RUN_ERR" "DOC_SUPERPOWERS_ROOT" "…naming the variable"
+  assert_true "…the file is unchanged" cmp -s "$custom" "$TEST_DIR/custom.orig"
+  assert_true "…no .bak" test ! -e "$custom.bak"
+  assert_true "…and no worktree" test ! -e "$UPG_NEW"
+  # A link: refused (a write would replace it with a file).
+  ln -s "$TEST_DIR/custom.orig" "$TEST_DIR/linked env.sh"
+  upg_run DOC_SEARCH_ENV_FILE="$TEST_DIR/linked env.sh" --
+  assert_eq "3" "$RUN_RC" "an env hook that is a symbolic link: refused (exit 3)"
+  assert_true "…no worktree" test ! -e "$UPG_NEW"
+  teardown
+}
+
+test_upgrade_relinks_the_skill_link() {
+  echo "test: upgrade relinks ~/.claude/skills/doc-superpowers when it points inside the old root, and leaves a link elsewhere alone"
+  setup
+  upg_origin
+  upg_release_root
+  local link="$HOME/.claude/skills/doc-superpowers"
+  mkdir -p "$HOME/.claude/skills"
+  ln -s "$UPG_ROOT" "$link"
+  upg_name_root
+  upg_run --
+  assert_eq "0" "$RUN_RC" "upgrade: exit 0"
+  assert_true "the link is still a link" test -L "$link"
+  assert_eq "$UPG_NEW" "$(cd "$link" && pwd -P)" "…now to the new root"
+  /bin/rm -f "$link"
+  mkdir -p "$TEST_DIR/elsewhere"
+  ln -s "$TEST_DIR/elsewhere" "$link"
+  upg_release_root "" second
+  upg_name_root
+  upg_run --
+  assert_eq "0" "$RUN_RC" "a second root: exit 0"
+  assert_eq "$TEST_DIR/elsewhere" "$(readlink "$link")" "a link elsewhere is left alone"
+  teardown
+}
+
+test_upgrade_refuses_a_dirty_or_branch_root() {
+  echo "test: upgrade refuses a dirty root and a branch checkout (exit 3) and touches nothing; --check still reports, a branch checkout's fix a git pull"
+  setup
+  upg_origin
+  upg_release_root
+  echo stray > "$UPG_ROOT/stray.txt"
+  upg_run --
+  assert_eq "3" "$RUN_RC" "an untracked file: refused (exit 3)"
+  assert_contains "$RUN_ERR" "uncommitted" "…and says why"
+  assert_true "…no new worktree" test ! -e "$UPG_NEW"
+  assert_true "…no env hook" test ! -e "$UPG_ENV"
+  assert_true "…no cache" test ! -e "$UPG_CACHE"
+  upg_run -- --check
+  assert_eq "1" "$RUN_RC" "--check on a dirty root: exit 1 (behind)"
+  /bin/rm -f "$UPG_ROOT/stray.txt"
+  /bin/rm -rf "$UPG_CACHE"
+  UPG_ROOT="$UPG_BASE/doc-superpowers"
+  upg_run --
+  assert_eq "3" "$RUN_RC" "a branch checkout: refused (exit 3)"
+  assert_contains "$RUN_ERR" "branch" "…and says why"
+  assert_true "…no new worktree" test ! -e "$UPG_NEW"
+  assert_true "…no cache" test ! -e "$UPG_CACHE"
+  git -C "$UPG_ROOT" reset -q --hard v3.18.0
+  upg_run -- --check
+  assert_eq "1" "$RUN_RC" "--check on a branch checkout behind (main at v3.18.0): exit 1"
+  assert_contains "$RUN_OUT" "fix: git -C '$UPG_BASE_P/doc-superpowers' pull" "…its fix is a pull, which upgrade does not refuse (check.py's PULL_FIX), the path sh-quoted"
+  teardown
+}
+
+test_upgrade_sibling_layout_only_for_the_env_hooks_root() {
+  echo "test: a checkout upgrade makes its sibling worktree only for the root the env hook's DOC_SUPERPOWERS_ROOT names (by its physical path), never into ~/.claude/skills: no env hook, one naming another root, or a root in ~/.claude/skills is refused (exit 3) and touches nothing; --check still reports"
+  setup
+  upg_origin
+  upg_release_root
+  upg_run --
+  assert_eq "3" "$RUN_RC" "no env hook: refused (exit 3)"
+  assert_contains "$RUN_ERR" "DOC_SUPERPOWERS_ROOT" "…naming the variable"
+  assert_true "…no new worktree" test ! -e "$UPG_NEW"
+  assert_true "…no env hook written" test ! -e "$UPG_ENV"
+  assert_true "…no cache" test ! -e "$UPG_CACHE"
+  mkdir -p "$(dirname "$UPG_ENV")"
+  printf 'export DOC_SUPERPOWERS_ROOT=/another/root\n' > "$UPG_ENV"
+  cp "$UPG_ENV" "$TEST_DIR/env.orig"
+  upg_run --
+  assert_eq "3" "$RUN_RC" "an env hook naming another root: refused (exit 3)"
+  assert_contains "$RUN_ERR" "/another/root" "…naming the root it names"
+  assert_true "…the env hook unchanged" cmp -s "$UPG_ENV" "$TEST_DIR/env.orig"
+  assert_true "…no .bak" test ! -e "$UPG_ENV.bak"
+  assert_true "…no new worktree" test ! -e "$UPG_NEW"
+  upg_run -- --check
+  assert_eq "1" "$RUN_RC" "--check there: still reports, exit 1 (behind)"
+  # A root named through a link to it is the same root.
+  ln -s "$UPG_ROOT" "$TEST_DIR/root link"
+  printf "export DOC_SUPERPOWERS_ROOT='%s'\n" "$TEST_DIR/root link" > "$UPG_ENV"
+  upg_run --
+  assert_eq "0" "$RUN_RC" "an env hook naming the root through a link: exit 0"
+  assert_true "…the new worktree made" test -f "$UPG_NEW/RELEASE-NOTES.md"
+  # A release checkout in ~/.claude/skills: its sibling would load as a second skill.
+  local skills="$HOME/.claude/skills"
+  mkdir -p "$skills"
+  git -C "$UPG_BASE/doc-superpowers" worktree add --detach "$skills/doc-superpowers" v3.18.0 >/dev/null 2>&1
+  UPG_ROOT="$skills/doc-superpowers"
+  upg_name_root
+  cp "$UPG_ENV" "$TEST_DIR/env.orig"
+  upg_run --
+  assert_eq "3" "$RUN_RC" "a root in ~/.claude/skills, named by the env hook: refused (exit 3)"
+  assert_contains "$RUN_ERR" ".claude/skills" "…and says why"
+  assert_true "…no sibling in ~/.claude/skills" test ! -e "$skills/doc-superpowers-v3.19.0"
+  assert_true "…the env hook unchanged" cmp -s "$UPG_ENV" "$TEST_DIR/env.orig"
+  teardown
+}
+
+test_upgrade_plugin_install() {
+  echo "test: a plugin install — upgrade names claude plugin update doc-superpowers and refuses (exit 3); --check fetches from the marketplace clone's origin and writes the cache"
+  setup
+  upg_origin
+  local proot="$HOME/.claude/plugins/cache/mkt/doc-superpowers/3.18.0" before
+  mkdir -p "$proot"
+  git -C "$UPG_ORIGIN" archive v3.18.0 | tar -x -C "$proot"
+  git clone -q "$UPG_ORIGIN" "$HOME/.claude/plugins/marketplaces/mkt"
+  UPG_ROOT=$proot
+  UPG_CACHE="$HOME/.cache/doc-superpowers"
+  before=$(upg_snapshot "$proot")
+  upg_run --
+  assert_eq "3" "$RUN_RC" "upgrade: refused (exit 3)"
+  assert_contains "$RUN_OUT$RUN_ERR" "claude plugin update doc-superpowers" "…naming the plugin update"
+  assert_true "…no cache" test ! -e "$UPG_CACHE"
+  upg_run -- --check
+  assert_eq "1" "$RUN_RC" "--check: behind, exit 1"
+  assert_contains "$RUN_OUT" "latest 3.19.0" "…the newest tag, from the marketplace clone's origin"
+  assert_contains "$RUN_OUT" "claude plugin update doc-superpowers" "…the fix is the plugin update"
+  assert_eq "v3.19.0" "$(jq -r .tag "$UPG_CACHE/release-notes.json" 2>/dev/null)" "…the cache is written"
+  assert_eq "$UPG_ORIGIN" "$(jq -r .source "$UPG_CACHE/release-notes.json" 2>/dev/null)" "…its source: the marketplace clone's origin"
+  assert_eq "$before" "$(upg_snapshot "$proot")" "the plugin copy is untouched"
+  # A plugin cache CLAUDE_PLUGIN_CACHE names.
+  proot="$TEST_DIR/pcache/mkt/doc-superpowers/3.18.0"
+  mkdir -p "$proot"
+  git -C "$UPG_ORIGIN" archive v3.18.0 | tar -x -C "$proot"
+  UPG_ROOT=$proot
+  upg_run CLAUDE_PLUGIN_CACHE="$TEST_DIR/pcache" --
+  assert_eq "3" "$RUN_RC" "a root under CLAUDE_PLUGIN_CACHE: refused (exit 3)"
+  assert_contains "$RUN_OUT$RUN_ERR" "claude plugin update doc-superpowers" "…naming the plugin update"
+  teardown
+}
+
+test_upgrade_to_and_usage() {
+  echo "test: upgrade --to — an older tag needs --force, an unknown one is refused (exit 3); a malformed --to, a tier flag, or --to on install is a usage error (exit 2)"
+  setup
+  upg_origin
+  upg_release_root
+  upg_name_root
+  local bad
+  upg_run -- --to v3.17.0
+  assert_eq "3" "$RUN_RC" "--to an older tag: refused (exit 3)"
+  assert_contains "$RUN_ERR" "--force" "…naming --force"
+  assert_true "…no worktree" test ! -e "$UPG_BASE_P/doc-superpowers-v3.17.0"
+  upg_run -- --to v3.17.0 --force
+  assert_eq "0" "$RUN_RC" "--to v3.17.0 --force: exit 0"
+  assert_eq "$(upg_tag_commit "$UPG_ORIGIN" v3.17.0)" "$(git -C "$UPG_BASE_P/doc-superpowers-v3.17.0" rev-parse HEAD 2>/dev/null)" "…a worktree at v3.17.0"
+  upg_run -- --to=v9.9.9
+  assert_eq "3" "$RUN_RC" "--to an unknown tag: refused (exit 3)"
+  for bad in 3.19.0 v3.19 'v3.20.0;touch pwned' -v1.0.0 ''; do
+    upg_run -- --to "$bad"
+    assert_eq "2" "$RUN_RC" "--to '$bad': usage error (exit 2)"
+  done
+  assert_true "…nothing ran from a hostile --to" test ! -e "$TEST_DIR/pwned"
+  upg_run -- --to
+  assert_eq "2" "$RUN_RC" "--to with no value: exit 2"
+  upg_run -- --check --git
+  assert_eq "2" "$RUN_RC" "a tier flag on upgrade: exit 2"
+  upg_run -- extra
+  assert_eq "2" "$RUN_RC" "a stray argument: exit 2"
+  RUN_RC=0
+  PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/install.sh" install --to v3.19.0 >/dev/null 2>&1 || RUN_RC=$?
+  assert_eq "2" "$RUN_RC" "--to on install: exit 2"
+  assert_contains "$(PATH="$REAL_PATH" "$BASH_BIN" "$HOOKS_DIR/install.sh" help)" "install.sh upgrade   [--to vX.Y.Z] [--check] [--force] [--json]" "help lists upgrade"
+  teardown
+}
+
+test_upgrade_ignores_hostile_and_mismatched_tags() {
+  echo "test: upgrade reads only vX.Y.Z tag names (a hostile one never runs), and refuses a tag whose RELEASE-NOTES.md opens with another version (exit 3)"
+  setup
+  upg_origin
+  upg_bare_copy hostile
+  # A tag name holds no space, so the command is spelt with ${IFS}.
+  git -C "$UPG_BARE" tag 'v3.20.0;touch${IFS}pwned' v3.19.0
+  git -C "$UPG_BARE" tag 'v3.20.1$(touch${IFS}pwned2)' v3.19.0
+  git -C "$UPG_BARE" tag 'v3.21.0-rc1' v3.19.0
+  git -C "$UPG_BARE" tag 'v3.22' v3.19.0
+  git -C "$UPG_BARE" tag 'x3.23.0' v3.19.0
+  upg_release_root "$UPG_BARE"
+  upg_run -- --check
+  assert_eq "1" "$RUN_RC" "--check: exit 1"
+  assert_contains "$RUN_OUT" "latest 3.19.0" "…the hostile and malformed tags are not releases"
+  assert_eq "v3.19.0" "$(jq -r .tag "$UPG_CACHE/release-notes.json" 2>/dev/null)" "…the sidecar names v3.19.0"
+  upg_name_root
+  upg_run --
+  assert_eq "0" "$RUN_RC" "upgrade: exit 0"
+  assert_true "…to v3.19.0" test -d "$UPG_NEW"
+  assert_eq "" "$(find "$TEST_DIR" -name 'pwned*' 2>/dev/null)" "nothing named pwned was made"
+  # A tag whose notes open with another version is no release commit.
+  git -C "$UPG_BARE" tag v3.24.0 v3.19.0
+  upg_release_root "$UPG_BARE" second
+  upg_run -- --check
+  assert_eq "3" "$RUN_RC" "v3.24.0 whose notes open with v3.19.0: refused (exit 3)"
+  assert_contains "$RUN_ERR" "v3.19.0" "…naming the heading it found"
+  assert_true "…no cache from it" test ! -e "$UPG_CACHE/release-notes.json" -o "$(jq -r .tag "$UPG_CACHE/release-notes.json" 2>/dev/null)" != v3.24.0
+  teardown
+}
+
+test_upgrade_orders_versions_per_field() {
+  echo "test: upgrade sorts tags per numeric field: v10.0.0 is newer than v9.0.0"
+  setup
+  upg_origin
+  local work
+  work="$TEST_DIR/work"
+  git clone -q "$UPG_ORIGIN" "$work"
+  upg_tag_release "$work" 9.0.0 2026-11-20
+  upg_tag_release "$work" 10.0.0 2026-11-21
+  upg_bare_copy ten
+  git -C "$work" push -q --tags "$UPG_BARE"
+  upg_release_root "$UPG_BARE"
+  upg_run -- --check
+  assert_eq "1" "$RUN_RC" "--check: exit 1"
+  assert_contains "$RUN_OUT" "latest 10.0.0" "v10.0.0 is the newest"
+  assert_contains "$RUN_OUT" "newest security none" "…its notes hold no security release"
+  teardown
+}
+
+test_upgrade_ignores_a_security_release_newer_than_its_tag() {
+  echo "test: a security section newer than the tag whose notes carry it (a hostile ## v99999.0.0 + ### Security) is no security release"
+  setup
+  upg_origin
+  local work
+  work="$TEST_DIR/work"
+  git clone -q "$UPG_ORIGIN" "$work"
+  printf '# Release Notes\n\n## v3.20.0 (2026-11-20)\n\nThe release.\n\n## v99999.0.0 (2026-01-01)\n\n### Security\n- Upgrade to a release that does not exist.\n\n## v3.19.0 (2026-11-19)\n\n### Security\n- A fix users must upgrade for.\n' > "$work/RELEASE-NOTES.md"
+  git -C "$work" commit -qam "release v3.20.0"
+  git -C "$work" tag v3.20.0
+  upg_bare_copy hostile-sec
+  git -C "$work" push -q --tags "$UPG_BARE"
+  upg_release_root "$UPG_BARE"
+  upg_run -- --check --json
+  assert_eq "1" "$RUN_RC" "--check: behind, exit 1"
+  assert_eq "3.20.0|3.19.0" "$(jq -r '"\(.latest)|\(.newest_security)"' <<<"$RUN_OUT" 2>/dev/null)" "…latest 3.20.0; the newest security release is 3.19.0, not v99999.0.0"
+  teardown
+}
+
+test_upgrade_caps_oversized_notes_before_writing() {
+  echo "test: a tag whose RELEASE-NOTES.md is far over the cap — only the capped prefix is ever written (a 3 MB file-size limit holds), the cache is at most 2,000,000 bytes"
+  setup
+  upg_origin
+  local work errf rc=0 size
+  work="$TEST_DIR/work"
+  git clone -q "$UPG_ORIGIN" "$work"
+  printf '# Release Notes\n\n## v3.20.0 (2026-11-20)\n\n### Security\n- A fix.\n\n' > "$work/RELEASE-NOTES.md"
+  # About 10 MB of filler lines after the heading.
+  awk 'BEGIN { for (i = 0; i < 160000; i++) print "filler line, filler line, filler line, filler line, " i }' >> "$work/RELEASE-NOTES.md"
+  git -C "$work" commit -qam "release v3.20.0"
+  git -C "$work" tag v3.20.0
+  upg_bare_copy big-notes
+  git -C "$work" push -q --tags "$UPG_BARE"
+  upg_release_root "$UPG_BARE"
+  errf=$(harness_mktemp upg.err)
+  # ulimit -f counts 512-byte blocks: 6000 is about 3 MB, under the notes' size.
+  RUN_OUT=$( (ulimit -f 6000; env PATH="$REAL_PATH" CLAUDE_PLUGIN_CACHE= CODEX_HOME= XDG_CACHE_HOME= DOC_SEARCH_ENV_FILE= DOC_SUPERPOWERS_ROOT= \
+    "$BASH_BIN" "$UPG_ROOT/scripts/hooks/install.sh" upgrade --check </dev/null 2>"$errf") ) || rc=$?
+  RUN_ERR=$(cat "$errf")
+  assert_eq "1" "$rc" "--check under a 3 MB file-size limit: behind, exit 1 (stderr: $RUN_ERR)"
+  assert_contains "$RUN_OUT" "newest security 3.20.0" "…the security heading near the top is read"
+  size=0
+  [ ! -f "$UPG_CACHE/release-notes.md" ] || size=$(wc -c < "$UPG_CACHE/release-notes.md" | tr -d ' ')
+  assert_true "…the cached notes are at most 2,000,000 bytes (${size:-none})" test "${size:-0}" -gt 0 -a "${size:-0}" -le 2000000
+  teardown
+}
+
+test_upgrade_notes_parity_with_releases_py() {
+  echo "test: the shared fixture search/tests/fixtures/release-notes-security.md, as a tag's RELEASE-NOTES.md — latest 3.19.0, newest security 3.19.0, what doc_search.releases reads (test_releases.py pins the same two)"
+  setup
+  upg_origin
+  local work
+  work="$TEST_DIR/work"
+  git clone -q "$UPG_ORIGIN" "$work"
+  git -C "$work" reset -q --hard v3.18.0
+  cp "$SCRIPT_DIR/../search/tests/fixtures/release-notes-security.md" "$work/RELEASE-NOTES.md"
+  git -C "$work" commit -qam "release v3.19.0, the shared fixture's notes"
+  git -C "$work" tag -f v3.19.0 >/dev/null
+  upg_bare_copy fixture
+  git -C "$work" push -q -f --tags "$UPG_BARE"
+  upg_release_root "$UPG_BARE"
+  upg_run -- --check --json
+  assert_eq "1" "$RUN_RC" "--check: behind, exit 1 (stderr: $RUN_ERR)"
+  assert_eq "3.19.0|3.19.0" "$(jq -r '"\(.latest)|\(.newest_security)"' <<<"$RUN_OUT" 2>/dev/null)" "…latest 3.19.0 and newest security 3.19.0: the fenced v9.9.9 and v9.9.8, the fenced v3.17.1 Security and the non-release section's are not counted"
+  assert_true "…the fixture is what was cached" cmp -s "$SCRIPT_DIR/../search/tests/fixtures/release-notes-security.md" "$UPG_CACHE/release-notes.md"
+  teardown
+}
+
+test_upgrade_codex_root_in_place() {
+  echo "test: the Codex root (\$CODEX_HOME/doc-superpowers) upgrades in place, a clean branch checkout allowed (git checkout --detach <tag>); dirty: refused; ignored files do not count"
+  setup
+  upg_origin
+  local codex="$HOME/.codex/doc-superpowers"
+  git clone -q "$UPG_ORIGIN" "$codex"
+  git -C "$codex" reset -q --hard v3.18.0
+  UPG_ROOT=$codex
+  UPG_CACHE="$HOME/.cache/doc-superpowers"
+  echo stray > "$codex/stray.txt"
+  upg_run --
+  assert_eq "3" "$RUN_RC" "dirty: refused (exit 3)"
+  assert_eq "$(upg_tag_commit "$UPG_ORIGIN" v3.18.0)" "$(git -C "$codex" rev-parse HEAD)" "…HEAD unchanged"
+  /bin/rm -f "$codex/stray.txt"
+  printf 'ignored/\n' >> "$codex/.git/info/exclude"
+  mkdir -p "$codex/ignored"
+  echo x > "$codex/ignored/file"
+  upg_run --
+  assert_eq "0" "$RUN_RC" "clean (an ignored file aside), on a branch: exit 0"
+  assert_eq "$(upg_tag_commit "$UPG_ORIGIN" v3.19.0)" "$(git -C "$codex" rev-parse HEAD)" "…HEAD at v3.19.0"
+  assert_true "…detached" upg_detached "$codex"
+  assert_true "…no sibling worktree" test ! -e "$HOME/.codex/doc-superpowers-v3.19.0"
+  assert_true "…no env hook" test ! -e "$XDG_CONFIG_HOME/doc-search/env.sh"
+  assert_true "…the ignored file kept" test -f "$codex/ignored/file"
+  upg_run --
+  assert_eq "0" "$RUN_RC" "again: current, exit 0"
+  assert_contains "$RUN_OUT" "current" "…and says so"
+  # A Codex root that is no checkout of its own, inside another repository:
+  # that repository is never checked out.
+  local outer="$TEST_DIR/outer" head
+  git clone -q "$UPG_ORIGIN" "$outer"
+  git -C "$outer" reset -q --hard v3.18.0
+  mkdir -p "$outer/codex/doc-superpowers"
+  git -C "$UPG_ORIGIN" archive v3.18.0 | tar -x -C "$outer/codex/doc-superpowers"
+  printf 'codex/\n' >> "$outer/.git/info/exclude"
+  head=$(git -C "$outer" rev-parse HEAD)
+  UPG_ROOT="$outer/codex/doc-superpowers"
+  upg_run CODEX_HOME="$outer/codex" --
+  assert_eq "3" "$RUN_RC" "a Codex root inside another repository, no checkout of its own: refused (exit 3)"
+  assert_eq "$head" "$(git -C "$outer" rev-parse HEAD)" "…the enclosing repository's HEAD unchanged"
+  assert_true "…and still on its branch" git -C "$outer" symbolic-ref -q HEAD
+  teardown
+}
+
+test_upgrade_cache_and_fetch_failures() {
+  echo "test: upgrade refuses a cache directory that is a link (exit 3); a fetch that fails exits 4 and makes nothing"
+  setup
+  upg_origin
+  upg_release_root
+  mkdir -p "$TEST_DIR/elsewhere" "$HOME/.cache"
+  ln -s "$TEST_DIR/elsewhere" "$UPG_CACHE"
+  upg_run -- --check
+  assert_eq "3" "$RUN_RC" "a linked cache directory: refused (exit 3)"
+  assert_eq "" "$(ls -A "$TEST_DIR/elsewhere")" "…nothing written through it"
+  /bin/rm -f "$UPG_CACHE"
+  # A failure part-way through --check is never "behind" (exit 1).
+  printf 'not a directory\n' > "$TEST_DIR/cache file"
+  upg_run XDG_CACHE_HOME="$TEST_DIR/cache file" -- --check
+  assert_eq "4" "$RUN_RC" "--check whose cache directory cannot be made: exit 4, not 1 (behind)"
+  assert_contains "$RUN_ERR" "cache file/doc-superpowers" "…naming the directory"
+  git -C "$UPG_BASE/doc-superpowers" remote set-url origin "$TEST_DIR/no such origin.git"
+  upg_run -- --check
+  assert_eq "4" "$RUN_RC" "an origin that cannot be fetched: exit 4"
+  upg_run --
+  assert_eq "4" "$RUN_RC" "…upgrade too"
+  assert_true "…no worktree" test ! -e "$UPG_NEW"
+  assert_true "…no cache" test ! -e "$UPG_CACHE/release-notes.json"
+  # A credential in the origin URL never reaches a message (port 9: refused).
+  git -C "$UPG_BASE/doc-superpowers" remote set-url origin "https://someone:s3cr3t-token@127.0.0.1:9/doc-superpowers.git"
+  upg_run -- --check
+  assert_eq "4" "$RUN_RC" "an origin with a credential that cannot be fetched: exit 4"
+  assert_contains "$RUN_ERR" "https://127.0.0.1:9/doc-superpowers.git" "…the message names the origin"
+  assert_not_contains "$RUN_ERR" "s3cr3t-token" "…without its credential"
+  teardown
+}
+
+# upg_mode <path>: the permission bits of <path>, octal (stat on Linux or macOS).
+upg_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+}
+
+test_upgrade_refuses_a_writable_cache_dir() {
+  echo "test: upgrade makes the cache directory 0700, and refuses one that its group or others can write (exit 3, refused, with or without --check, as a linked or not-own one is; nothing written), as doc_search.release_cache reads only such a directory"
+  setup
+  upg_origin
+  upg_release_root
+  upg_run -- --check
+  assert_eq "1" "$RUN_RC" "a new cache directory: behind, exit 1"
+  assert_eq "700" "$(upg_mode "$UPG_CACHE")" "…made with mode 700"
+  /bin/rm -rf "$UPG_CACHE"
+  mkdir -p "$UPG_CACHE"
+  chmod 755 "$UPG_CACHE"
+  upg_run -- --check
+  assert_eq "1" "$RUN_RC" "an existing 755 cache directory: accepted, exit 1 (behind)"
+  assert_eq "755" "$(upg_mode "$UPG_CACHE")" "…its mode left as it was"
+  /bin/rm -f "$UPG_CACHE/release-notes.md" "$UPG_CACHE/release-notes.json"
+  chmod 775 "$UPG_CACHE"
+  upg_run -- --check
+  assert_eq "3" "$RUN_RC" "a group-writable cache directory: refused under --check (exit 3)"
+  assert_contains "$RUN_ERR" "writable by its group or others" "…the message says why"
+  assert_eq "1" "$(grep -c 'Nothing was changed' <<<"$RUN_ERR" || true)" "…and says nothing was changed once"
+  assert_contains "$RUN_ERR" "$UPG_CACHE" "…and names the directory"
+  assert_eq "" "$(ls -A "$UPG_CACHE")" "…nothing written into it"
+  chmod 757 "$UPG_CACHE"
+  upg_run -- --check
+  assert_eq "3" "$RUN_RC" "a world-writable cache directory: refused (exit 3)"
+  assert_eq "" "$(ls -A "$UPG_CACHE")" "…nothing written into it"
+  upg_name_root
+  cp "$UPG_ENV" "$TEST_DIR/env.orig"
+  upg_run --
+  assert_eq "3" "$RUN_RC" "upgrade (no --check), from the root the env hook names: refused, exit 3"
+  assert_contains "$RUN_ERR" "writable by its group or others" "…for the cache directory"
+  assert_true "…no worktree is made" test ! -e "$UPG_NEW"
+  assert_true "…the env hook is unchanged" cmp -s "$UPG_ENV" "$TEST_DIR/env.orig"
+  assert_eq "" "$(ls -A "$UPG_CACHE")" "…nothing written into the cache directory"
+  chmod 755 "$UPG_CACHE"
+  teardown
+}
+
+test_upgrade_env_write_failure_names_the_new_root() {
+  echo "test: an env hook that cannot be rewritten after the new worktree is made — exit 1, the message names the new root and that DOC_SUPERPOWERS_ROOT is unchanged"
+  setup
+  upg_origin
+  upg_release_root
+  upg_name_root
+  # The file can be written, its directory cannot: the rewrite's temp file fails.
+  chmod 555 "$(dirname "$UPG_ENV")"
+  upg_run --
+  chmod 755 "$(dirname "$UPG_ENV")"
+  assert_eq "1" "$RUN_RC" "the rewrite fails part-way: exit 1"
+  assert_true "…the new worktree was made" test -d "$UPG_NEW"
+  assert_contains "$RUN_ERR" "$UPG_NEW" "…the message names the new root"
+  assert_contains "$RUN_ERR" "DOC_SUPERPOWERS_ROOT is unchanged" "…and says the env hook still names the old one"
+  assert_eq "$UPG_ROOT" "$(upg_env_root "$UPG_ENV")" "…which it does"
+  teardown
+}
+
+test_upgrade_never_runs_git_hooks() {
+  echo "test: upgrade --check runs no git hook: not the root's own on its tag fetch, not a template's in the plugin path's scratch repository"
+  setup
+  upg_origin
+  upg_bare_copy hooked
+  upg_release_root "$UPG_BARE"
+  local hooks tmpl
+  hooks="$(cd "$UPG_ROOT" && cd "$(git rev-parse --git-common-dir)" && pwd)/hooks"
+  mkdir -p "$hooks"
+  printf '#!/bin/sh\ntouch "%s/root-hook-ran"\n' "$TEST_DIR" > "$hooks/reference-transaction"
+  chmod +x "$hooks/reference-transaction"
+  # A new tag, so the fetch has a ref to write.
+  git -C "$UPG_BARE" tag x-new v3.19.0
+  upg_run -- --check
+  assert_eq "1" "$RUN_RC" "--check: behind, exit 1"
+  assert_true "…the root's reference-transaction hook did not run on the fetch" test ! -e "$TEST_DIR/root-hook-ran"
+  # The plugin path: a template's hook never reaches the scratch repository.
+  tmpl="$TEST_DIR/template"
+  mkdir -p "$tmpl/hooks"
+  printf '#!/bin/sh\ntouch "%s/template-hook-ran"\n' "$TEST_DIR" > "$tmpl/hooks/reference-transaction"
+  chmod +x "$tmpl/hooks/reference-transaction"
+  printf '[init]\n\ttemplateDir = %s\n' "$tmpl" > "$TEST_DIR/gitconfig"
+  local proot="$HOME/.claude/plugins/cache/mkt/doc-superpowers/3.18.0"
+  mkdir -p "$proot"
+  git -C "$UPG_ORIGIN" archive v3.18.0 | tar -x -C "$proot"
+  git clone -q "$UPG_ORIGIN" "$HOME/.claude/plugins/marketplaces/mkt"
+  UPG_ROOT=$proot
+  upg_run GIT_CONFIG_GLOBAL="$TEST_DIR/gitconfig" -- --check
+  assert_eq "1" "$RUN_RC" "plugin --check with a hook template configured: exit 1"
+  assert_true "…the template's hook did not run" test ! -e "$TEST_DIR/template-hook-ran"
+  teardown
+}
+
+echo ""
+echo "=== install.sh upgrade ==="
+test_upgrade_check_reports_and_caches
+test_upgrade_makes_a_sibling_release_worktree
+test_upgrade_rewrites_only_the_root_line
+test_upgrade_relinks_the_skill_link
+test_upgrade_refuses_a_dirty_or_branch_root
+test_upgrade_sibling_layout_only_for_the_env_hooks_root
+test_upgrade_plugin_install
+test_upgrade_to_and_usage
+test_upgrade_ignores_hostile_and_mismatched_tags
+test_upgrade_orders_versions_per_field
+test_upgrade_ignores_a_security_release_newer_than_its_tag
+test_upgrade_caps_oversized_notes_before_writing
+test_upgrade_notes_parity_with_releases_py
+test_upgrade_codex_root_in_place
+test_upgrade_cache_and_fetch_failures
+test_upgrade_refuses_a_writable_cache_dir
+test_upgrade_env_write_failure_names_the_new_root
+test_upgrade_never_runs_git_hooks
 
 test_claude_hook_contract_held() {
   echo "test: every Claude hook run above held the contract (exit 0, or 2 only under STRICT; stdout one JSON object or nothing)"

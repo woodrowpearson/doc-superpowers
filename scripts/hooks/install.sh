@@ -69,7 +69,7 @@ SHELL_WORKFLOWS="doc-freshness-pr doc-freshness-schedule"
 CI_DEFAULT_WORKFLOWS="$SHELL_WORKFLOWS"
 # Shell workflows outside the default set, installed by name (or by
 # --workflows=all): no AI, no secret (final review OPS-I4).
-SHELL_OPTIN_WORKFLOWS="doc-index-resolve doc-ledger-publish"
+SHELL_OPTIN_WORKFLOWS="doc-index-resolve doc-ledger-publish doc-security-schedule"
 # Installed by name only, never by --workflows=all: doc-index-resolve pushes to
 # other people's pull request branches.
 BY_NAME_ONLY_WORKFLOWS="doc-index-resolve"
@@ -237,6 +237,7 @@ workflow_desc() {
     doc-pr-release) echo "PR pushes: AI release-notes fragment, a checked step commits it to the PR branch; PR body edited (contents + pull-requests: write)" ;;
     doc-index-resolve) echo "push to the base, and by hand: merges the base into each open same-repository PR whose only conflict is docs/.doc-index.json, with the vendored index merge driver; pushes with a lease, dispatches --resolve-test-workflow, one PR comment (contents + pull-requests + actions: write; by name only)" ;;
     doc-ledger-publish) echo "every 30 minutes and by hand: with docs/ledger/config.json, doc-tools.sh ledger publish renders the work-ledger views from the base and pushes them to views.branch; with the config, ships the ledger helper set (contents: write; pull-requests + issues: read, for the adapters)" ;;
+    doc-security-schedule) echo "weekly cron, and by hand: reads the newest release's notes (one shallow tag fetch from the marketplace URL; nothing fetched runs) and fails when the requires of docs/search/config.json is below the newest security release; no config or no requires: a warning (contents: read)" ;;
     *) echo "(no description)" ;;
   esac
 }
@@ -249,13 +250,14 @@ doc-superpowers hooks installer
 Usage:
   install.sh install   [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [CI options]
   install.sh uninstall [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--workflows=<csv|all|none>] [--transient]
-  install.sh status    [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--json]
+  install.sh status    [--git [--merge-driver-only]] [--claude] [--ci] [--all] [--ledger] [--ledger-claude] [--search] [--search-gate] [--json] [--check]
+  install.sh upgrade   [--to vX.Y.Z] [--check] [--force] [--json]
   install.sh print-merge-driver
   install.sh help
 
-Every command acts on the repository holding the current directory, at its
-top level (a linked worktree or a submodule is its own top level). Nothing is
-ever written through a symbolic link.
+Every command but upgrade acts on the repository holding the current
+directory, at its top level (a linked worktree or a submodule is its own top
+level). Nothing is ever written through a symbolic link.
 
 Tiers:
   --git     Git hooks, where git runs them (git rev-parse --git-path hooks):
@@ -362,7 +364,46 @@ Machine-readable:
                       references/hooks.md lists every state); exit 0.
                       --search adds the doc-search set and --search-gate the
                       gate set (alone, when they are the only ones named)
+  status --check      the drift check: each committed copy (the installed
+                      workflows, the vendored doc-tools.sh and helpers, the
+                      --search launcher) against what install writes now;
+                      the CI tier and --search, or those named (naming
+                      neither, only other tiers: exit 2). Exit 1 when
+                      a copy drifted, a workflow is recorded-missing, or
+                      installed.json cannot be read; with no installed.json
+                      the CI copies are untracked (exit 0). With --json, the
+                      object gains .drift and .tiers.ci.drift_check
   print-merge-driver  the merge.doc-index.driver value install --git registers
+
+Upgrade (the doc-superpowers install this installer runs from; it needs no
+repository):
+  upgrade   fetch the release tags (vX.Y.Z) from the install's origin and move
+            it to the newest one (or --to's). The Codex install
+            (~/.codex/doc-superpowers) is checked out in place at the tag (a
+            clean branch checkout is fine there). Any other git checkout gets a
+            new detached worktree, <parent>/doc-superpowers-v<version>, and is
+            itself left as it is; DOC_SUPERPOWERS_ROOT in the env hook
+            (~/.config/doc-search/env.sh, or \$DOC_SEARCH_ENV_FILE) is pointed
+            at the new one, a .bak first, and ~/.claude/skills/doc-superpowers
+            is relinked when it is a link into the old root. Refused (exit 3):
+            a Claude Code plugin install (claude plugin update
+            doc-superpowers updates it), uncommitted changes, a checkout on a
+            branch (the Codex install aside), an env hook that is a link or
+            assigns DOC_SUPERPOWERS_ROOT more than once, a target directory
+            that exists, an older --to without --force.
+  --check   whether the install is behind (exit 1) or current (exit 0), and
+            the newest security release. It moves nothing: it writes the
+            cache and, from a git checkout (the Codex one too), fetches the
+            release tags into that checkout's .git
+  --to vX.Y.Z  that release instead of the newest; an older one needs --force
+  --json    one JSON object (schema doc-superpowers-upgrade/1)
+  Each run caches the newest tag's release notes and a sidecar (tag,
+  fetched, source) in ~/.cache/doc-superpowers/ (\$XDG_CACHE_HOME), which
+  doc-search check reads. A new cache directory is made 0700; one that is
+  a link, not your own, or writable by its group or others is refused.
+  Exit: 0 current or done, 1 behind (--check; without --check, a failure
+  part-way), 2 usage, 3 refused, 4 the fetch failed or --check could not
+  finish.
 
 Hook output: DOC_SUPERPOWERS_ADVICE (else the advice key of
 .claude/doc-superpowers/hooks.conf) replaces the '/doc-superpowers <action>'
@@ -387,10 +428,13 @@ CI options (install --ci / --all):
                             claims job on a claims check that cannot run (its
                             findings fail it either way)
   --marketplace-url URL     the git URL the Claude-powered workflows fetch the
-                            plugin from, at its release tag (default: the
-                            plugin's own repository, plugin.json's
-                            "repository"; recorded only when given, and
-                            --marketplace-url= clears the record). Use a mirror
+                            plugin from, at its release tag, and
+                            doc-security-schedule reads the release tags and
+                            notes from, failing each week when it is empty
+                            (default: the plugin's own repository,
+                            plugin.json's "repository"; recorded only when
+                            given, and --marketplace-url= clears the
+                            record). Use a mirror
                             your organization controls to keep the plugin's
                             home out of the project's files
   --resolve-test-workflow=<file>
@@ -414,6 +458,15 @@ CI options (install --ci / --all):
                             --resolve-test-workflow it has no effect; recorded
                             only when given, and --resolve-test-pr-input=
                             clears the record)
+  --resolve-pr-runs=approved
+                            a later step of yours approves the pull request's
+                            own runs, which GitHub holds for approval after a
+                            push with the job token: the comment then says the
+                            merge's checks start once they are approved, and
+                            asks for no push (default: empty, and the comment
+                            asks for a push; approved or empty only; recorded
+                            only when given, and --resolve-pr-runs= clears the
+                            record)
   --helpers=<true|false>    deprecated, and inert: the helpers ship exactly
                             while an installed workflow runs them.
                             --helpers=false only refuses doc-pr-release
@@ -421,7 +474,7 @@ CI options (install --ci / --all):
   --force                   also re-install workflows removed on purpose
   The choices are recorded (.claude/doc-superpowers/installed.json, commit it):
   a plain 'install --ci' reproduces the recorded set, branch, cron, strict,
-  marketplace URL and test workflow.
+  marketplace URL, test workflow and pr runs choice.
 
 Uninstall options (uninstall --ci):
   --workflows=<csv|all|none>  which workflows (default: all of them, and the
@@ -507,10 +560,15 @@ sh_squote() {
 
 WRITING=0   # 1 once the first write happened (preflight is over)
 _TMPS=()
+# Scratch directories (upgrade's), removed with everything in them.
+_TMPDIRS=()
 _cleanup() {
   local t
   for t in ${_TMPS[@]+"${_TMPS[@]}"}; do
     rm -f "$t"
+  done
+  for t in ${_TMPDIRS[@]+"${_TMPDIRS[@]}"}; do
+    rm -rf "$t"
   done
   return 0
 }
@@ -869,6 +927,7 @@ render_workflow() {
     -e "s|__PLUGIN_COMMIT__|$R_COMMIT|g" \
     -e "s|__RESOLVE_TEST_WORKFLOW__|$R_RTW|g" \
     -e "s|__RESOLVE_TEST_PR_INPUT__|$R_RPI|g" \
+    -e "s|__RESOLVE_PR_RUNS__|$R_RPR|g" \
     "$1"
 }
 
@@ -2022,6 +2081,7 @@ status_search() {
   search_state
   if $JSON; then
     st_rec search.state "$SR_LAUNCHER" "$SR_ENTRY"
+    if $CHECK && [ "$SR_LAUNCHER" = outdated ]; then ck_drift "$SEARCH_LAUNCHER_DEST" --search; fi
     return 0
   fi
   echo "doc-search MCP (the opt-in --search set):"
@@ -2045,6 +2105,8 @@ status_search() {
   if [ -n "$(mcp_problem)" ]; then
     echo "  ⚠ $MCP_FILE $(mcp_problem): no server can be read from it"
   fi
+  # The launcher is a byte copy: its compare needs no install record.
+  if $CHECK && [ "$SR_LAUNCHER" = outdated ]; then ck_drift "$SEARCH_LAUNCHER_DEST" --search; fi
 }
 
 # --- doc-search's gate set (--search-gate) ---------------------------------------
@@ -2424,6 +2486,12 @@ valid_input_name() {
   [[ "$1" =~ $re ]]
 }
 
+# --resolve-pr-runs' one value: a later step approves the pull request runs
+# the resolver's push holds (index-resolve.sh RESOLVE_PR_RUNS).
+valid_pr_runs() {
+  [ "$1" = approved ]
+}
+
 # plugin_marketplace_url: the plugin's own repository (plugin.json's
 # "repository", a URL or {url}) as a git URL ending in .git — where a
 # Claude-powered workflow fetches the plugin unless --marketplace-url names
@@ -2572,6 +2640,11 @@ preflight_ci() {
   [ "$OPT_RPI_SET" != 1 ] || CI_RPI="$OPT_RPI"
   [ -z "$CI_RPI" ] || valid_input_name "$CI_RPI" \
     || die "the recorded pull request input '$CI_RPI' is not an input name; pass --resolve-test-pr-input. Nothing was changed."
+  # Whether a later step approves the push's own pull request runs: the same.
+  CI_RPR="$STATE_RPR"
+  [ "$OPT_RPR_SET" != 1 ] || CI_RPR="$OPT_RPR"
+  [ -z "$CI_RPR" ] || valid_pr_runs "$CI_RPR" \
+    || die "the recorded pull request runs choice '$CI_RPR' is not approved; pass --resolve-pr-runs. Nothing was changed."
 
   CI_DISK=$(disk_workflows)
   # Every install --ci retires every retired workflow.
@@ -2657,7 +2730,7 @@ preflight_ci() {
 
   # sed-escaped once, in the main shell (the version lookup is cached here).
   R_BASE=$(sed_repl "$CI_BASE") R_CRON=$(sed_repl "$CI_CRON") R_STRICT=0 R_VERSION="" R_MARKET="" R_COMMIT=""
-  R_RTW=$(sed_repl "$CI_RTW") R_RPI=$(sed_repl "$CI_RPI")
+  R_RTW=$(sed_repl "$CI_RTW") R_RPI=$(sed_repl "$CI_RPI") R_RPR=$(sed_repl "$CI_RPR")
   if [ "$CI_STRICT" = true ]; then
     R_STRICT=1
   fi
@@ -2669,8 +2742,9 @@ preflight_ci() {
     fi
   done
   # Like the version: a plugin.json naming no usable repository does not
-  # abort the install. One WARN, an empty URL, and that workflow's plugin
-  # step fails with an ::error:: until it is re-installed with one.
+  # abort the install. One WARN, an empty URL, and each workflow that reads
+  # it (an AI workflow's plugin step, doc-security-schedule's fetch) fails
+  # with an ::error:: until it is re-installed with one.
   local market="$CI_MARKET"
   for w in $CI_RENDER; do
     if grep -q '__MARKETPLACE_URL__' "$SCRIPT_DIR/ci/$w.yml"; then
@@ -2678,7 +2752,7 @@ preflight_ci() {
       if [ -n "$market" ] && valid_marketplace_url "$market"; then
         R_MARKET=$(sed_repl "$market")
       else
-        echo "  WARN: $SKILL_DIR/.claude-plugin/plugin.json names no repository a workflow can fetch the plugin from ('$market'); the Claude-powered workflows get DOC_SUPERPOWERS_MARKETPLACE_URL \"\", and their plugin step fails until you re-install with --marketplace-url <git URL>" >&2
+        echo "  WARN: $SKILL_DIR/.claude-plugin/plugin.json names no repository a workflow can fetch the plugin from ('$market'); the workflows that read it get DOC_SUPERPOWERS_MARKETPLACE_URL \"\": the Claude-powered ones' plugin step fails, and doc-security-schedule fails each week, until you re-install with --marketplace-url <git URL>" >&2
       fi
       break
     fi
@@ -2920,7 +2994,7 @@ install_ci() {
     echo "  Existing $w.yml found (not doc-superpowers-managed), skipping."
   done
   retire_workflows
-  state_set_choices "$CI_BASE" "$CI_CRON" "$CI_STRICT" "$CI_MARKET" "$CI_RTW" "$CI_RPI"
+  state_set_choices "$CI_BASE" "$CI_CRON" "$CI_STRICT" "$CI_MARKET" "$CI_RTW" "$CI_RPI" "$CI_RPR"
   vendor_sync install
   state_flush
 
@@ -2928,7 +3002,7 @@ install_ci() {
   nforeign=$(set -- $CI_FOREIGN; echo $#)
   nskip=$(set -- $CI_SKIP; echo $#)
   echo "CI/CD workflows: $installed installed, $refreshed refreshed, $nforeign skipped (existing non-managed), $nskip skipped (intentionally uninstalled)"
-  echo "  Choices (recorded in $STATE_FILE): base branch $CI_BASE, cron '$CI_CRON', strict $CI_STRICT${CI_MARKET:+, marketplace $CI_MARKET}${CI_RTW:+, test workflow $CI_RTW}${CI_RPI:+, pr input $CI_RPI}"
+  echo "  Choices (recorded in $STATE_FILE): base branch $CI_BASE, cron '$CI_CRON', strict $CI_STRICT${CI_MARKET:+, marketplace $CI_MARKET}${CI_RTW:+, test workflow $CI_RTW}${CI_RPI:+, pr input $CI_RPI}${CI_RPR:+, pr runs $CI_RPR}"
   if [ -n "$CI_RPI" ] && [ -z "$CI_RTW" ]; then
     echo "  note: --resolve-test-pr-input $CI_RPI has no effect without --resolve-test-workflow (nothing is dispatched); it is recorded for when one is named"
   fi
@@ -3019,6 +3093,154 @@ uninstall_ci() {
   echo "CI/CD workflows: $removed removed"
 }
 
+# --- Drift (status --check) ------------------------------------------------------
+#
+# status --check compares each committed copy with the bytes install would
+# write now: CK_DRIFT holds the paths that differ, one a line, and CK_FAIL is
+# 1 once anything fails the check (a drift, a workflow recorded installed but
+# missing, an install record that cannot be read). The CI tier's workflows are
+# rendered with the choices the install record holds, so without one they are
+# not judged (untracked); the search launcher is a byte copy and needs none.
+CK_DRIFT="" CK_FAIL=0 CK_READY=0
+
+# ck_drift <path> <tier flag>: <path> drifted; install <tier flag> rewrites it.
+ck_drift() {
+  CK_DRIFT="$CK_DRIFT$1"$'\n'
+  CK_FAIL=1
+  if $JSON; then
+    st_rec drift "$1"
+  else
+    printf "  ⚠ drifted: %s (differs from what install %s writes now: re-run install %s)\n" "$1" "$2" "$2"
+  fi
+}
+
+# ck_choices: the R_* render values install --ci would use with no flag (the
+# recorded choice, else one read back from the workflows, else the default),
+# once. The version and the marketplace URL are looked up only when a template
+# needs them; the plugin commit is never looked up (expected_copy reads it from
+# the committed file).
+ck_choices() {
+  local b c s
+  [ "$CK_READY" = 0 ] || return 0
+  CK_READY=1
+  b="${STATE_BASE:-$(infer_choice branch)}"
+  c="${STATE_CRON:-$(infer_choice cron)}"
+  s="${STATE_STRICT:-$(infer_choice strict)}"
+  R_BASE=$(sed_repl "${b:-main}") R_CRON=$(sed_repl "${c:-0 9 * * 1}") R_STRICT=0
+  [ "${s:-false}" != true ] || R_STRICT=1
+  R_RTW=$(sed_repl "$STATE_RTW") R_RPI=$(sed_repl "$STATE_RPI") R_RPR=$(sed_repl "$STATE_RPR")
+  R_VERSION="" R_MARKET="" R_COMMIT=""
+  CK_MARKET_DONE=0 CK_VERSION_DONE=0
+}
+
+# expected_copy <project-relative path> <out file>: the bytes install would
+# write to <path> today, into <out file>; returns 1 (writing nothing) when no
+# install writes <path>. A workflow (.github/workflows/<name>.yml) is its
+# template rendered with the recorded choices (render_workflow) and the
+# DOC_SUPERPOWERS_COMMIT the committed file holds, as
+# scripts/check-self-install.sh reads it: the commit install --ci would pin is
+# read from the marketplace (git ls-remote), which a check never does. A
+# vendored file is the plugin's own copy: doc-tools.sh, a step script (or a
+# step companion, a script of scripts/), a doc-pr-release helper, the ledger
+# set and its adapters. The search launcher is scripts/search/launch.sh.
+expected_copy() {
+  local p="$1" out="$2" w d n src=""
+  case "$p" in
+    .github/workflows/*.yml)
+      w="${p#.github/workflows/}"
+      w="${w%.yml}"
+      in_list "$w" "$KNOWN_WORKFLOWS" || return 1
+      src="$SCRIPT_DIR/ci/$w.yml"
+      ck_choices
+      if [ "$CK_VERSION_DONE" = 0 ] && grep -q '__VERSION__' "$src"; then
+        ci_version
+        R_VERSION=$(sed_repl "$VERSION") CK_VERSION_DONE=1
+      fi
+      if [ "$CK_MARKET_DONE" = 0 ] && grep -q '__MARKETPLACE_URL__' "$src"; then
+        n="$STATE_MARKET"
+        [ -n "$n" ] || n=$(plugin_marketplace_url)
+        if [ -n "$n" ] && valid_marketplace_url "$n"; then
+          R_MARKET=$(sed_repl "$n")
+        fi
+        CK_MARKET_DONE=1
+      fi
+      R_COMMIT=""
+      if [ -f "$p" ]; then
+        R_COMMIT=$(sed -n 's/^ *DOC_SUPERPOWERS_COMMIT: "\([0-9a-f]*\)".*/\1/p' "$p" | head -n 1)
+      fi
+      render_workflow "$src" > "$out"
+      return 0
+      ;;
+    "$VENDOR_DEST/doc-tools.sh") src="$DOC_TOOLS" ;;
+    "$VENDOR_DEST"/*/*)
+      d="${p#"$VENDOR_DEST"/}"
+      n="${d#*/}"
+      d="${d%%/*}"
+      case "$n" in */*) return 1 ;; esac
+      case "$d" in
+        ledger | adapters) src="$SKILL_DIR/scripts/$d/$n" ;;
+        doc-superpowers-steps)
+          src="$STEPS_SRC/$n"
+          if [ ! -f "$src" ] && in_list "$n" "$STEP_COMPANIONS"; then
+            src="$SKILL_DIR/scripts/$n"
+          fi
+          ;;
+        doc-pr-release) src="$SCRIPT_DIR/ci/$d/$n" ;;
+        *) return 1 ;;
+      esac
+      ;;
+    "$SEARCH_LAUNCHER_DEST") src="$SEARCH_LAUNCHER_SRC" ;;
+    *) return 1 ;;
+  esac
+  [ -f "$src" ] || return 1
+  cat "$src" > "$out"
+}
+
+# ck_compare <path>: <path> drifted when it is not what expected_copy writes.
+# A path no install writes (your own adapter, say) is not judged.
+ck_compare() {
+  local want
+  want=$(mktemp "${TMPDIR:-/tmp}/doc-sp-expected.XXXXXX") || die "cannot create a temp file"
+  _TMPS+=("$want")
+  if expected_copy "$1" "$want" && ! cmp -s "$1" "$want"; then
+    ck_drift "$1" --ci
+  fi
+  /bin/rm -f "$want"
+}
+
+# ck_ci <workflows on disk> <record readable: 1|0>: the CI tier's drift check
+# (CK_CI: checked | untracked | unreadable). Each managed workflow on disk,
+# then each vendored file, in a fixed order.
+ck_ci() {
+  local w f d
+  if [ "$2" != 1 ]; then
+    CK_CI=unreadable CK_FAIL=1
+  elif [ "$STATE_HAS_CI" != 1 ]; then
+    CK_CI=untracked
+  else
+    CK_CI=checked
+    for w in $1; do
+      ck_compare ".github/workflows/$w.yml"
+    done
+    [ ! -f "$VENDOR_DEST/doc-tools.sh" ] || ck_compare "$VENDOR_DEST/doc-tools.sh"
+    for d in doc-pr-release doc-superpowers-steps ledger adapters; do
+      [ -d "$VENDOR_DEST/$d" ] || continue
+      for f in "$VENDOR_DEST/$d"/*; do
+        [ -f "$f" ] || continue
+        ck_compare "$f"
+      done
+    done
+  fi
+  if $JSON; then
+    st_rec ci.check "$CK_CI"
+    return 0
+  fi
+  case "$CK_CI" in
+    unreadable) echo "  ✗ drift check: $STATE_FILE cannot be read, so no copy can be checked against what install --ci writes" ;;
+    untracked) echo "  ✓ drift check: untracked: no $STATE_FILE records what install --ci wrote, so its copies are not checked" ;;
+  esac
+}
+
 status_ci() {
   local w line state_ok=1 on_disk st
   $JSON || echo "CI/CD Workflows:"
@@ -3046,6 +3268,7 @@ status_ci() {
         st=uninstalled-transient
       elif [ "$WF_STATE" = installed ]; then
         st=recorded-missing
+        ! $CHECK || CK_FAIL=1
       else
         st=absent
       fi
@@ -3073,9 +3296,9 @@ status_ci() {
   done
   if [ "$state_ok" = 1 ] && [ "$STATE_HAS_CI" = 1 ]; then
     if $JSON; then
-      st_rec ci.choices "${STATE_BASE:-main}" "${STATE_CRON:-0 9 * * 1}" "${STATE_STRICT:-false}" "$STATE_MARKET" "$STATE_RTW" "$STATE_RPI"
+      st_rec ci.choices "${STATE_BASE:-main}" "${STATE_CRON:-0 9 * * 1}" "${STATE_STRICT:-false}" "$STATE_MARKET" "$STATE_RTW" "$STATE_RPI" "$STATE_RPR"
     else
-      echo "  choices: base branch ${STATE_BASE:-main}, cron '${STATE_CRON:-0 9 * * 1}', strict ${STATE_STRICT:-false}${STATE_MARKET:+, marketplace $STATE_MARKET}${STATE_RTW:+, test workflow $STATE_RTW}${STATE_RPI:+, pr input $STATE_RPI} ($STATE_FILE)"
+      echo "  choices: base branch ${STATE_BASE:-main}, cron '${STATE_CRON:-0 9 * * 1}', strict ${STATE_STRICT:-false}${STATE_MARKET:+, marketplace $STATE_MARKET}${STATE_RTW:+, test workflow $STATE_RTW}${STATE_RPI:+, pr input $STATE_RPI}${STATE_RPR:+, pr runs $STATE_RPR} ($STATE_FILE)"
     fi
   fi
   # On a ledger host, a claims workflow without the ledger set beside
@@ -3128,6 +3351,7 @@ status_ci() {
       echo "  doc-tools.sh: vendored at $VENDOR_DEST/doc-tools.sh"
     fi
   fi
+  if $CHECK; then ck_ci "$on_disk" "$state_ok"; fi
   return 0
 }
 
@@ -3158,16 +3382,20 @@ _STATUS_JSON_JQ='
     elif $r[0] == "ci.choices" then .tiers.ci.choices = {base_branch: $r[1], cron: $r[2], ci_strict: ($r[3] == "true"),
                                                       marketplace_url: ($r[4] // "" | n),
                                                       resolve_test_workflow: ($r[5] // "" | n),
-                                                      resolve_test_pr_input: ($r[6] // "" | n)}
+                                                      resolve_test_pr_input: ($r[6] // "" | n),
+                                                      resolve_pr_runs: ($r[7] // "" | n)}
     elif $r[0] == "ci.ledger_gap" then .tiers.ci.claims_without_ledger_helpers += [$r[1]]
     elif $r[0] == "ci.helpers" then .tiers.ci.helpers[$r[1]] = ($r[2] | tonumber)
     elif $r[0] == "ci.removable" then .tiers.ci.removable_vendored += [$r[1]]
     elif $r[0] == "ci.vendored" then .tiers.ci.doc_tools_vendored = $r[1]
+    elif $r[0] == "ci.check" then .tiers.ci.drift_check = $r[1]
+    elif $r[0] == "drift" then .drift += [$r[1]]
     elif $r[0] == "search.state" then .tiers.search = {launcher: $r[1], mcp_entry: $r[2]}
     elif $r[0] == "search_gate.state" then .tiers.search_gate = {claude_settings: $r[1], codex_hooks: $r[2], search_rule: $r[3],
                                                                  search_rule_copies: {}}
     elif $r[0] == "search_gate.rule" then .tiers.search_gate.search_rule_copies[$r[1]] = {state: $r[2], version: ($r[3] // "" | n)}
     else . end)
+  | if $check then .drift = (.drift // []) else . end
   | .env = {DOC_SUPERPOWERS_STRICT: ($strict | n), DOC_SUPERPOWERS_SKIP: ($skip | n),
             DOC_SUPERPOWERS_QUIET: ($quiet | n), DOC_SUPERPOWERS_HOOK_BUDGET: ($budget | n),
             DOC_SUPERPOWERS_ADVICE: ($advice | n)}'
@@ -3175,7 +3403,539 @@ status_json() {
   jq -n --arg rec "$ST_REC" --arg repo "$TOP_ABS" --arg plugin "$SKILL_DIR" \
     --arg strict "${DOC_SUPERPOWERS_STRICT:-}" --arg skip "${DOC_SUPERPOWERS_SKIP:-}" \
     --arg quiet "${DOC_SUPERPOWERS_QUIET:-}" --arg budget "${DOC_SUPERPOWERS_HOOK_BUDGET:-}" \
-    --arg advice "${DOC_SUPERPOWERS_ADVICE:-}" "$_STATUS_JSON_JQ"
+    --arg advice "${DOC_SUPERPOWERS_ADVICE:-}" --argjson check "$CHECK" "$_STATUS_JSON_JQ"
+}
+
+# --- Upgrade -------------------------------------------------------------------
+#
+# install.sh upgrade [--to vX.Y.Z] [--check] [--force] [--json] moves the
+# doc-superpowers install this installer runs from ($SKILL_DIR, never the
+# current repository) to a release tag, or with --check says whether it is
+# behind. It runs before enter_repo: it needs no repository. Three kinds:
+#   plugin    a root under ~/.claude/plugins/ or $CLAUDE_PLUGIN_CACHE. Claude
+#             Code owns it: upgrade refuses and names `claude plugin update
+#             doc-superpowers`. --check lists the tags at the marketplace
+#             clone's origin (~/.claude/plugins/marketplaces/<mkt>), else at
+#             plugin.json's repository, and fetches the newest one's notes into
+#             a scratch repository (a plugin copy has no .git).
+#   codex     ${CODEX_HOME:-~/.codex}/doc-superpowers, when it is a checkout
+#             whose top is itself (else none): checked out in place,
+#             git checkout --detach <tag>; a clean branch checkout is fine.
+#   checkout  any other git checkout whose top is the root, detached (a
+#             branch checkout follows its branch: refused, git pull its fix):
+#             a new detached worktree, <parent>/doc-superpowers-v<version>,
+#             from the tag; the old root is left as it is. Only for the root
+#             the env hook's DOC_SUPERPOWERS_ROOT names (the hook sourced as
+#             the launcher sources it, compared by physical path), and never
+#             with ~/.claude/skills as <parent>: else refused. The env hook's
+#             DOC_SUPERPOWERS_ROOT line is rewritten, sh-quoted, after a .bak
+#             copy (one line: the export X= or the X= form kept; one is
+#             appended when the hook sets it no such way), and
+#             ~/.claude/skills/doc-superpowers is relinked when it is a link
+#             that resolves inside the old root.
+# Tags are read by name only: vMAJOR.MINOR.PATCH, at most 9 digits a field,
+# sorted per numeric field (launch.sh's order). A tag is a release only when
+# its own RELEASE-NOTES.md opens with its version (check-version's tag rule).
+# Fetched notes are data: doc-tools.sh tools security-floor (an awk program)
+# reads their headings; nothing in them runs. Each run caches the newest tag's notes and a sidecar (tag,
+# fetched, source) for doc-search check, which never fetches.
+#
+# Every refusal that needs no fetch comes first, so a refused run changes
+# nothing; git hooks never run (core.hooksPath=/dev/null). Exit: 0 current or
+# done · 1 behind (--check); without --check, a failure part-way (the message
+# says what was done) · 2 usage · 3 refused · 4 the fetch failed, or --check
+# failed part-way (upg_die), so a --check exit 1 always means behind.
+
+# The most of a RELEASE-NOTES.md read (doc_search.releases.MAX_NOTES_BYTES).
+UPG_MAX_NOTES=2000000
+UPG_RELEASE_URL="https://github.com/woodrowpearson/doc-superpowers.git"
+# An env hook line that assigns DOC_SUPERPOWERS_ROOT (the awk in upg_env_write
+# spells the same regex).
+UPG_ENV_RE='^[[:space:]]*(export[[:space:]]+)?DOC_SUPERPOWERS_ROOT='
+
+upg_refuse() {
+  echo "ERROR: $*" >&2
+  echo "Nothing was changed." >&2
+  exit 3
+}
+
+# upg_die <message>: a failure after preflight. Under --check it exits 4, so a
+# check that could not finish never reads as "behind" (1); otherwise 1, and the
+# message says what was done (UPG_DONE, once something outside the cache is).
+UPG_DONE=""
+upg_die() {
+  echo "ERROR: $*" >&2
+  [ -z "$UPG_DONE" ] || echo "$UPG_DONE" >&2
+  if $UPG_CHECK; then exit 4; fi
+  exit 1
+}
+
+upg_fetch_failed() {
+  echo "ERROR: $*" >&2
+  exit 4
+}
+
+# upg_safe <text>: <text> with control characters dropped and cut to 60
+# characters, for a message (it may come from fetched notes).
+upg_safe() {
+  printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177' | cut -c 1-60
+}
+
+# upg_json_str <text>: <text> as a JSON string (control characters dropped).
+upg_json_str() {
+  printf '"%s"' "$(printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177' | sed 's/\\/\\\\/g; s/"/\\"/g')"
+}
+
+# upg_json_opt <text>: upg_json_str, or null for "".
+upg_json_opt() {
+  if [ -n "$1" ]; then upg_json_str "$1"; else printf 'null'; fi
+}
+
+upg_phys() {
+  (cd "$1" 2>/dev/null && pwd -P)
+}
+
+# upg_under <path> <dir>: <path> is <dir> or inside it.
+upg_under() {
+  case "$1" in
+    "$2" | "$2"/*) return 0 ;;
+  esac
+  return 1
+}
+
+upg_sort() {
+  sort -t. -k1,1n -k2,2n -k3,3n
+}
+
+# upg_versions: tag names on stdin → the release versions, without the v, sorted.
+upg_versions() {
+  { grep -xE 'v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}' || true; } | sed 's/^v//' | upg_sort
+}
+
+# upg_lt <a> <b>: version <a> is below <b>.
+upg_lt() {
+  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | upg_sort | head -n 1)" = "$1" ]
+}
+
+# upg_kind: UPG_ROOT (the physical root), UPG_KIND (plugin, codex, checkout or
+# none) and, for a plugin install, UPG_MKT (its marketplace's name).
+upg_kind() {
+  local plugins cache codex top rel
+  UPG_ROOT=$(upg_phys "$SKILL_DIR") || upg_refuse "cannot enter $SKILL_DIR"
+  UPG_MKT=""
+  plugins=$(upg_phys "${HOME:-/nonexistent}/.claude/plugins") || plugins=""
+  cache=$(upg_phys "${CLAUDE_PLUGIN_CACHE:-${HOME:-/nonexistent}/.claude/plugins/cache}") || cache=""
+  codex=$(upg_phys "${CODEX_HOME:-${HOME:-/nonexistent}/.codex}/doc-superpowers") || codex=""
+  if [ -n "$plugins" ] && upg_under "$UPG_ROOT" "$plugins"; then
+    UPG_KIND=plugin
+    case "$UPG_ROOT" in
+      "$plugins"/marketplaces/* | "$plugins"/cache/*)
+        rel=${UPG_ROOT#"$plugins"/*/}
+        UPG_MKT=${rel%%/*}
+        ;;
+    esac
+  elif [ -n "$cache" ] && upg_under "$UPG_ROOT" "$cache"; then
+    UPG_KIND=plugin
+    rel=${UPG_ROOT#"$cache"/}
+    UPG_MKT=${rel%%/*}
+  elif ! top=$(git -C "$UPG_ROOT" rev-parse --show-toplevel 2>/dev/null) || [ "$(upg_phys "$top")" != "$UPG_ROOT" ]; then
+    # No checkout of its own (a copy inside another repository, say): the
+    # Codex root too, so no git command ever acts on an enclosing repository.
+    UPG_KIND=none
+  elif [ -n "$codex" ] && [ "$codex" = "$UPG_ROOT" ]; then
+    UPG_KIND=codex
+  else
+    UPG_KIND=checkout
+  fi
+}
+
+# upg_fix: the command that upgrades this install (check.py's _plugin_fix and
+# launch.sh's plugin_fix say the same): a checkout on a branch, which upgrade
+# refuses, is pulled.
+upg_fix() {
+  local p="$UPG_ROOT/scripts/hooks/install.sh"
+  if [ "$UPG_KIND" = plugin ]; then
+    printf 'claude plugin update doc-superpowers'
+  elif [ "$UPG_KIND" = checkout ] && git -C "$UPG_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1; then
+    if [[ "$UPG_ROOT" =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]]; then
+      printf 'git -C %s pull' "$UPG_ROOT"
+    else
+      printf 'git -C %s pull' "$(sh_squote "$UPG_ROOT")"
+    fi
+  elif [[ "$p" =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]]; then
+    printf 'bash %s upgrade' "$p"
+  else
+    printf 'bash %s upgrade' "$(sh_squote "$p")"
+  fi
+}
+
+# upg_clean: refuse a root with uncommitted changes (ignored files do not count).
+upg_clean() {
+  local st
+  st=$(git -C "$UPG_ROOT" status --porcelain 2>/dev/null) || upg_refuse "cannot read the state of $UPG_ROOT (git status)"
+  [ -z "$st" ] || upg_refuse "$UPG_ROOT has uncommitted changes or untracked files (git -C $(sh_squote "$UPG_ROOT") status): commit, stash or remove them, then run upgrade again"
+}
+
+upg_env_file() {
+  UPG_ENV=${DOC_SEARCH_ENV_FILE:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/doc-search/env.sh}
+  case $UPG_ENV in
+    */*) ;;
+    *) UPG_ENV=./$UPG_ENV ;;
+  esac
+}
+
+# upg_env_preflight: refuse an env hook the rewrite cannot change safely.
+upg_env_preflight() {
+  local n
+  if [ -z "${DOC_SEARCH_ENV_FILE:-}" ] && [ -z "${XDG_CONFIG_HOME:-}" ] && [ -z "${HOME:-}" ]; then
+    upg_refuse "HOME is not set: the env hook goes in ~/.config/doc-search/env.sh (or set XDG_CONFIG_HOME or DOC_SEARCH_ENV_FILE)"
+  fi
+  upg_env_file
+  [ ! -L "$UPG_ENV" ] || upg_refuse "$UPG_ENV is a symbolic link, and the upgrade never writes through one: set DOC_SEARCH_ENV_FILE to the file it points to, or change its DOC_SUPERPOWERS_ROOT line by hand after a --check"
+  [ ! -L "$UPG_ENV.bak" ] || upg_refuse "$UPG_ENV.bak is a symbolic link, and the upgrade never writes through one: remove it"
+  [ -e "$UPG_ENV" ] || return 0
+  { [ -f "$UPG_ENV" ] && [ -r "$UPG_ENV" ] && [ -w "$UPG_ENV" ]; } || upg_refuse "$UPG_ENV is not a file you can read and write"
+  n=$(grep -cE "$UPG_ENV_RE" "$UPG_ENV" || true)
+  [ "${n:-0}" -le 1 ] || upg_refuse "$UPG_ENV assigns DOC_SUPERPOWERS_ROOT on $n lines: keep one, then run upgrade again"
+}
+
+# upg_env_root: the DOC_SUPERPOWERS_ROOT the env hook sets, read as the
+# launcher reads it (sourced by sh when it parses, with the caller's value
+# unset, so the launcher runs it anyway); "" when it sets none.
+upg_env_root() {
+  { [ -f "$UPG_ENV" ] && [ -r "$UPG_ENV" ] && sh -n "$UPG_ENV" 2>/dev/null; } || return 0
+  # shellcheck disable=SC2016  # expands in the sh that sources the hook
+  env -u DOC_SUPERPOWERS_ROOT sh -c '. "$1" >/dev/null 2>&1; printf "%s" "${DOC_SUPERPOWERS_ROOT:-}"' upg-env-hook "$UPG_ENV" </dev/null 2>/dev/null || true
+}
+
+# upg_sibling_preflight: a checkout upgrade makes its sibling release worktree
+# only for the root reached through DOC_SUPERPOWERS_ROOT (plan D6), the one the
+# env hook it rewrites names, and never into ~/.claude/skills, where Claude
+# Code would load the sibling as a second skill.
+upg_sibling_preflight() {
+  local named named_p="" skills
+  named=$(upg_env_root)
+  [ -z "$named" ] || named_p=$(upg_phys "$named") || named_p=""
+  if [ -z "$named_p" ] || [ "$named_p" != "$UPG_ROOT" ]; then
+    upg_refuse "$UPG_ROOT is not the root DOC_SUPERPOWERS_ROOT names in $UPG_ENV ($([ -n "$named" ] && upg_safe "$named" || printf 'none')): upgrade adds a release worktree beside a checkout and points the env hook at it only for that root. Set DOC_SUPERPOWERS_ROOT=$(sh_squote "$UPG_ROOT") there, then run upgrade again"
+  fi
+  skills=$(upg_phys "${HOME:-/nonexistent}/.claude/skills") || skills=""
+  if [ -n "$skills" ] && [ "$(dirname "$UPG_ROOT")" = "$skills" ]; then
+    upg_refuse "$UPG_ROOT is in ~/.claude/skills, where the new release worktree beside it would load as a second skill: clone a release checkout elsewhere (git clone --branch vX.Y.Z $UPG_RELEASE_URL), point DOC_SUPERPOWERS_ROOT at it and link ~/.claude/skills/doc-superpowers to it (README → Installing without a plugin marketplace)"
+  fi
+}
+
+# upg_strip_url <url>: <url> without a user and password
+# (https://user:token@host/… → https://host/…), for messages and the cache.
+upg_strip_url() {
+  local src=$1 scheme rest auth
+  case $src in
+    *://*)
+      scheme=${src%%://*}
+      rest=${src#*://}
+      auth=${rest%%/*}
+      case $auth in
+        *@*) src="$scheme://${auth##*@}${rest#"$auth"}" ;;
+      esac
+      ;;
+  esac
+  printf '%s' "$src"
+}
+
+# upg_fetch: the release versions (UPG_VERSIONS, sorted) and where they came
+# from (UPG_SOURCE, and UPG_SHOWN: it without a credential, the only form any
+# message or the cache names); UPG_GIT is the git that reads their notes.
+upg_fetch() {
+  local mkt url="" top tags
+  if [ "$UPG_KIND" != plugin ]; then
+    UPG_SOURCE=$(git -C "$UPG_ROOT" remote get-url origin 2>/dev/null) || upg_fetch_failed "$UPG_ROOT has no origin remote to fetch the release tags from"
+    UPG_SHOWN=$(upg_strip_url "$UPG_SOURCE")
+    GIT_TERMINAL_PROMPT=0 git -C "$UPG_ROOT" -c core.hooksPath=/dev/null fetch --quiet --tags origin </dev/null \
+      || upg_fetch_failed "cannot fetch the release tags from $UPG_SHOWN (git -C $(sh_squote "$UPG_ROOT") fetch --tags origin)"
+    UPG_GIT=(git -C "$UPG_ROOT" -c core.hooksPath=/dev/null)
+    UPG_VERSIONS=$(git -C "$UPG_ROOT" tag --list | upg_versions)
+    return 0
+  fi
+  if [ -n "$UPG_MKT" ]; then
+    mkt="${HOME:-/nonexistent}/.claude/plugins/marketplaces/$UPG_MKT"
+    if top=$(git -C "$mkt" rev-parse --show-toplevel 2>/dev/null) && [ "$(upg_phys "$top")" = "$(upg_phys "$mkt")" ]; then
+      url=$(git -C "$mkt" remote get-url origin 2>/dev/null) || url=""
+    fi
+  fi
+  [ -n "$url" ] || url=$(plugin_marketplace_url)
+  [ -n "$url" ] || upg_fetch_failed "no repository to fetch the release tags from: no marketplace clone with an origin, and plugin.json names none"
+  UPG_SOURCE=$url
+  UPG_SHOWN=$(upg_strip_url "$url")
+  git init -q --bare --template= "$UPG_SCRATCH/tags.git" || upg_fetch_failed "cannot create a scratch repository in $UPG_SCRATCH"
+  UPG_GIT=(git --git-dir="$UPG_SCRATCH/tags.git" -c core.hooksPath=/dev/null)
+  tags=$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags --refs -- "$url" </dev/null) \
+    || upg_fetch_failed "cannot list the release tags at $UPG_SHOWN (git ls-remote --tags)"
+  UPG_VERSIONS=$(printf '%s\n' "$tags" | awk '{ sub(/^refs\/tags\//, "", $2); print $2 }' | upg_versions)
+}
+
+# upg_notes <version> <out>: RELEASE-NOTES.md at tag v<version>, at most
+# UPG_MAX_NOTES bytes of it. The blob's size is read first, so a larger one is
+# only ever read through head: no more than the capped prefix is written.
+upg_notes() {
+  local size
+  if [ "$UPG_KIND" = plugin ]; then
+    GIT_TERMINAL_PROMPT=0 "${UPG_GIT[@]}" fetch --quiet --depth 1 -- "$UPG_SOURCE" "refs/tags/v$1:refs/tags/v$1" </dev/null \
+      || upg_fetch_failed "cannot fetch tag v$1 from $UPG_SHOWN"
+  fi
+  size=$("${UPG_GIT[@]}" cat-file -s "refs/tags/v$1:RELEASE-NOTES.md" 2>/dev/null) && [[ "$size" =~ ^[0-9]+$ ]] \
+    || upg_refuse "tag v$1 has no RELEASE-NOTES.md: it is not a release commit"
+  if [ "$size" -le "$UPG_MAX_NOTES" ]; then
+    "${UPG_GIT[@]}" cat-file blob "refs/tags/v$1:RELEASE-NOTES.md" >"$2" 2>/dev/null \
+      || upg_die "cannot read the notes of v$1"
+  else
+    # git stops on the closed pipe once head has its bytes; only head's status counts.
+    { "${UPG_GIT[@]}" cat-file blob "refs/tags/v$1:RELEASE-NOTES.md" 2>/dev/null || true; } \
+      | head -c "$UPG_MAX_NOTES" >"$2" || upg_die "cannot read the notes of v$1"
+  fi
+}
+
+# upg_scan <notes file> <version>: refuse notes that do not open with
+# <version>; UPG_SEC is their newest security release ("" for none). A
+# security section above <version> (UPG_LATEST, for the newest tag's notes)
+# is dropped: a release is never newer than the tag whose notes carry it.
+upg_scan() {
+  local out first v
+  # The security-release marker is doc-tools.sh's (tools security-floor, the
+  # rule doc_search.releases applies): "first <X.Y.Z>" for the first release
+  # heading (none when there is none), then "release <X.Y.Z> <0|1>" per release section.
+  out=$("$BASH" "$DOC_TOOLS" tools security-floor "$1" 2>/dev/null) || upg_die "cannot read $1 (doc-tools.sh tools security-floor)"
+  first=$(printf '%s\n' "$out" | sed -n 's/^first //p')
+  first=${first%%$'\n'*}
+  [ "$first" = "$2" ] || upg_refuse "tag v$2 is not a release commit: its RELEASE-NOTES.md first release heading is $([ -n "$first" ] && printf 'v%s' "$(upg_safe "$first")" || printf 'missing')"
+  UPG_SEC=""
+  while IFS= read -r v; do
+    if [ -n "$v" ] && ! upg_lt "$2" "$v"; then UPG_SEC=$v; fi
+  done <<UPG_SCAN
+$(printf '%s\n' "$out" | awk '$1 == "release" && $3 == 1 { print $2 }' | upg_sort)
+UPG_SCAN
+}
+
+# upg_store_cache <notes file> <tag>: the release-notes cache doc-search check
+# reads, each file written beside it and moved into place.
+upg_store_cache() {
+  local fetched tn tj mode
+  if [ -z "${XDG_CACHE_HOME:-}" ] && [ -z "${HOME:-}" ]; then
+    upg_refuse "neither XDG_CACHE_HOME nor HOME is set: no place for the release-notes cache"
+  fi
+  UPG_CACHE_DIR="${XDG_CACHE_HOME:-${HOME:-}/.cache}/doc-superpowers"
+  [ ! -L "$UPG_CACHE_DIR" ] || upg_refuse "$UPG_CACHE_DIR is a symbolic link, and the release-notes cache is never written through one: remove it, then run upgrade again"
+  # A new cache directory is 0700; an existing one keeps its mode (checked below).
+  if [ ! -d "$UPG_CACHE_DIR" ]; then
+    { mkdir -p "$(dirname "$UPG_CACHE_DIR")" && mkdir -m 700 "$UPG_CACHE_DIR"; } || upg_die "cannot create $UPG_CACHE_DIR"
+  fi
+  [ -O "$UPG_CACHE_DIR" ] || upg_refuse "$UPG_CACHE_DIR is not your own directory: the release-notes cache must be"
+  # doc_search.release_cache reads only a directory no one else can write (no
+  # 0o022 bit), so an upgrade never writes a cache that check would refuse.
+  mode=$(file_mode "$UPG_CACHE_DIR") || upg_die "cannot read the mode of $UPG_CACHE_DIR"
+  [ "${#mode}" -eq 3 ] || mode=${mode#?}
+  case ${mode#?} in
+    [0145][0145]) ;;
+    *) upg_refuse "$UPG_CACHE_DIR is writable by its group or others (mode $mode), and doc-search check reads the release-notes cache only from a directory no one else can write: chmod go-w $(sh_squote "$UPG_CACHE_DIR"), then run upgrade again" ;;
+  esac
+  UPG_CACHE_SOURCE=$UPG_SHOWN
+  fetched=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  tn=$(mktemp "$UPG_CACHE_DIR/.release-notes.md.XXXXXX") || upg_die "cannot create a temp file in $UPG_CACHE_DIR"
+  _TMPS+=("$tn")
+  tj=$(mktemp "$UPG_CACHE_DIR/.release-notes.json.XXXXXX") || upg_die "cannot create a temp file in $UPG_CACHE_DIR"
+  _TMPS+=("$tj")
+  cat "$1" >"$tn" || upg_die "cannot write $tn"
+  printf '{"tag": %s, "fetched": %s, "source": %s}\n' "$(upg_json_str "$2")" "$(upg_json_str "$fetched")" \
+    "$(upg_json_str "$UPG_SHOWN")" >"$tj" || upg_die "cannot write $tj"
+  chmod 644 "$tn" "$tj" || upg_die "cannot chmod the release-notes cache"
+  mv -f "$tn" "$UPG_CACHE_DIR/release-notes.md" || upg_die "cannot write $UPG_CACHE_DIR/release-notes.md"
+  mv -f "$tj" "$UPG_CACHE_DIR/release-notes.json" || upg_die "cannot write $UPG_CACHE_DIR/release-notes.json"
+}
+
+# upg_env_write <new root>: the env hook's DOC_SUPERPOWERS_ROOT line set to
+# <new root> (appended, or the file created, when there is none).
+upg_env_write() {
+  local line dir tmp mode=644
+  line="DOC_SUPERPOWERS_ROOT=$(sh_squote "$1")"
+  dir=$(dirname "$UPG_ENV")
+  mkdir -p "$dir" || upg_die "cannot create $dir"
+  tmp=$(mktemp "$dir/.env.sh.XXXXXX") || upg_die "cannot create a temp file in $dir"
+  _TMPS+=("$tmp")
+  if [ -f "$UPG_ENV" ]; then
+    mode=$(file_mode "$UPG_ENV") || mode=644
+    cp -p "$UPG_ENV" "$UPG_ENV.bak" || upg_die "cannot write $UPG_ENV.bak"
+    if grep -qE "$UPG_ENV_RE" "$UPG_ENV"; then
+      # shellcheck disable=SC2016  # awk program, not shell expansion
+      UPG_LINE=$line awk '
+        /^[[:space:]]*(export[[:space:]]+)?DOC_SUPERPOWERS_ROOT=/ {
+          match($0, /^[[:space:]]*(export[[:space:]]+)?/)
+          print substr($0, 1, RLENGTH) ENVIRON["UPG_LINE"]
+          next
+        }
+        { print }' <"$UPG_ENV" >"$tmp" || upg_die "cannot rewrite $UPG_ENV"
+    else
+      cat "$UPG_ENV" >"$tmp" || upg_die "cannot read $UPG_ENV"
+      if [ -n "$(tail -c 1 "$UPG_ENV")" ]; then
+        echo >>"$tmp"
+      fi
+      printf 'export %s\n' "$line" >>"$tmp"
+    fi
+  else
+    printf '# doc-search: the per-user env hook (the launcher sources it)\nexport %s\n' "$line" >"$tmp"
+  fi
+  sh -n "$tmp" 2>/dev/null || upg_die "the rewritten $UPG_ENV would not parse as sh: left as it was"
+  chmod "$mode" "$tmp" || upg_die "cannot chmod $tmp"
+  mv -f "$tmp" "$UPG_ENV" || upg_die "cannot replace $UPG_ENV"
+}
+
+# upg_relink <new root>: ~/.claude/skills/doc-superpowers, when it is a link
+# that resolves inside the old root, pointed at the same place in <new root>.
+upg_relink() {
+  local link="${HOME:-}/.claude/skills/doc-superpowers" to
+  [ -n "${HOME:-}" ] && [ -L "$link" ] || return 0
+  to=$(upg_phys "$link") || return 0
+  upg_under "$to" "$UPG_ROOT" || return 0
+  ln -sfn "$1${to#"$UPG_ROOT"}" "$link" || upg_die "cannot relink $link"
+  echo "  relinked $link -> $1${to#"$UPG_ROOT"}"
+}
+
+# upg_report <action> <new root> (JSON, or text for check and current).
+upg_report() {
+  local fix=""
+  $UPG_BEHIND && fix=$(upg_fix)
+  if $JSON; then
+    printf '{"schema": "doc-superpowers-upgrade/1", "kind": %s, "root": %s, "installed": %s, "latest": %s, "target": %s, "newest_security": %s, "behind": %s, "below_security": %s, "action": %s, "new_root": %s, "fix": %s, "source": %s, "cache": %s}\n' \
+      "$(upg_json_str "$UPG_KIND")" "$(upg_json_str "$UPG_ROOT")" "$(upg_json_str "$UPG_INSTALLED")" \
+      "$(upg_json_str "$UPG_LATEST")" "$(upg_json_str "$UPG_TARGET")" "$(upg_json_opt "$UPG_NEWEST_SEC")" \
+      "$UPG_BEHIND" "$UPG_BELOW" "$(upg_json_str "$1")" "$(upg_json_opt "$2")" "$(upg_json_opt "$fix")" \
+      "$(upg_json_str "$UPG_CACHE_SOURCE")" "$(upg_json_str "$UPG_CACHE_DIR")"
+    return 0
+  fi
+  [ "$1" = upgraded ] && return 0
+  echo "doc-superpowers ($UPG_KIND install: $UPG_ROOT)"
+  echo "  installed $UPG_INSTALLED"
+  echo "  latest $UPG_LATEST"
+  [ "$UPG_TARGET" = "$UPG_LATEST" ] || echo "  target $UPG_TARGET"
+  echo "  newest security ${UPG_NEWEST_SEC:-none}"
+  if $UPG_BEHIND; then
+    echo "  behind: v$UPG_TARGET is available$($UPG_BELOW && printf '; below security release %s' "$UPG_NEWEST_SEC")"
+    echo "  fix: $fix"
+  elif $UPG_BELOW; then
+    echo "  below security release $UPG_NEWEST_SEC"
+  elif upg_lt "$UPG_LATEST" "$UPG_INSTALLED"; then
+    echo "  current: $UPG_INSTALLED is newer than the newest release"
+  else
+    echo "  current: v$UPG_TARGET"
+  fi
+  echo "  cache: $UPG_CACHE_DIR/release-notes.md (v$UPG_LATEST, from $UPG_CACHE_SOURCE)"
+}
+
+cmd_upgrade() {
+  local new="" have
+  # The install's own git, never a caller's (a hook's GIT_DIR, say).
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_NAMESPACE
+  upg_kind
+  [ "$UPG_KIND" != none ] || upg_refuse "$UPG_ROOT is not a git checkout of its own, a Claude Code plugin install or the Codex install, so there is nothing to upgrade in place: install a release checkout (git clone --branch vX.Y.Z $UPG_RELEASE_URL)"
+  UPG_INSTALLED=$("$BASH" "$DOC_TOOLS" tools version 2>/dev/null) || UPG_INSTALLED=""
+  [[ "$UPG_INSTALLED" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || upg_refuse "cannot read the installed version (the first release heading of $UPG_ROOT/RELEASE-NOTES.md)"
+  # Every refusal that needs no fetch, first.
+  if ! $UPG_CHECK; then
+    case $UPG_KIND in
+      plugin)
+        upg_refuse "doc-superpowers $UPG_INSTALLED here is a Claude Code plugin install ($UPG_ROOT), which Claude Code updates: claude plugin update doc-superpowers (upgrade --check says whether it is behind)"
+        ;;
+      codex) upg_clean ;;
+      checkout)
+        upg_clean
+        if git -C "$UPG_ROOT" symbolic-ref -q HEAD >/dev/null 2>&1; then
+          upg_refuse "$UPG_ROOT is on branch $(git -C "$UPG_ROOT" symbolic-ref --short -q HEAD): a branch checkout follows its branch (git pull). upgrade moves a release checkout, one detached at a tag (git clone --branch vX.Y.Z $UPG_RELEASE_URL)"
+        fi
+        upg_env_preflight
+        ;;
+    esac
+  fi
+  UPG_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/doc-superpowers-upgrade.XXXXXX") || upg_die "cannot create a scratch directory"
+  _TMPDIRS+=("$UPG_SCRATCH")
+  upg_fetch
+  [ -n "$UPG_VERSIONS" ] || upg_refuse "$UPG_SHOWN has no release tag (vX.Y.Z)"
+  UPG_LATEST=${UPG_VERSIONS##*$'\n'}
+  UPG_TARGET=$UPG_LATEST
+  if [ -n "$UPG_TO" ]; then
+    UPG_TARGET=${UPG_TO#v}
+    case $'\n'"$UPG_VERSIONS"$'\n' in
+      *$'\n'"$UPG_TARGET"$'\n'*) ;;
+      *) upg_refuse "$UPG_TO is not a release tag at $UPG_SHOWN" ;;
+    esac
+  fi
+  # The newest tag's notes: the cache, and the newest security release.
+  upg_notes "$UPG_LATEST" "$UPG_SCRATCH/latest.md"
+  upg_scan "$UPG_SCRATCH/latest.md" "$UPG_LATEST"
+  UPG_NEWEST_SEC=$UPG_SEC
+  if [ "$UPG_TARGET" != "$UPG_LATEST" ]; then
+    upg_notes "$UPG_TARGET" "$UPG_SCRATCH/target.md"
+    upg_scan "$UPG_SCRATCH/target.md" "$UPG_TARGET"
+  fi
+  UPG_BEHIND=false UPG_BELOW=false
+  upg_lt "$UPG_INSTALLED" "$UPG_TARGET" && UPG_BEHIND=true
+  [ -n "$UPG_NEWEST_SEC" ] && upg_lt "$UPG_INSTALLED" "$UPG_NEWEST_SEC" && UPG_BELOW=true
+  if ! $UPG_CHECK; then
+    if [ -n "$UPG_TO" ] && upg_lt "$UPG_TARGET" "$UPG_INSTALLED" && ! $FORCE; then
+      upg_refuse "$UPG_TO is older than the installed $UPG_INSTALLED: add --force to go back to it"
+    fi
+    if [ "$UPG_KIND" = checkout ] && [ "$UPG_TARGET" != "$UPG_INSTALLED" ]; then
+      new="$(dirname "$UPG_ROOT")/doc-superpowers-v$UPG_TARGET"
+      if [ -e "$new" ] || [ -L "$new" ]; then
+        upg_refuse "$new already exists: remove it, or point DOC_SUPERPOWERS_ROOT at it if it is that release"
+      fi
+      upg_sibling_preflight
+    fi
+  fi
+  upg_store_cache "$UPG_SCRATCH/latest.md" "v$UPG_LATEST"
+  if $UPG_CHECK; then
+    upg_report checked ""
+    $UPG_BEHIND && exit 1
+    exit 0
+  fi
+  # Current: the target is what is installed, or (no --to) older than it.
+  if [ "$UPG_TARGET" = "$UPG_INSTALLED" ] || { [ -z "$UPG_TO" ] && upg_lt "$UPG_TARGET" "$UPG_INSTALLED"; }; then
+    upg_report current ""
+    exit 0
+  fi
+  case $UPG_KIND in
+    codex)
+      git -C "$UPG_ROOT" -c core.hooksPath=/dev/null checkout --quiet --detach "refs/tags/v$UPG_TARGET" \
+        || upg_die "git checkout --detach v$UPG_TARGET failed in $UPG_ROOT (still at $UPG_INSTALLED; the cache was written)"
+      new=$UPG_ROOT
+      ;;
+    checkout)
+      git -C "$UPG_ROOT" -c core.hooksPath=/dev/null worktree add --detach "$new" "refs/tags/v$UPG_TARGET" >/dev/null 2>&1 \
+        || upg_die "git worktree add $new v$UPG_TARGET failed (the cache was written; nothing else changed)"
+      UPG_DONE="The new release worktree $new was made (the old root is left as it is), and DOC_SUPERPOWERS_ROOT is unchanged: set it to $(sh_squote "$new") in $UPG_ENV by hand, or remove the worktree (git -C $(sh_squote "$UPG_ROOT") worktree remove $(sh_squote "$new"))."
+      ;;
+  esac
+  have=$("$BASH" "$new/scripts/doc-tools.sh" tools version 2>/dev/null) || have=""
+  [ "$have" = "$UPG_TARGET" ] || echo "WARN: $new reads as version ${have:-unknown}, not $UPG_TARGET" >&2
+  if [ "$UPG_KIND" = checkout ]; then
+    upg_env_write "$new"
+    UPG_DONE="The new release worktree $new was made, and DOC_SUPERPOWERS_ROOT in $UPG_ENV points at it (the old file: $UPG_ENV.bak, when there was one)."
+  fi
+  if $JSON; then
+    [ "$UPG_KIND" = checkout ] && upg_relink "$new" >/dev/null
+    upg_report upgraded "$new"
+    exit 0
+  fi
+  echo "doc-superpowers upgraded: $UPG_INSTALLED -> $UPG_TARGET ($UPG_KIND install)"
+  if [ "$UPG_KIND" = codex ]; then
+    echo "  $UPG_ROOT is detached at v$UPG_TARGET"
+  else
+    echo "  new root: $new (detached at v$UPG_TARGET)"
+    echo "  DOC_SUPERPOWERS_ROOT set in $UPG_ENV$([ -f "$UPG_ENV.bak" ] && printf ' (the old file: %s.bak)' "$UPG_ENV")"
+    upg_relink "$new"
+    echo "  the old root is left as it is: $UPG_ROOT (git -C $(sh_squote "$UPG_ROOT") worktree list shows it; remove it once nothing uses it)"
+  fi
+  $UPG_BELOW && echo "  note: still below security release $UPG_NEWEST_SEC (--to)"
+  echo "  cache: $UPG_CACHE_DIR/release-notes.md (v$UPG_LATEST, from $UPG_CACHE_SOURCE)"
+  exit 0
 }
 
 # --- Main ------------------------------------------------------------------------------
@@ -3191,7 +3951,7 @@ case "$COMMAND" in
     usage
     exit 0
     ;;
-  install | uninstall | status) ;;
+  install | uninstall | status | upgrade) ;;
   print-merge-driver)
     # The merge.doc-index.driver value install --git registers, for a host
     # that registers the driver itself. Needs no repository.
@@ -3225,18 +3985,26 @@ OPT_MARKET="" OPT_MARKET_SET=0
 OPT_RTW="" OPT_RTW_SET=0
 # --resolve-test-pr-input: the same, OPT_RPI_SET=1 once given.
 OPT_RPI="" OPT_RPI_SET=0
+# --resolve-pr-runs: the same, OPT_RPR_SET=1 once given.
+OPT_RPR="" OPT_RPR_SET=0
 WF_MODE=plain CSV_NAMES=""
 SEEN_CI_OPTS=""
 # --merge-driver-only: the git tier is the merge driver alone (no hook).
 # --json: status as one JSON object.
 DRIVER_ONLY=false JSON=false
 
+# --to vX.Y.Z and --check: upgrade's (it also takes --force and --json).
+# --check is status's too (CHECK: the drift check).
+UPG_TO="" UPG_CHECK=false CHECK=false
+
 # Which command takes which flag (anything else: exit 2).
 allowed() {
   case "$COMMAND:$1" in
+    upgrade:--to | upgrade:--check | upgrade:--force | upgrade:--json) return 0 ;;
+    upgrade:*) return 1 ;;
     *:--git | *:--claude | *:--ci | *:--all | *:--ledger | *:--ledger-claude | *:--search | *:--search-gate | *:--merge-driver-only) return 0 ;;
-    status:--json) return 0 ;;
-    install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force | install:--marketplace-url | install:--resolve-test-workflow | install:--resolve-test-pr-input) return 0 ;;
+    status:--json | status:--check) return 0 ;;
+    install:--workflows | install:--base-branch | install:--cron | install:--ci-strict | install:--helpers | install:--force | install:--marketplace-url | install:--resolve-test-workflow | install:--resolve-test-pr-input | install:--resolve-pr-runs) return 0 ;;
     uninstall:--workflows | uninstall:--transient) return 0 ;;
   esac
   return 1
@@ -3251,12 +4019,19 @@ while [ $# -gt 0 ]; do
     *) value="" has_value=0 ;;
   esac
   case "$name" in
-    --git | --claude | --ci | --all | --ledger | --ledger-claude | --search | --search-gate | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input) ;;
+    --git | --claude | --ci | --all | --ledger | --ledger-claude | --search | --search-gate | --merge-driver-only | --json | --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input | --resolve-pr-runs | --to | --check) ;;
     *) usage_error "unknown option: $arg" ;;
   esac
   allowed "$name" || usage_error "$name does not apply to $COMMAND"
   case "$name" in
-    --base-branch | --cron | --workflows | --helpers | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input)
+    --to)
+      if [ "$has_value" = 0 ]; then
+        [ $# -gt 0 ] || usage_error "--to requires a value: a release tag, vX.Y.Z"
+        value="$1"
+        shift
+      fi
+      ;;
+    --base-branch | --cron | --workflows | --helpers | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input | --resolve-pr-runs)
       if [ "$has_value" = 0 ]; then
         [ $# -gt 0 ] || die "$name requires a value"
         value="$1"
@@ -3277,6 +4052,12 @@ while [ $# -gt 0 ]; do
     --search-gate) DO_SEARCH_GATE=true ;;
     --merge-driver-only) DRIVER_ONLY=true ;;
     --json) JSON=true ;;
+    --check) UPG_CHECK=true CHECK=true ;;
+    --to)
+      [[ "$value" =~ ^v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$ ]] \
+        || usage_error "invalid --to '$value': a release tag, vMAJOR.MINOR.PATCH"
+      UPG_TO="$value"
+      ;;
     --base-branch)
       valid_branch "$value" || die "invalid --base-branch '$value': a branch name of letters, digits and . _ / - that git accepts"
       OPT_BASE="$value"
@@ -3299,6 +4080,11 @@ while [ $# -gt 0 ]; do
       [ -z "$value" ] || valid_input_name "$value" \
         || usage_error "invalid --resolve-test-pr-input '$value': a workflow_dispatch input name (a letter or _, then letters, digits, _ and -), or empty for none"
       OPT_RPI="$value" OPT_RPI_SET=1
+      ;;
+    --resolve-pr-runs)
+      [ -z "$value" ] || valid_pr_runs "$value" \
+        || usage_error "invalid --resolve-pr-runs '$value': approved (a later step approves the pull request's own runs), or empty for none"
+      OPT_RPR="$value" OPT_RPR_SET=1
       ;;
     --ci-strict)
       case "$has_value:$value" in
@@ -3324,12 +4110,12 @@ while [ $# -gt 0 ]; do
     --transient) TRANSIENT=true ;;
   esac
   case "$name" in
-    --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input)
+    --workflows | --base-branch | --cron | --ci-strict | --helpers | --force | --transient | --marketplace-url | --resolve-test-workflow | --resolve-test-pr-input | --resolve-pr-runs)
       SEEN_CI_OPTS="${SEEN_CI_OPTS:+$SEEN_CI_OPTS }$name"
       ;;
   esac
 done
-if [ -n "$SEEN_CI_OPTS" ] && [ "$DO_CI" != true ] && [ "$COMMAND" != status ]; then
+if [ -n "$SEEN_CI_OPTS" ] && [ "$DO_CI" != true ] && [ "$COMMAND" != status ] && [ "$COMMAND" != upgrade ]; then
   usage_error "${SEEN_CI_OPTS%% *} applies to the CI tier: add --ci (or --all)"
 fi
 if $DRIVER_ONLY && ! $DO_GIT; then
@@ -3337,6 +4123,12 @@ if $DRIVER_ONLY && ! $DO_GIT; then
 fi
 if $JSON && { $DO_LEDGER || $DO_LEDGER_CLAUDE; }; then
   usage_error "--json reports the git, Claude and CI tiers; the ledger sets have no JSON status (drop --ledger / --ledger-claude)"
+fi
+
+# upgrade acts on the plugin install, not on a repository.
+if [ "$COMMAND" = upgrade ]; then
+  cmd_upgrade
+  exit 0
 fi
 
 enter_repo
@@ -3434,11 +4226,24 @@ case "$COMMAND" in
     ;;
 
   status)
+    # --check: the drift check of the committed copies (the CI tier and the
+    # --search set, or those of them named); exit 1 on a drift, a workflow
+    # recorded installed but missing, or an install record that cannot be
+    # read, else 0. With no tier named it checks both; naming only tiers it
+    # does not check is a usage error (as --merge-driver-only without --git
+    # is), never a "no copy drifted" over nothing.
+    if $CHECK && ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE && ! $DO_SEARCH && ! $DO_SEARCH_GATE; then
+      DO_CI=true DO_SEARCH=true
+    fi
+    if $CHECK && ! $DO_CI && ! $DO_SEARCH; then
+      usage_error "status --check: nothing checked (the drift check covers --ci and --search): add --ci or --search, or name no tier"
+    fi
     if $JSON; then
       # The three tiers (all of them, or those named), one JSON object on
-      # stdout, exit 0: the states are the verdict. --search and --search-gate
-      # add doc-search's sets (never part of the default, or of --all; the
-      # only members when they are the only ones named).
+      # stdout, exit 0: the states are the verdict (under --check, the drift
+      # check's exit). --search and --search-gate add doc-search's sets
+      # (never part of the default, or of --all; the only members when they
+      # are the only ones named).
       if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_SEARCH && ! $DO_SEARCH_GATE; then
         DO_GIT=true DO_CLAUDE=true DO_CI=true
       fi
@@ -3448,7 +4253,7 @@ case "$COMMAND" in
       if $DO_SEARCH; then status_search; fi
       if $DO_SEARCH_GATE; then status_search_gate; fi
       status_json
-      exit 0
+      exit "$CK_FAIL"
     fi
     if ! $DO_GIT && ! $DO_CLAUDE && ! $DO_CI && ! $DO_LEDGER && ! $DO_LEDGER_CLAUDE && ! $DO_SEARCH && ! $DO_SEARCH_GATE; then
       DO_GIT=true DO_CLAUDE=true DO_CI=true DO_LEDGER=true DO_LEDGER_CLAUDE=true DO_SEARCH=true DO_SEARCH_GATE=true
@@ -3493,5 +4298,15 @@ case "$COMMAND" in
       echo ""
     fi
     echo "Env overrides: DOC_SUPERPOWERS_STRICT=${DOC_SUPERPOWERS_STRICT:-unset} DOC_SUPERPOWERS_SKIP=${DOC_SUPERPOWERS_SKIP:-unset} DOC_SUPERPOWERS_LEDGER_SKIP=${DOC_SUPERPOWERS_LEDGER_SKIP:-unset}"
+    if $CHECK; then
+      if [ "$CK_FAIL" = 0 ]; then
+        echo "Drift check: no copy drifted"
+      else
+        n=0
+        [ -z "$CK_DRIFT" ] || n=$(printf '%s' "$CK_DRIFT" | grep -c .)
+        echo "Drift check: failed ($n drifted; see the ⚠ and ✗ lines above)"
+      fi
+      exit "$CK_FAIL"
+    fi
     ;;
 esac

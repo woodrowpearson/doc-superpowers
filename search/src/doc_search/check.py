@@ -6,6 +6,8 @@ that decides wins:
 1. no config: `not-in-force`;
 2. an invalid config: `not-ready` when its raw text says `"required": true`, else `not-in-force`;
 3. the plugin below `requires`: `not-ready`;
+3b. the plugin below the newest security release in the release notes on disk (`release_cache`; never
+    fetched): `not-ready` with `security_floor`, else `degraded`, remembered; the fix is the upgrade either way;
 4. the committed launcher copy absent, or below `requires`: `not-ready`; differing from the plugin's own
    but meeting the floor: `degraded`, remembered;
 5. with a transformer docs model and no transformer index: the static fallback valid is `degraded`, stale
@@ -34,9 +36,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from . import release_cache
 from .config import CONFIG_REL, Config, ConfigError, load_config
 from .engines import Building, IndexPool
 from .progress import read_progress
+from .releases import newest_security, parse_releases
+from .repo import GitError, git
 from .version import launcher_stamp, plugin_root, plugin_version
 
 State = Literal["ready", "degraded", "not-ready", "not-in-force"]
@@ -52,6 +57,12 @@ LAUNCHER_REL = ".claude/doc-superpowers/search-mcp.sh"
 
 INDEX_FIX = f"sh {LAUNCHER_REL} index"
 PLUGIN_FIX = "claude plugin update doc-superpowers"
+UPGRADE_FIX = "bash {install_sh} upgrade"
+"""The fix for any install that is neither a Claude Code plugin nor a branch checkout (a release checkout, the
+Codex root): the plugin's own `install.sh upgrade`, by its path (`_plugin_fix` renders it, quoted when the path
+needs it)."""
+PULL_FIX = "git -C {root} pull"
+"""The fix for a checkout on a branch, which `install.sh upgrade` refuses (it follows its branch)."""
 CONFIG_FIX = f"edit {CONFIG_REL}, then run sh {LAUNCHER_REL} check"
 TRANSFORMER_NOT_BUILT = "transformer index not built"
 """Row 5's reason when nothing serves the docs: its fix, INDEX_FIX, is a first transformer build that takes hours,
@@ -177,7 +188,8 @@ def _would_be(
     env: Mapping[str, str],
 ) -> Verdict:
     """Rows 3 to 7: the verdict as if the repository required doc-search. Row 7 refreshes only when it does:
-    a stale index of a repository that does not require doc-search is reported, not refreshed."""
+    a stale index of a repository that does not require doc-search is reported, not refreshed. Row 3b's
+    `security_floor` halt therefore holds only where `required` is true (assess turns the rest not-in-force)."""
 
     def verdict(
         state: State,
@@ -193,10 +205,16 @@ def _would_be(
         shown = _dotted(version) if version is not None else "(version unknown)"
         reason = f"doc-superpowers {shown} is below requires >={_dotted(cfg.requires)}"
         return verdict("not-ready", reason, _plugin_fix(env))
+    security = _security(version, env)
+    if security is not None and cfg.security_floor:
+        return verdict("not-ready", security, _plugin_fix(env))
     if launcher in ("absent", "below-floor"):
         return verdict("not-ready", launcher_reason, _install_fix())
     degraded = [launcher_reason] if launcher == "differs" and launcher_reason else []
     fix = _install_fix() if degraded else None
+    if security is not None:
+        degraded.insert(0, security)
+        fix = _plugin_fix(env)
 
     pool = IndexPool(cfg, fallback=False)
     cache = _cache(pool, top, cfg)
@@ -292,15 +310,65 @@ def _launcher(top: Path, floor: tuple[int, int, int] | None) -> tuple[LauncherSt
     return ("current", None) if current else ("differs", "launcher copy differs from the plugin's")
 
 
+def _security(version: tuple[int, int, int] | None, env: Mapping[str, str]) -> str | None:
+    """Row 3b: why the plugin is below the newest security release in the release notes on disk, naming where
+    the notes came from; None when it is not (or its version is unknown, or no notes are found). Each source's
+    newest security release is taken under that source's own ceiling, and the highest of them wins (the first
+    source on a tie), so one source can never hide another's. Never fetches."""
+    if version is None:
+        return None
+    best: tuple[tuple[int, int, int], release_cache.Source] | None = None
+    for source in release_cache.load(env, plugin_root()):
+        found = newest_security(parse_releases(source.text), ceiling=source.ceiling)
+        if found is not None and (best is None or found > best[0]):
+            best = (found, source)
+    if best is None or version >= best[0]:
+        return None
+    newest, source = best
+    meta, shown = source.meta, release_cache.safe
+    return (
+        f"doc-superpowers {_dotted(version)} is below security release {_dotted(newest)}"
+        f" (release notes {shown(meta['tag'])} from {shown(meta['source'])}, fetched {shown(meta['fetched'])})"
+    )
+
+
 def _plugin_fix(env: Mapping[str, str]) -> str:
-    """How this install is updated: the Codex root (`${CODEX_HOME:-~/.codex}/doc-superpowers`) is a git checkout
-    and is pulled; anything else is taken to be the Claude Code plugin."""
-    home = Path(env.get("HOME") or Path.home()).resolve()
+    """How this install is updated: a Claude Code plugin install (a root under `~/.claude/plugins/`, or under
+    `${CLAUDE_PLUGIN_CACHE:-~/.claude/plugins/cache}`) by Claude Code; a checkout on a branch, which
+    `install.sh upgrade` refuses, by `git -C <root> pull` (PULL_FIX); any other root, a release checkout or the
+    Codex root, by its own `install.sh upgrade` (UPGRADE_FIX), which moves it to the newest release tag.
+    launch.sh's `plugin_fix` and install.sh's `upg_fix` are the shell twins."""
     root = plugin_root()
-    if root != (Path(env.get("CODEX_HOME") or home / ".codex") / "doc-superpowers").resolve():
+    if release_cache.plugin_install(env, root)[0]:
         return PLUGIN_FIX
-    shown = f"~/{root.relative_to(home)}" if root.is_relative_to(home) else str(root)
-    return f"git -C {shown} pull"
+    if _branch_checkout(root, env):
+        return PULL_FIX.format(root=_sh_quote(str(root)))
+    return UPGRADE_FIX.format(install_sh=_sh_quote(str(root / "scripts" / "hooks" / "install.sh")))
+
+
+def _branch_checkout(root: Path, env: Mapping[str, str]) -> bool:
+    """Whether `root` is what `install.sh`'s `upg_kind` calls a `checkout` (a git checkout whose top is `root`,
+    not the Codex root `${CODEX_HOME:-~/.codex}/doc-superpowers`) and its HEAD is a branch. Local git only."""
+    home = Path(env.get("HOME") or Path.home())
+    codex = Path(env.get("CODEX_HOME") or home / ".codex") / "doc-superpowers"
+    if codex.resolve() == root:
+        return False
+    try:
+        top = Path(git(root, "rev-parse", "--show-toplevel").strip()).resolve()
+        if top != root:
+            return False
+        git(root, "symbolic-ref", "-q", "HEAD")
+    except GitError:
+        return False
+    return True
+
+
+def _sh_quote(text: str) -> str:
+    """`text` as one shell word: as it is when it needs no quoting, else in single quotes (install.sh's
+    `sh_squote`, so the two print the same command)."""
+    if re.fullmatch(r"[A-Za-z0-9_@%+=:,./-]+", text):
+        return text
+    return "'" + text.replace("'", "'\\''") + "'"
 
 
 def _install_fix() -> str:

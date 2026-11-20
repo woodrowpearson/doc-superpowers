@@ -54,6 +54,7 @@ strict=$(jq -r 'if .tiers.ci.ci_strict == true then 1 else 0 end' "$state")
 # The test workflow doc-index-resolve dispatches (none: empty).
 rtw=$(esc "$(jq -r '.tiers.ci.resolve_test_workflow // empty' "$state")")
 rpi=$(esc "$(jq -r '.tiers.ci.resolve_test_pr_input // empty' "$state")")
+rpr=$(esc "$(jq -r '.tiers.ci.resolve_pr_runs // empty' "$state")")
 installed=$(jq -r '.tiers.ci.workflows // {} | to_entries[] | select(.value.state == "installed") | .key' "$state")
 version="" market="" steps_run=""
 [ -n "$installed" ] || drift "$state" "records no installed workflow"
@@ -85,6 +86,7 @@ for t in scripts/hooks/ci/*.yml; do
     -e "s|__MARKETPLACE_URL__|$market|g" -e "s|__PLUGIN_COMMIT__|$pin|g" \
     -e "s|__RESOLVE_TEST_WORKFLOW__|$rtw|g" \
     -e "s|__RESOLVE_TEST_PR_INPUT__|$rpi|g" \
+    -e "s|__RESOLVE_PR_RUNS__|$rpr|g" \
     "$t" > "$work/$w.rendered.yml"
   diff -u "$work/$w.rendered.yml" "$f" \
     || drift "$f" "differs from $t rendered with the choices in $state"
