@@ -1,5 +1,18 @@
 # Release Notes
 
+## v3.19.2 (2026-11-22)
+
+This release makes doc-search recover from a first install that was cut short. Before, a client that gave up during the first `uv` sync of a new version could leave packages half-installed in the shared environment, and doc-search then failed at import on every start until someone reinstalled them by hand (#64). The launcher now finds those packages and reinstalls them before it starts the server.
+
+3.19.2 is not a security release: it raises no project's floor. Projects pick the fix up by re-running `install.sh install --search` and committing the refreshed `.claude/doc-superpowers/search-mcp.sh`, after the plugin update.
+
+### Fixes
+- **The launcher reinstalls packages an interrupted install left half-installed** (`scripts/search/launch.sh`). uv writes a package's `INSTALLER` last and counts any `*.dist-info/` as installed, so uv never repairs a copy that was killed midway; a `*.data/` left in `site-packages` makes every later install of its package fail. Before `uv run`, the launcher scans the environment uv uses (`UV_PROJECT_ENVIRONMENT`, else `<root>/search/.venv`) for either marker and runs `uv sync --inexact --reinstall-package …` with its own extras. `--inexact` keeps the packages another repository's extras installed in the shared environment. The output goes to stderr, a failed sync is retried once, and if that fails too the launcher prints the repair command and starts doc-search anyway (`test_launcher_heals_half_installed_packages`).
+
+### Other
+- `references/search.md` → *Troubleshooting* has a row for the reinstall line, and says that killing the first start of a new version is what leaves this state.
+- Verified locally, since GitHub Actions does not run on this account. The 22 launcher tests passed (354 assertions), with `test-spec-status-model.sh` (1078), shellcheck and the self-install drift check. A real first sync, killed at 0.6 s, left four packages half-installed; the next launch repaired them. The full `check-ci.sh` did not run.
+
 ## v3.19.1 (2026-11-20)
 
 This release updates doc-search's lockfile to semble 0.7.3 and google-genai 3.6.1. It also keeps the cloud leg retrying client-side timeouts under google-genai 3.x. It replaces Dependabot's #89 and #87.
