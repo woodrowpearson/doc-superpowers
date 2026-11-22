@@ -6632,6 +6632,93 @@ test_launcher_callers_uv_settings() {
   teardown
 }
 
+test_launcher_heals_half_installed_packages() {
+  echo "test: launcher: a package an interrupted install left half-installed (a *.dist-info/ with no INSTALLER, or a leftover *.data/) is reinstalled with uv sync --inexact --reinstall-package before uv run; the sync's output goes to stderr; a failed sync is retried once, then the repair command is printed and doc-search starts anyway"
+  setup
+  local envroot bin sp log hook want_sync
+  envroot=$(harness_mktemp_d healroot)
+  srl_root "$envroot"
+  sp="$envroot/search/.venv/lib/python3.12/site-packages"
+  hook="$envroot/hook.sh"
+  # A uv that logs each call to $bin/log, prints it to stdout, and exits with
+  # the number in $bin/sync-rc (default 0) for sync.
+  bin=$(harness_mktemp_d uvheal)
+  log="$bin/log"
+  printf '#!/bin/sh\nd=$(dirname "$0")\nprintf "uv %%s\\n" "$*" >> "$d/log"\nprintf "uv %%s\\n" "$*"\nif [ "$1" = sync ] && [ -f "$d/sync-rc" ]; then exit "$(cat "$d/sync-rc")"; fi\nexit 0\n' > "$bin/uv"
+  chmod +x "$bin/uv"
+  want_sync="uv sync --project $envroot/search --frozen --no-dev --inexact"
+  # No venv yet (the first launch of a version): uv run alone.
+  : > "$log"
+  srl_seen "$envroot" "$bin" serve
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_RC:$(cat "$log")" "no venv: uv run alone"
+  # A complete venv: every dist-info has INSTALLER, no *.data/.
+  mkdir -p "$sp/numpy-2.5.4.dist-info" "$sp/protobuf-7.36.2.dist-info" "$sp/doc_search-0.1.0.dist-info"
+  printf 'uv\n' | tee "$sp/numpy-2.5.4.dist-info/INSTALLER" "$sp/protobuf-7.36.2.dist-info/INSTALLER" > "$sp/doc_search-0.1.0.dist-info/INSTALLER"
+  : > "$log"
+  srl_seen "$envroot" "$bin" serve
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_RC:$RUN_OUT" "a complete venv: uv run alone, nothing on stderr"
+  # numpy and protobuf interrupted mid-copy (their INSTALLER is written last).
+  rm -f "$sp/numpy-2.5.4.dist-info/INSTALLER" "$sp/protobuf-7.36.2.dist-info/INSTALLER"
+  : > "$log"
+  RUN_RC=0
+  RUN_OUT=$(env -u UV_PROJECT_ENVIRONMENT -u VIRTUAL_ENV -u UV_WORKING_DIR -u UV_OFFLINE \
+    DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= PATH="$bin:$REAL_PATH" \
+    /bin/sh "$SCRIPT_DIR/search/launch.sh" serve </dev/null 2>"$bin/err") || RUN_RC=$?
+  assert_eq "$want_sync --reinstall-package numpy --reinstall-package protobuf
+uv run --project $envroot/search --frozen --no-dev doc-search serve" "$(cat "$log")" "half-installed numpy and protobuf: reinstalled, then uv run"
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev doc-search serve" "$RUN_RC:$RUN_OUT" "…stdout (the MCP stream) holds uv run's output alone"
+  assert_contains "$(cat "$bin/err")" "doc-search: reinstalling packages an interrupted install left half-installed: numpy protobuf" "…stderr names the packages"
+  assert_contains "$(cat "$bin/err")" "$want_sync --reinstall-package numpy" "…and carries the sync's own output"
+  # The same extras as uv run (a cloud-only package is reinstalled only with its extra).
+  mkdir -p docs/search
+  printf '{"cloud": {}}\n' > docs/search/config.json
+  : > "$log"
+  srl_seen "$envroot" "$bin" serve
+  assert_eq "uv sync --project $envroot/search --frozen --no-dev --inexact --extra cloud --reinstall-package numpy --reinstall-package protobuf
+uv run --project $envroot/search --frozen --no-dev --extra cloud doc-search serve" "$(cat "$log")" "the config's extras reach the sync too"
+  rm -f docs/search/config.json
+  # A leftover *.data/ with no dist-info yet fails every plain install of that package.
+  printf 'uv\n' | tee "$sp/numpy-2.5.4.dist-info/INSTALLER" > "$sp/protobuf-7.36.2.dist-info/INSTALLER"
+  mkdir -p "$sp/semble_grammars-0.1.2.data/purelib"
+  : > "$log"
+  srl_seen "$envroot" "$bin" check
+  assert_eq "$want_sync --reinstall-package semble_grammars
+uv run --project $envroot/search --frozen --no-dev doc-search check" "$(cat "$log")" "a leftover semble_grammars-0.1.2.data/: reinstalled (check heals too)"
+  # A failed sync is retried once; then the repair command, and uv run anyway.
+  printf '1\n' > "$bin/sync-rc"
+  : > "$log"
+  RUN_RC=0
+  RUN_OUT=$(env -u UV_PROJECT_ENVIRONMENT -u VIRTUAL_ENV -u UV_WORKING_DIR -u UV_OFFLINE \
+    DOC_SUPERPOWERS_ROOT="$envroot" CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= PATH="$bin:$REAL_PATH" \
+    /bin/sh "$SCRIPT_DIR/search/launch.sh" serve </dev/null 2>"$bin/err") || RUN_RC=$?
+  assert_eq "$want_sync --reinstall-package semble_grammars
+$want_sync --reinstall-package semble_grammars
+uv run --project $envroot/search --frozen --no-dev doc-search serve" "$(cat "$log")" "a failing sync: two attempts, then uv run"
+  # The command is one to paste: the project path single-quoted when it needs quoting.
+  local qproject="$envroot/search"
+  case $qproject in *[!A-Za-z0-9_@%+=:,./-]*) qproject="'$qproject'" ;; esac
+  assert_contains "$(cat "$bin/err")" "doc-search: the reinstall failed; run: uv sync --project $qproject --frozen --no-dev --inexact --reinstall-package semble_grammars" "…and the repair command on stderr"
+  rm -f "$bin/sync-rc"
+  rm -rf "$sp/semble_grammars-0.1.2.data"
+  # The env hook's UV_PROJECT_ENVIRONMENT: absolute as given, relative to the workspace root ($ROOT/search).
+  mkdir -p "$envroot/elsewhere/lib/python3.12/site-packages/joblib-1.6.0.dist-info"
+  printf "UV_PROJECT_ENVIRONMENT='%s'\nexport UV_PROJECT_ENVIRONMENT\n" "$envroot/elsewhere" > "$hook"
+  : > "$log"
+  srl_seen "$envroot" "$bin" serve DOC_SEARCH_ENV_FILE="$hook"
+  assert_eq "$want_sync --reinstall-package joblib" "$(sed -n 1p "$log")" "an absolute UV_PROJECT_ENVIRONMENT from the env hook: that venv is scanned"
+  mkdir -p "$envroot/search/rel-venv/lib/python3.12/site-packages/scipy-1.0.0.dist-info"
+  printf "UV_PROJECT_ENVIRONMENT=rel-venv\nexport UV_PROJECT_ENVIRONMENT\n" > "$hook"
+  : > "$log"
+  srl_seen "$envroot" "$bin" serve DOC_SEARCH_ENV_FILE="$hook"
+  assert_eq "$want_sync --reinstall-package scipy" "$(sed -n 1p "$log")" "…a relative one is under \$ROOT/search"
+  # A name that is not a distribution name is never passed to uv.
+  mkdir -p "$sp/a b;x-1.0.dist-info"
+  : > "$log"
+  srl_seen "$envroot" "$bin" serve
+  assert_eq "uv run --project $envroot/search --frozen --no-dev doc-search serve" "$(cat "$log")" "a dist-info whose name holds other characters: skipped"
+  teardown
+}
+
 test_search_install_refused_without_config() {
   echo "test: search: install --search refuses without docs/search/config.json (exit 1, the message, nothing written, with any other tier too); uninstall does not need it"
   setup
@@ -8234,6 +8321,7 @@ test_launcher_without_uv
 test_launcher_is_posix_sh
 test_launcher_env_hook
 test_launcher_callers_uv_settings
+test_launcher_heals_half_installed_packages
 test_launcher_client_cwd
 test_launcher_gate_opt_out
 test_launcher_check_gate_outside_a_work_tree

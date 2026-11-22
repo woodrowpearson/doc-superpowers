@@ -517,5 +517,72 @@ else
   EXTRAS="--all-extras --no-extra local-transformer"
 fi
 
+# Packages an interrupted install left half-installed. uv unpacks a wheel's
+# *.dist-info/ with its files and writes INSTALLER last, and it counts any
+# *.dist-info/ as installed. So a package whose copy was cut short (a client
+# that gave up during the first sync of a new version, a killed boot check)
+# is never repaired by uv run or uv sync, and doc-search fails at import on
+# every start. A *.data/ left in site-packages (a finished install empties and
+# removes it) makes every later install of that package fail. Each such
+# package is reinstalled here before uv run: uv sync --inexact (never removing
+# what another repository's extras put in this shared environment) with the
+# extras uv run gets, its output on stderr (stdout is the MCP stream). A failed
+# sync is retried once, the environment scanned again (a *.data/ takes two
+# passes: the first fails and leaves the dist-info), then the repair command
+# is printed and doc-search starts anyway. The environment is
+# $UV_PROJECT_ENVIRONMENT (a relative one is under $ROOT/search, the workspace
+# root, as uv resolves it), else $ROOT/search/.venv.
+case ${UV_PROJECT_ENVIRONMENT:-} in
+  "") VENV=$ROOT/search/.venv ;;
+  /*) VENV=$UV_PROJECT_ENVIRONMENT ;;
+  *) VENV=$ROOT/search/$UV_PROJECT_ENVIRONMENT ;;
+esac
+
+# half_installed: the names of those packages, space-separated, each once;
+# a name with a character a distribution name cannot hold is skipped.
+half_installed() {
+  HI_LIST=""
+  for HI_DIR in "$VENV"/lib/python*/site-packages/*.dist-info "$VENV"/lib/python*/site-packages/*.data; do
+    [ -d "$HI_DIR" ] || continue
+    case $HI_DIR in
+      *.dist-info) if [ -f "$HI_DIR/INSTALLER" ]; then continue; fi ;;
+    esac
+    # <name>-<version>.dist-info or .data: the name holds no "-", the version none.
+    HI_NAME=${HI_DIR##*/}
+    HI_NAME=${HI_NAME%.dist-info}
+    HI_NAME=${HI_NAME%.data}
+    HI_NAME=${HI_NAME%-*}
+    case $HI_NAME in
+      "" | *[!A-Za-z0-9._]*) continue ;;
+    esac
+    case " $HI_LIST " in
+      *" $HI_NAME "*) continue ;;
+    esac
+    HI_LIST="${HI_LIST:+$HI_LIST }$HI_NAME"
+  done
+  printf '%s' "$HI_LIST"
+}
+
+# heal_sync <names>: uv sync reinstalling <names>, its output on stderr; sets
+# HEAL_ARGS to the --reinstall-package flags.
+heal_sync() {
+  HEAL_ARGS=""
+  # shellcheck disable=SC2086  # the names: split on purpose, each [A-Za-z0-9._]
+  for HS_NAME in $1; do HEAL_ARGS="$HEAL_ARGS --reinstall-package $HS_NAME"; done
+  # shellcheck disable=SC2086  # $EXTRAS (below) and $HEAL_ARGS are fixed flag lists
+  uv sync --project "$ROOT/search" --frozen --no-dev --inexact $EXTRAS $HEAL_ARGS >&2
+}
+
+HEAL=$(half_installed)
+if [ -n "$HEAL" ]; then
+  echo "doc-search: reinstalling packages an interrupted install left half-installed: $HEAL" >&2
+  if ! heal_sync "$HEAL"; then
+    HEAL=$(half_installed)
+    if [ -n "$HEAL" ] && ! heal_sync "$HEAL"; then
+      echo "doc-search: the reinstall failed; run: uv sync --project $(pf_squote "$ROOT/search") --frozen --no-dev --inexact${EXTRAS:+ $EXTRAS}$HEAL_ARGS" >&2
+    fi
+  fi
+fi
+
 # shellcheck disable=SC2086  # $EXTRAS is a fixed flag list: empty, up to two --extra pairs, or --all-extras [--no-extra local-transformer]
 exec uv run --project "$ROOT/search" --frozen --no-dev $EXTRAS doc-search "$@"
