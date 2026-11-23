@@ -88,7 +88,10 @@
 #     as doc-search gate does;
 #   - no uv otherwise: check prints "not in force: uv not found" and exits 4;
 #     gate session-start and prompt are silent; all three remove the verdict
-#     file.
+#     file;
+#   - with UV_OFFLINE, a failed uv sync before uv run (see the offline
+#     preflight, at the end): answered as with no uv, the warm-up or the sync
+#     as the fix.
 # The verdict file, $(git rev-parse --git-path doc-search-gate), is kept by
 # check and gate session-start and prompt (doc-search's, or this file's where
 # it answers), never with DOC_SEARCH_GATE=0: so the agent's own fix and check
@@ -582,6 +585,63 @@ if [ -n "$HEAL" ]; then
       echo "doc-search: the reinstall failed; run: uv sync --project $(pf_squote "$ROOT/search") --frozen --no-dev --inexact${EXTRAS:+ $EXTRAS}$HEAL_ARGS" >&2
     fi
   fi
+fi
+
+# Offline uv (UV_OFFLINE non-empty, the caller's or the env hook's; never set
+# or cleared here): uv cannot fetch a new release's packages, and uv run's own
+# failure reads as a broken doc-search. So uv sync runs first, its output (both
+# streams) kept in a mktemp file removed on exit, then uv run --no-sync. When
+# the sync fails with uv's "Network connectivity is disabled", the fix is the
+# warm-up the user runs once, with the network on (warm_up below): unsetting
+# UV_OFFLINE is the user's choice, so it is addressed to the agent as something
+# to ask for. check and gate answer as where doc-search cannot run, the warm-up
+# as the fix (gate exits 0 with hook JSON); every other verb prints the warm-up
+# as one stderr line, then uv's lines, and exits 1. Another sync failure: uv's
+# lines on stderr, the same exits, no warm-up (check and gate name the plain
+# sync as the fix). No temp file: no preflight, uv run as without UV_OFFLINE.
+
+# warm_up [prefix]: the sync command as a user runs it in their own shell,
+# after <prefix>, with the uv variables the launcher's environment has and a
+# shell does not (the env hook may set them), each value as one shell word.
+warm_up() {
+  WU_CMD=${1:-}
+  if [ -n "${UV_PROJECT_ENVIRONMENT:-}" ]; then
+    WU_CMD="${WU_CMD:+$WU_CMD }UV_PROJECT_ENVIRONMENT=$(pf_squote "$UV_PROJECT_ENVIRONMENT")"
+  fi
+  if [ -n "${UV_CACHE_DIR:-}" ]; then
+    WU_CMD="${WU_CMD:+$WU_CMD }UV_CACHE_DIR=$(pf_squote "$UV_CACHE_DIR")"
+  fi
+  printf '%s' "${WU_CMD:+$WU_CMD }uv sync --project $(pf_squote "$ROOT/search") --frozen --no-dev --inexact${EXTRAS:+ $EXTRAS}"
+}
+
+if [ -n "${UV_OFFLINE:-}" ] && PRE_LOG=$(mktemp "${TMPDIR:-/tmp}/doc-search-sync.XXXXXX" 2>/dev/null); then
+  trap 'rm -f "$PRE_LOG"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  # shellcheck disable=SC2086  # $EXTRAS is a fixed flag list (below)
+  if uv sync --project "$ROOT/search" --frozen --no-dev --inexact $EXTRAS </dev/null >"$PRE_LOG" 2>&1; then
+    rm -f "$PRE_LOG"
+    trap - EXIT HUP INT TERM
+    # shellcheck disable=SC2086  # $EXTRAS is a fixed flag list (below)
+    exec uv run --project "$ROOT/search" --frozen --no-dev $EXTRAS --no-sync doc-search "$@"
+  fi
+  # uv wraps its messages: lines joined, blanks squeezed, before the match.
+  if tr '\n' ' ' <"$PRE_LOG" | tr -s ' ' | grep -q 'Network connectivity is disabled'; then
+    case ${1:-} in
+      check | gate)
+        answer_unrunnable "uv is offline and this release's packages are not cached" "$(warm_up "env -u UV_OFFLINE")"
+        ;;
+    esac
+    echo "doc-search: uv is offline and this release's packages are not cached; ask the user to run, with the network on: $(warm_up "env -u UV_OFFLINE")" >&2
+    cat "$PRE_LOG" >&2
+    exit 1
+  fi
+  cat "$PRE_LOG" >&2
+  case ${1:-} in
+    check | gate) answer_unrunnable "uv could not sync doc-search's packages (uv's output is on stderr)" "$(warm_up)" ;;
+  esac
+  exit 1
 fi
 
 # shellcheck disable=SC2086  # $EXTRAS is a fixed flag list: empty, up to two --extra pairs, or --all-extras [--no-extra local-transformer]

@@ -6719,6 +6719,130 @@ uv run --project $envroot/search --frozen --no-dev doc-search serve" "$(cat "$lo
   teardown
 }
 
+# srl_offline <root> <bin> [VAR=value …] -- <launcher args…>: the launcher under
+# /bin/sh with <bin>'s uv in front, <root> as DOC_SUPERPOWERS_ROOT, stdin from
+# /dev/null and the four uv variables unset unless given (srl_seen's
+# environment), TMPDIR=<bin>/tmp. Sets RUN_RC, RUN_OUT (stdout) and RUN_ERR.
+srl_offline() {
+  local root=$1 bin=$2
+  local envs=()
+  shift 2
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    envs+=("$1")
+    shift
+  done
+  [ "$#" -gt 0 ] && shift
+  RUN_RC=0
+  RUN_OUT=$(env -u UV_PROJECT_ENVIRONMENT -u VIRTUAL_ENV -u UV_WORKING_DIR -u UV_OFFLINE -u UV_CACHE_DIR \
+    DOC_SUPERPOWERS_ROOT="$root" CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= TMPDIR="$bin/tmp" PATH="$bin:$REAL_PATH" \
+    ${envs[@]+"${envs[@]}"} /bin/sh "$SCRIPT_DIR/search/launch.sh" "$@" </dev/null 2>"$bin/err") || RUN_RC=$?
+  RUN_ERR=$(cat "$bin/err")
+}
+
+test_launcher_names_the_offline_warm_up() {
+  echo "test: launcher: with UV_OFFLINE, uv sync runs before uv run --no-sync; uv's 'Network connectivity is disabled' prints the warm-up (one line, the env hook's uv variables in it) and exits 1, check and gate answer with it as the fix; another failure prints uv's lines alone; without UV_OFFLINE nothing changes; UV_OFFLINE is never set or cleared"
+  srh_fixture '{"required": true}'
+  local envroot bin log hook sync_args qroot warm want vf
+  # A root whose path needs quoting, so the warm-up's single quotes are seen.
+  envroot="$(harness_mktemp_d offroot)/the root"
+  srl_root "$envroot"
+  hook="$envroot/hook.sh"
+  vf=$(git rev-parse --git-path doc-search-gate)
+  # A uv that logs each call with the UV_OFFLINE it saw to $bin/log; for sync,
+  # $bin/sync-err on stderr and the exit code in $bin/sync-rc (default 0).
+  bin=$(harness_mktemp_d uvoffline)
+  mkdir -p "$bin/tmp"
+  log="$bin/log"
+  cat > "$bin/uv" <<'EOF'
+#!/bin/sh
+d=$(dirname "$0")
+printf 'offline=%s uv %s\n' "${UV_OFFLINE-unset}" "$*" >> "$d/log"
+if [ "$1" = sync ]; then
+  if [ -f "$d/sync-err" ]; then cat "$d/sync-err" >&2; fi
+  if [ -f "$d/sync-rc" ]; then exit "$(cat "$d/sync-rc")"; fi
+  exit 0
+fi
+printf 'uv %s\n' "$*"
+EOF
+  chmod +x "$bin/uv"
+  sync_args="--project $envroot/search --frozen --no-dev --inexact --extra cloud"
+  qroot="'$envroot/search'"
+  mkdir -p docs/search
+  printf '{"required": true, "cloud": {}}\n' > docs/search/config.json
+  # No UV_OFFLINE: no preflight, uv run as today.
+  : > "$log"
+  srl_offline "$envroot" "$bin" -- query foo
+  assert_eq "0:offline=unset uv run --project $envroot/search --frozen --no-dev --extra cloud doc-search query foo" "$RUN_RC:$(cat "$log")" "no UV_OFFLINE: uv run alone"
+  # UV_OFFLINE=1, the sync succeeds: one sync, then uv run --no-sync, UV_OFFLINE as the caller set it.
+  : > "$log"
+  srl_offline "$envroot" "$bin" UV_OFFLINE=1 -- serve
+  assert_eq "offline=1 uv sync $sync_args
+offline=1 uv run --project $envroot/search --frozen --no-dev --extra cloud --no-sync doc-search serve" "$(cat "$log")" "UV_OFFLINE=1, sync ok: one sync, then uv run --no-sync"
+  assert_eq "0:uv run --project $envroot/search --frozen --no-dev --extra cloud --no-sync doc-search serve:" "$RUN_RC:$RUN_OUT:$RUN_ERR" "…stdout is uv run's alone, nothing on stderr"
+  assert_eq "" "$(ls -A "$bin/tmp")" "…the temp file is removed"
+  # The env hook's UV_OFFLINE reaches both calls as it is.
+  printf 'UV_OFFLINE=yes\nexport UV_OFFLINE\n' > "$hook"
+  : > "$log"
+  srl_offline "$envroot" "$bin" DOC_SEARCH_ENV_FILE="$hook" -- serve
+  assert_eq "offline=yes offline=yes" "$(cut -d' ' -f1 "$log" | tr '\n' ' ' | sed 's/ $//')" "the env hook's UV_OFFLINE: both calls see it unchanged"
+  # The sync fails offline: the warm-up first, then uv's lines, exit 1.
+  printf '1\n' > "$bin/sync-rc"
+  printf '  x Failed to download `numpy==2.5.4`\n  +-> Network connectivity is disabled, but the\n      requested data was not found in the cache\n' > "$bin/sync-err"
+  warm="env -u UV_OFFLINE uv sync --project $qroot --frozen --no-dev --inexact --extra cloud"
+  : > "$log"
+  srl_offline "$envroot" "$bin" UV_OFFLINE=1 -- query foo
+  assert_eq "1" "$RUN_RC" "offline, the sync fails for connectivity, query: exit 1"
+  assert_eq "offline=1 uv sync $sync_args" "$(cat "$log")" "…uv run is never reached"
+  assert_eq "" "$RUN_OUT" "…nothing on stdout"
+  assert_eq "doc-search: uv is offline and this release's packages are not cached; ask the user to run, with the network on: $warm" "$(sed -n 1p "$bin/err")" "…the first stderr line is the whole warm-up"
+  assert_true "…in the form the spec gives" grep -Eq "^doc-search: uv is offline .*ask the user to run, with the network on: env -u UV_OFFLINE .*uv sync --project '.*/search' --frozen --no-dev --inexact --extra cloud$" "$bin/err"
+  assert_eq "$(cat "$bin/sync-err")" "$(sed -n '2,$p' "$bin/err")" "…then uv's own lines"
+  assert_eq "" "$(ls -A "$bin/tmp")" "…the temp file is removed"
+  # The env hook's UV_PROJECT_ENVIRONMENT and the caller's UV_CACHE_DIR: both in the line.
+  printf "UV_PROJECT_ENVIRONMENT='%s'\nexport UV_PROJECT_ENVIRONMENT\n" "$envroot/env dir" > "$hook"
+  srl_offline "$envroot" "$bin" DOC_SEARCH_ENV_FILE="$hook" UV_CACHE_DIR=/var/cache/uv UV_OFFLINE=1 -- serve
+  assert_eq "1:doc-search: uv is offline and this release's packages are not cached; ask the user to run, with the network on: env -u UV_OFFLINE UV_PROJECT_ENVIRONMENT='$envroot/env dir' UV_CACHE_DIR=/var/cache/uv uv sync --project $qroot --frozen --no-dev --inexact --extra cloud" \
+    "$RUN_RC:$(sed -n 1p "$bin/err")" "serve, UV_PROJECT_ENVIRONMENT and UV_CACHE_DIR set: both in the warm-up, exit 1"
+  # check: a not-ready verdict, the warm-up as its fix.
+  srl_offline "$envroot" "$bin" UV_OFFLINE=1 -- check
+  assert_eq "1:doc-search: not ready: uv is offline and this release's packages are not cached" "$RUN_RC:$RUN_OUT" "check: not ready, exit 1"
+  srl_offline "$envroot" "$bin" UV_OFFLINE=1 -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "uv is offline and this release's packages are not cached" "$warm")" "$(srg_compact)" "check --format json: the warm-up as the fix"
+  assert_eq "not-ready
+uv is offline and this release's packages are not cached; fix: $warm" "$(cat "$vf")" "…the verdict file names it too"
+  # gate: exit 0, one JSON object naming the warm-up.
+  srl_offline "$envroot" "$bin" UV_OFFLINE=1 -- gate session-start
+  assert_eq "0" "$RUN_RC" "gate session-start: exit 0"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  want="doc-search is required here and not ready: uv is offline and this release's packages are not cached. Fix: $warm. Only the user can run this fix; you may run only sh .claude/doc-superpowers/search-mcp.sh index, status or check. Do no work until it is ready: tell the user this line and stop."
+  assert_eq "$(jq -cn --arg r "$want" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $r}}')" "$(srg_compact)" "…the warm-up as the fix"
+  srl_offline "$envroot" "$bin" UV_OFFLINE=1 -- gate prompt
+  assert_eq "0" "$RUN_RC" "gate prompt: exit 0"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  assert_contains "$(srg_compact)" "Fix: $warm — then send your message again." "…the warm-up as the fix"
+  # Another sync failure: uv's lines alone, no warm-up; the same exits.
+  printf 'error: the lockfile does not match the project\n' > "$bin/sync-err"
+  srl_offline "$envroot" "$bin" UV_OFFLINE=1 -- query foo
+  assert_eq "1:error: the lockfile does not match the project" "$RUN_RC:$RUN_ERR" "another failure, query: uv's lines alone, exit 1"
+  srl_offline "$envroot" "$bin" UV_OFFLINE=1 -- check --format json
+  assert_eq "$(srg_check_json not-ready 1 "uv could not sync doc-search's packages (uv's output is on stderr)" "uv sync --project $qroot --frozen --no-dev --inexact --extra cloud")" "$(srg_compact)" "…check: not ready, the plain sync as the fix"
+  assert_eq "1:error: the lockfile does not match the project" "$RUN_RC:$RUN_ERR" "…uv's lines on stderr, no warm-up"
+  srl_offline "$envroot" "$bin" UV_OFFLINE=1 -- gate session-start
+  assert_eq "0" "$RUN_RC" "…gate session-start: exit 0"
+  assert_true "…one JSON object (jq -e .)" srg_is_json
+  assert_not_contains "$RUN_OUT$RUN_ERR" "env -u UV_OFFLINE" "…no warm-up"
+  # Not required: check is not in force (exit 4), gate is silent.
+  printf '{"cloud": {}}\n' > docs/search/config.json
+  printf '1\n' > "$bin/sync-rc"
+  printf 'Network connectivity is disabled\n' > "$bin/sync-err"
+  srl_offline "$envroot" "$bin" UV_OFFLINE=1 -- check
+  assert_eq "4:doc-search: not in force: uv is offline and this release's packages are not cached" "$RUN_RC:$RUN_OUT" "not required: check exit 4"
+  srl_offline "$envroot" "$bin" UV_OFFLINE=1 -- gate prompt
+  assert_eq "0:" "$RUN_RC:$RUN_OUT" "…gate silent"
+  assert_eq "" "$(ls -A "$bin/tmp")" "no temp file is left behind"
+  teardown
+}
+
 test_search_install_refused_without_config() {
   echo "test: search: install --search refuses without docs/search/config.json (exit 1, the message, nothing written, with any other tier too); uninstall does not need it"
   setup
@@ -8322,6 +8446,7 @@ test_launcher_is_posix_sh
 test_launcher_env_hook
 test_launcher_callers_uv_settings
 test_launcher_heals_half_installed_packages
+test_launcher_names_the_offline_warm_up
 test_launcher_client_cwd
 test_launcher_gate_opt_out
 test_launcher_check_gate_outside_a_work_tree

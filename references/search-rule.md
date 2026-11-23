@@ -8,7 +8,8 @@ This is the rule that tells an agent what to do with a doc-search verdict when a
 ## When doc-search is required
 
 **Use when** your session shows a doc-search verdict: the context your session started with, a blocked
-prompt, a denied tool call, or the output of `sh .claude/doc-superpowers/search-mcp.sh check`.
+prompt, a denied tool call, or the output of `sh .claude/doc-superpowers/search-mcp.sh check`. Also when
+a doc-search answer is marked local-only (below).
 
 `check` decides whether doc-search can answer; you do not. Its exit code:
 
@@ -49,4 +50,15 @@ Two things `check` cannot see. Check them yourself:
 
 **Red flags — stop:** you are about to search with `rg`, grep or the command line after a not-ready
 verdict; you are about to edit a file after one; you wrote "carry on" or "proceed" next to "not ready".
+
+### Local-only answers
+
+A search header's `local-only:` line names each cloud leg that did not answer, and why. Its results are
+local only.
+
+| Reason | You are | Do |
+|---|---|---|
+| `failed` | a top-level session with the user | The first time in the session, tell the user why and ask whether local-only results are OK before relying on them. A yes holds for the session; a no stops the task, reporting the failure. |
+| `failed` | a subagent, or an unattended run | Never ask. Say in your report or the run's output that results were local-only, and why; carry on. |
+| `timeout`, `no-stamp`, `building` | anyone | Rely on the results; mention it once if it bears on the answer. Never ask: these pass on their own. |
 <!-- /doc-superpowers:search-rule -->
