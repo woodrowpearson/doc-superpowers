@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from ..config import CloudCfg
+from ..config import CloudCfg, VertexCfg
 from . import CloudUnavailable, LazyClient, import_module
 
 BATCH_SIZE = 200
@@ -27,6 +27,11 @@ BACKOFF_CAP_S = 30.0
 QUERY_TASK = "RETRIEVAL_QUERY"
 CODE_QUERY_TASK = "CODE_RETRIEVAL_QUERY"
 DOCUMENT_TASK = "RETRIEVAL_DOCUMENT"
+
+
+def embedder_id(vertex: VertexCfg) -> str:
+    """The id a stamp and a code chunk 0 record for the vectors `vertex` makes: model and dimensions."""
+    return f"vertex:{vertex.model}/{vertex.dimensions}"
 
 
 class VertexEmbedder:
@@ -61,7 +66,7 @@ class VertexEmbedder:
         self._jitter = jitter
         self._backoff_s = backoff_s
         self._clock = clock
-        self.id = f"vertex:{vertex.model}/{vertex.dimensions}"
+        self.id = embedder_id(vertex)
 
     def _make_client(self) -> Any:
         genai = import_module("google.genai")

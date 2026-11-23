@@ -68,6 +68,7 @@ from ..corpus import Corpus
 from ..docindex import DocIndex
 from ..repo import git, git_bytes, is_ancestor, rev_parse
 from . import CloudUnavailable, LazyClient, describe, import_module
+from .corpora import LEASE_DOC, MARKDOWN_SUFFIXES, MAX_FILE_BYTES, REGULAR_MODES, decode_text
 from .read import STAMP_DOC, CorpusStamp, _parse_stamp, resolve_base_ref
 from .vertex import VertexEmbedder
 
@@ -76,7 +77,6 @@ logger = logging.getLogger(__name__)
 Mode = Literal["catch-up", "full", "prune-orphans"]
 MODES: tuple[str, ...] = ("catch-up", "full", "prune-orphans")
 
-LEASE_DOC = "catch_up_lease"
 LEASE_TTL_S = 1800
 LEASE_RENEW_S = 300  # a run checks and extends its lease at least this often
 PRUNE_CAP_MIN = 20  # orphans are pruned without force up to max(PRUNE_CAP_MIN, PRUNE_CAP_RATIO of the corpus's paths)
@@ -86,9 +86,6 @@ BATCH_OPS = 500  # Firestore's limit for one batch
 READ_TIMEOUT_S = 60.0  # one small query
 SCAN_TIMEOUT_S = 300.0  # the query that lists every path of the corpus
 COMMIT_TIMEOUT_S = 60.0
-MAX_FILE_BYTES = 1 << 20  # the corpus's own limit; a larger file is not indexed
-MARKDOWN_SUFFIXES = (".md", ".markdown", ".mdx")
-REGULAR_MODES = ("100644", "100755")  # symlinks (120000) and submodules (160000) are not docs
 
 
 class BaseRefError(Exception):
@@ -219,16 +216,6 @@ def _lease_blocker(data: dict[str, Any] | None, me: str, now: datetime) -> tuple
         return holder, None
     stamped = expires if expires.tzinfo else expires.replace(tzinfo=UTC)
     return None if stamped <= now else (holder, expires)
-
-
-def _decode(data: bytes) -> str | None:
-    """UTF-8 text (a BOM dropped), or None for a file too large, binary or not UTF-8."""
-    if len(data) > MAX_FILE_BYTES or b"\0" in data:
-        return None
-    try:
-        return data.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        return None
 
 
 def _is_line(value: Any) -> bool:
@@ -535,7 +522,7 @@ class CloudIndexer:
         if not rewrite and self._is_current(db, path, sha):
             report.files_skipped += 1
             return
-        text = _decode(data)
+        text = decode_text(data, MAX_FILE_BYTES)
         chunks = self._chunks(corpus, path, text) if text is not None else []
         if not chunks:
             # a content defect (binary, not UTF-8, too large, empty) fails identically on every run, so it is

@@ -55,7 +55,8 @@ class CorpusStamp:
     mode: str | None
     embedder_id: str | None
     repo_id: str | None = None  # the root commit(s) of the repository that wrote it (the write path's, optional)
-    chunker_version: int | None = None
+    chunker_version: int | None = None  # the docs corpus's chunker (`doc_search.chunker.CHUNKER_VERSION`)
+    chunker_id: str | None = None  # the code corpus's chunker, `semble-<major>.<minor>`
 
     @property
     def short(self) -> str:
@@ -76,6 +77,7 @@ def _parse_stamp(data: dict[str, Any] | None) -> CorpusStamp | None:
         _text(data.get("embedder_id")),
         _text(data.get("repo_id")),
         version if isinstance(version, int) and not isinstance(version, bool) else None,
+        _text(data.get("chunker_id")),
     )
 
 

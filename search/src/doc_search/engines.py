@@ -378,12 +378,15 @@ class _Entry:
         return any(state.busy if state.spec is not None else state.running for state in self.live())
 
 
-def _content_types(values: Iterable[str]) -> tuple[ContentType, ...]:
+def content_types(values: Iterable[str]) -> tuple[ContentType, ...]:
     """`code.content` as semble content types. "all" is every type, as in semble's own CLI."""
     values = tuple(values)
     if "all" in values:
         return (ContentType.CODE, ContentType.DOCS, ContentType.CONFIG)
     return tuple(dict.fromkeys(ContentType(value) for value in values))
+
+
+_content_types = content_types  # the name before the cloud code corpus shared it
 
 
 def _stamp(index_dir: Path) -> tuple[int, int] | None:
@@ -672,7 +675,7 @@ class IndexPool:
         if kind == "docs":
             spec = cfg.docs.transformer
             return (ContentType.DOCS,), spec.model_path if spec is not None else cfg.docs.model
-        return _content_types(cfg.code.content), cfg.code.model
+        return content_types(cfg.code.content), cfg.code.model
 
     def _states(self) -> dict[Kind, _State]:
         cfg = self._cfg
