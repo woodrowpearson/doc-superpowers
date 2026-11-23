@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** An opt-in cloud leg over code (Vertex embeddings in a Firestore collection), chosen per corpus (docs, code, both), fused into code results by shaped weighted RRF; a search the cloud did not answer says which kinds are local-only, and the agent asks the user before relying on it. Ships as v3.20.0.
+**Goal:** An opt-in cloud leg over code (Vertex embeddings in a Firestore collection), chosen per corpus (docs, code, both), fused into code results by shaped weighted RRF; a search the cloud did not answer says which kinds are local-only, and the agent asks the user before relying on it. Ships as v3.21.0.
 
 **Architecture:** The cloud writer and reader are generalised over a *corpus description* (`cloud/corpora.py`): the docs corpus is today's behaviour, the code corpus is semble's chunks of the code index's files. The searcher runs a second cloud leg for `scope=code|all` and fuses it with the local code leg before the existing docs/code join. uv's offline setting stays the host's; the launcher only names the warm-up when an offline start lacks packages.
 
@@ -33,7 +33,7 @@
 
 ## Review Focus
 
-1. A repository on a pre-3.20 config (`cloud` set, no `docs` / `code` keys) behaves exactly as today: docs leg on, no code leg, same stamp, same lease, same notes, and `index --cloud` output byte-identical (a driver greps `^stamped: yes` and `^doc-search: the corpus lease is held by`) — pinned in Tasks 1, 4, 5 and 10.
+1. A repository on a pre-3.21 config (`cloud` set, no `docs` / `code` keys) behaves exactly as today: docs leg on, no code leg, same stamp, same lease, same notes, and `index --cloud` output byte-identical (a driver greps `^stamped: yes` and `^doc-search: the corpus lease is held by`) — pinned in Tasks 1, 4, 5 and 10.
 2. Code a repository keeps out of its local index (`.sembleignore`, a nested `.gitignore`, `dist/`) or a secret-bearing file (`prod.tfvars`, `deploy/key.pem`, `.env.local`, `aws_credentials.json`) is never sent — pinned in Task 3.
 3. A code file edited on the branch is never served from the cloud (its stale chunk would point at wrong lines) — pinned in Task 6.
 4. With both corpora, a docs failure beside a code lease refusal exits 1, not 2, so a driver never reads it as "someone else is doing it" — pinned in Task 5.
@@ -224,11 +224,11 @@ Owner-approved (2026-11-22): sending the consumer's code to Vertex and Firestore
 - [ ] **Step 4b (owner, only if the gate fails and he decides not to ship the code leg):** remove what Steps 1–2 made: `gcloud firestore bulk-delete --collection-ids=code_chunks --database=<db>`, delete `<meta>/code-index` and `<meta>/code_catch_up_lease`, and revert the index resource (`terraform apply` without it). The docs collection and its stamp are never touched.
 - [ ] **Step 5:** Put the numbers (no consumer name, no paths) into `references/search.md` → *Hardware and performance*; commit `docs(doc-search): measured code-leg latency and recall`.
 
-### Task 13: Release v3.20.0
+### Task 13: Release v3.21.0
 
-- [ ] **Step 1:** Add the v3.20.0 section to `RELEASE-NOTES.md` (Features, Fixes; not `### Security`), including that projects which copied the search-rule block must copy it again.
-- [ ] **Step 2:** `bash scripts/doc-tools.sh bump-version 3.20.0 && bash scripts/doc-tools.sh check-version`, then `bash scripts/doc-tools.sh update-index` for the docs the stamps changed; commit `release: v3.20.0`, then `docs: re-baseline … after the v3.20.0 version stamps`.
+- [ ] **Step 1:** Add the v3.21.0 section to `RELEASE-NOTES.md` (Features, Fixes; not `### Security`), including that projects which copied the search-rule block must copy it again.
+- [ ] **Step 2:** `bash scripts/doc-tools.sh bump-version 3.21.0 && bash scripts/doc-tools.sh check-version`, then `bash scripts/doc-tools.sh update-index` for the docs the stamps changed; commit `release: v3.21.0`, then `docs: re-baseline … after the v3.21.0 version stamps`.
 - [ ] **Step 3:** `bash scripts/check-ci.sh` — every check PASS (the full gate; dep-audit needs the network).
 - [ ] **Step 4:** Leak check by hand (the leak guard is off): `git diff main... | rg -i -n "<consumer and sibling-project names>"` and the same over `git log main..` messages → nothing; `bash scripts/leak-scan.sh` → clean.
-- [ ] **Step 5:** PR to `main` (merge commit), the lightweight tag `v3.20.0` on the release commit, a GitHub release with the v3.20.0 notes section.
+- [ ] **Step 5:** PR to `main` (merge commit), the lightweight tag `v3.21.0` on the release commit, a GitHub release with the v3.21.0 notes section.
 - [ ] **Step 6:** Tell the consumer coordinator: the tag, its peeled sha, the update order of spec §4, and the names that changed from its prep checklist (`HeaderInfo.local_only` is `(kind, reason)` pairs; `cloud.code.exclude`, `cloud.code.timeout_s`; the code index has no `__name__` field in the gcloud form; the two-corpus output prefixes and the ` (code)` suffix on error lines; the one-line warm-up).
