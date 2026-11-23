@@ -29,6 +29,7 @@ Fixed before the release, in the code leg this release adds:
 
 ### Other
 - Measured before the release, on a repository of about 6,500 code files (167,291 chunks), on an Intel Mac mini (*Hardware and performance*). The first upload took 2 h 18 min. Warm, the code leg took 4.5 s p50 and 4.8 s p95. A cold first search can exceed the 10 s budget and answers local-only with reason `timeout`, which asks no one. Firestore read about 30 documents per search. On 60 questions, recall@10 / MRR was 0.983 / 0.888 for the fused code leg and 0.983 / 0.834 for the cloud code leg alone.
+- Verified locally, since GitHub Actions does not run on this account: the full `check-ci.sh` passed. The seven shell suites passed under bash 5 and `/bin/bash` 3.2 (17,063 assertions each), the writing suite under python3 3.13 and 3.9 (329), and doc-search's pytest suite (1,140, the 2 live tests skipped). The self-install drift check, `zizmor`, `dep-audit`, `gitleaks`, `check-version` and `claude plugin validate` passed; the release tag is not on origin yet.
 
 ## v3.20.0 (2026-11-22)
 
