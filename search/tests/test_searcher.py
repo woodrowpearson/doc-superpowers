@@ -1632,3 +1632,249 @@ def test_the_code_cloud_wait_follows_the_configured_timeout(git_repo, tiny_model
     pool = FakePool(WorktreeIndexes())
     assert stub_searcher(cfg, repo, pool, code_cloud=FakeCloud()).code_cloud_wait_s == 3 + 5 + 1
     assert stub_searcher(cfg, repo, pool, code_cloud=FakeCloud()).cloud_wait_s == 12 + 5 + 1, "the docs wait unchanged"
+
+
+# --- local-only answers (cloud-code design section 9) -----------------------------------------------------------
+
+
+@dataclass
+class ReasonCloud(FakeCloud):
+    """A leg that says why it did not contribute, as `CloudLeg.hits_with_reason` does."""
+
+    reason: str | None = None
+
+    def hits_with_reason(self, query, allowed, worktree, limit, doc_types=()):
+        hits, note = self.hits(query, allowed, worktree, limit, doc_types)
+        return hits, note, self.reason
+
+
+def test_docs_cloud_failure_marks_docs_failed(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+
+    resp = make_world(repo, tiny_model, cloud=FakeCloud(raises=RuntimeError("boom"))).search("refund")
+    assert resp.header.local_only == (("docs", "failed"),)
+    assert resp.header.notes == ("cloud leg failed (RuntimeError)",), "the note keeps its text"
+
+    # a leg with no reason of its own: a note and no hits is a failure
+    noted = make_world(repo, tiny_model, cloud=FakeCloud(note="cloud failed: no credentials")).search("refund")
+    assert noted.header.local_only == (("docs", "failed"),)
+    assert noted.header.notes == ("cloud failed: no credentials",)
+    assert "local-only: docs (failed)" in render_search(noted).splitlines()[0]
+
+
+def test_docs_cloud_timeout_marks_docs_timeout(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    world = make_world(repo, tiny_model)
+    release = threading.Event()
+
+    class Hung:
+        def hits(self, query, allowed, worktree, limit, doc_types=()):
+            release.wait(30)
+            return [cloud_hit("docs/shipping.md")], None
+
+    searcher = stub_searcher(world.cfg, repo, world.pool, cloud=Hung(), cloud_wait_s=0.2)
+    try:
+        resp = ask(searcher, repo, "refund rounding", scope="docs")
+    finally:
+        release.set()
+
+    assert resp.header.local_only == (("docs", "timeout"),)
+    assert resp.header.notes == ("cloud failed: TimeoutError: no answer within 0.2 s",)
+
+
+def test_code_cloud_timeout_marks_code_timeout(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    plain = code_cloud_world(repo, tiny_model, CODE_CHUNKS)
+    release = threading.Event()
+
+    class Hung:
+        def hits(self, query, allowed, worktree, limit, doc_types=()):
+            release.wait(30)
+            return [code_cloud_hit("src/c2.py")], None
+
+    searcher = stub_searcher(plain.cfg, repo, plain._pool, code_cloud=Hung(), code_cloud_wait_s=0.2)
+    try:
+        resp = ask(searcher, repo, scope="code", limit=10)
+    finally:
+        release.set()
+
+    assert resp.header.local_only == (("code", "timeout"),)
+    assert resp.header.notes == ("cloud code failed: TimeoutError: no answer within 0.2 s",)
+
+
+def test_code_cloud_reason_is_the_legs_own(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    plain = code_cloud_world(repo, tiny_model, CODE_CHUNKS)
+    note = "cloud code skipped: no corpus stamp (corpus_meta/code-index)"
+
+    for reason in ("no-stamp", "timeout", "failed"):
+        leg = ReasonCloud(note=note, reason=reason)
+        resp = ask(stub_searcher(plain.cfg, repo, plain._pool, code_cloud=leg), repo, scope="code", limit=10)
+        assert resp.header.local_only == (("code", reason),)
+        assert resp.header.notes == (note,)
+
+
+def test_scope_all_partial_cloud(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    plain = code_cloud_world(repo, tiny_model, CODE_CHUNKS)
+    docs_cloud = FakeCloud(answer=[cloud_hit("docs/d1.md")])
+    code_cloud = FakeCloud(raises=RuntimeError("boom"))
+    searcher = stub_searcher(plain.cfg, repo, plain._pool, cloud=docs_cloud, code_cloud=code_cloud)
+
+    resp = ask(searcher, repo, limit=10)
+
+    assert "docs/d1.md" in paths(resp), "the docs cloud answered"
+    assert resp.header.local_only == (("code", "failed"),)
+    assert resp.header.notes == ("cloud code failed: RuntimeError: boom",)
+
+    both = stub_searcher(
+        plain.cfg, repo, plain._pool, cloud=FakeCloud(raises=RuntimeError("down")), code_cloud=code_cloud
+    )
+    assert ask(both, repo, limit=10).header.local_only == (("docs", "failed"), ("code", "failed")), "docs first"
+
+
+def test_scope_all_slow_docs_cloud_and_hung_code_cloud(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    plain = code_cloud_world(repo, tiny_model, CODE_CHUNKS)
+    release = threading.Event()
+
+    class Hung:
+        deadline_s = 0.2
+
+        def hits(self, query, allowed, worktree, limit, doc_types=()):
+            release.wait(30)
+            return [code_cloud_hit("src/c2.py")], None
+
+    docs_cloud = SlowCloud(delay=1.0, answer=[cloud_hit("docs/d1.md")], note="cloud leg skipped 1 branch-changed path")
+    searcher = stub_searcher(
+        plain.cfg, repo, plain._pool, cloud=docs_cloud, code_cloud=Hung(), code_cloud_wait_s=0.2
+    )
+    try:
+        started = time.monotonic()
+        resp = ask(searcher, repo, limit=10)
+        took = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert took < 1.0 + 0.5, f"the code budget runs beside the docs wait, not after it: {took:.2f} s"
+    assert resp.header.notes == (
+        "cloud leg skipped 1 branch-changed path",
+        "cloud code failed: TimeoutError: no answer within 0.2 s",
+    ), "docs, then code"
+    assert resp.header.local_only == (("code", "timeout"),), "the docs cloud answered, with a note"
+    assert "docs/d1.md" in paths(resp)
+
+
+def test_docs_index_building_marks_docs_building(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    cfg = make_cfg(repo, tiny_model)
+    code = FakeIndex([FakeChunk("src/refund.py", 1, 6, "def refund_total(lines):")])
+    pool = FakePool(
+        Building(repo.root, docs_ready=False, code_ready=True, partial=WorktreeIndexes(code=code)),
+        code={"src/refund.py"},
+    )
+    cloud = FakeCloud(answer=[cloud_hit("docs/shipping.md")])
+
+    resp = ask(stub_searcher(cfg, repo, pool, cloud=cloud), repo, "refund total")
+
+    assert cloud.calls == [], "the docs cloud leg is not started while the docs index builds"
+    assert resp.header.notes == ("docs index building",)
+    assert resp.header.local_only == (("docs", "building"),)
+    # without a docs cloud leg the same search is not local-only
+    assert ask(stub_searcher(cfg, repo, pool), repo, "refund total").header.local_only == ()
+
+
+def test_no_cloud_is_not_local_only(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    resp = make_world(repo, tiny_model).search("refund")
+    assert resp.header.local_only == () and resp.header.cloud is None and resp.header.code_cloud is None
+    assert "local-only" not in render_search(resp)
+
+
+def test_cloud_off_by_env_is_not_local_only(git_repo, tiny_model: str) -> None:
+    from doc_search.cloud.read import build_cloud_legs
+
+    repo = git_repo()
+    seed(repo)
+    cloud = {"vertex": {"project": "p"}, "firestore": {"project": "p"}, "code": {}}
+    repo.write(
+        "docs/search/config.json",
+        json.dumps({"docs": {"model": tiny_model}, "code": {"model": tiny_model}, "cloud": cloud}),
+    )
+    cfg = load_config(repo.root, {"DOC_SEARCH_CLOUD": "0"})
+    assert cfg is not None and cfg.cloud is None
+    docs_leg, code_leg = build_cloud_legs(cfg, repo.root)
+    assert (docs_leg, code_leg) == (None, None)
+    pool = IndexPool(cfg)
+    assert isinstance(pool.get(repo.root, wait_s=30), WorktreeIndexes)
+
+    resp = ask(stub_searcher(cfg, repo, pool, cloud=docs_leg, code_cloud=code_leg), repo, "refund rounding")
+
+    assert resp.header.local_only == ()
+
+
+def test_cloud_answered_nothing_is_not_local_only(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    plain = code_cloud_world(repo, tiny_model, CODE_CHUNKS)
+    searcher = stub_searcher(plain.cfg, repo, plain._pool, cloud=FakeCloud(), code_cloud=FakeCloud())
+
+    resp = ask(searcher, repo, limit=10)
+
+    assert resp.header.local_only == () and resp.header.notes == ()
+
+
+def test_empty_allowed_set_is_not_local_only(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    cloud = FakeCloud(raises=RuntimeError("boom"))
+
+    resp = make_world(repo, tiny_model, cloud=cloud).search("refund", doc_type=("adr",))
+
+    assert cloud.calls == [] and resp.header.local_only == ()
+
+
+def test_path_prefix_code_skip_is_not_local_only(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    code_cloud = FakeCloud(raises=RuntimeError("boom"))
+    searcher = code_cloud_world(repo, tiny_model, CODE_CHUNKS, code_cloud=code_cloud)
+
+    for scope in ("code", "all"):
+        assert ask(searcher, repo, scope=scope, path_prefix="src/", limit=10).header.local_only == ()
+    assert code_cloud.calls == []
+
+
+def test_identifier_query_is_not_local_only(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    code_cloud = FakeCloud(raises=RuntimeError("boom"))
+    searcher = code_cloud_world(repo, tiny_model, CODE_CHUNKS, code_cloud=code_cloud)
+
+    for scope in ("code", "all"):
+        assert ask(searcher, repo, "where is make_index called", scope=scope, limit=10).header.local_only == ()
+    assert code_cloud.calls == []
+
+
+def test_scope_docs_ignores_code_cloud_failure(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    code_cloud = FakeCloud(raises=RuntimeError("boom"))
+    searcher = code_cloud_world(repo, tiny_model, CODE_CHUNKS, code_cloud=code_cloud)
+
+    resp = ask(searcher, repo, scope="docs")
+
+    assert resp.header.local_only == () and code_cloud.calls == []
+
+
+def test_header_names_the_code_cloud_model(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    searcher = code_cloud_world(repo, tiny_model, CODE_CHUNKS, code_cloud=FakeCloud())
+
+    resp = ask(searcher, repo, scope="code", limit=10)
+
+    assert resp.header.code_cloud == "cloud" and resp.header.cloud is None, "no cloud config: the label is generic"
+    assert render_search(resp).splitlines()[0] == (
+        f"doc-search · docs: semble {model_label(searcher.cfg.docs.model)} · code: semble 9.9.9 (+cloud: cloud)"
+        f" · {len(resp.hits)} hits"
+    )

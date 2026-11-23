@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any
 from ..config import DEADLINE_GRACE_S, CloudCfg
 from ..corpus import Corpus
 from ..repo import GitError, confine, diff_names, git, is_ancestor, norm_rel, rev_parse
-from ..types import Hit
+from ..types import Hit, LocalOnlyReason
 from . import CloudUnavailable, LazyClient, describe, has_class_named, import_module
 from .vertex import QUERY_TASK, VertexEmbedder, rejected
 
@@ -55,6 +55,15 @@ CHANGED_ENTRIES = 8
 SCOPE_ENTRIES = 8  # the code leg's per-worktree scopes kept (one per worktree and HEAD)
 MAX_FIRESTORE_LIMIT = 1000  # find_nearest's own cap
 MAX_READ_BYTES = 1 << 20  # corpus files are skipped above this size elsewhere too
+
+_Answer = tuple[list[Hit], str | None, LocalOnlyReason | None]  # hits, header note, why the cloud gave nothing
+
+
+def _timed_out(err: BaseException) -> bool:
+    """True for a leg that ran out of time: its own deadline, or a Firestore or HTTP call's own timeout."""
+    if isinstance(err, TimeoutError):
+        return True
+    return has_class_named(err, "DeadlineExceeded") or has_class_named(err, "TimeoutException")
 
 
 @dataclass(frozen=True)
@@ -176,7 +185,7 @@ class CloudLeg:
         self._stamp: CorpusStamp | None = None
         self._stamp_at: float | None = None
         self._stamp_failure: tuple[float, str] | None = None  # (when, why) of the last failed read
-        self._down: tuple[float, str] | None = None  # (when, header note) of the last failed search
+        self._down: tuple[float, str, LocalOnlyReason] | None = None  # (when, note, reason) of the last failed search
         self._prefilter_off = False  # the collection has no docType-prefixed vector index
         self._changed: OrderedDict[tuple[Path, str], _Changed] = OrderedDict()
 
@@ -259,21 +268,37 @@ class CloudLeg:
         400 about this one request) the cloud is not asked again for FAILURE_MEMORY_S: the same note comes
         back at once.
         """
+        hits, note, _ = self.hits_with_reason(query, allowed, worktree, limit, doc_types)
+        return hits, note
+
+    def hits_with_reason(
+        self,
+        query: str,
+        allowed: set[str],
+        worktree: Path,
+        limit: int,
+        doc_types: Sequence[str] = (),
+    ) -> _Answer:
+        """`hits`, and why the cloud gave nothing when it could not answer: `timeout` (over `deadline_s`, a call's
+        own timeout, or held back by the failure memory after one), `no-stamp` (no corpus stamp, or its commit is
+        not fetched here) or `failed` (anything else). None when the cloud answered, hits or not.
+        """
         with self._lock:
             down = self._down
         if down is not None and self._clock() - down[0] < FAILURE_MEMORY_S:
-            return [], down[1]
+            return [], down[1], down[2]
         try:
             return self._within_deadline(lambda: self._hits(query, allowed, Path(worktree), limit, tuple(doc_types)))
         except Exception as err:  # noqa: BLE001 - the remote leg degrades to a note, it never takes the search down
             logger.debug("doc-search: %s leg failed", self._prefix, exc_info=True)
             note = f"{self._prefix} failed: {describe(err)}"
+            reason: LocalOnlyReason = "timeout" if _timed_out(err) else "failed"
             if not rejected(err):
                 with self._lock:
-                    self._down = (self._clock(), note)
-            return [], note
+                    self._down = (self._clock(), note, reason)
+            return [], note, reason
 
-    def _within_deadline(self, work: Callable[[], tuple[list[Hit], str | None]]) -> tuple[list[Hit], str | None]:
+    def _within_deadline(self, work: Callable[[], _Answer]) -> _Answer:
         """`work()` on a daemon thread, waited for at most `deadline_s`; TimeoutError when it is still running.
 
         A call stuck in a library (a credential refresh has no timeout of ours) is left behind, not killed.
@@ -297,14 +322,14 @@ class CloudLeg:
 
     def _hits(
         self, query: str, allowed: set[str], worktree: Path, limit: int, doc_types: tuple[str, ...]
-    ) -> tuple[list[Hit], str | None]:
+    ) -> _Answer:
         stamp = self.stamp()
         if stamp is None:
             where = f"{self._cfg.firestore.meta_collection}/{self._stamp_doc}"
-            return [], f"{self._prefix} skipped: no corpus stamp ({where})"
+            return [], f"{self._prefix} skipped: no corpus stamp ({where})", "no-stamp"
         changed = self.changed_paths(worktree, stamp)
         if changed is None:
-            return [], f"{self._prefix} skipped: stamp {stamp.short} not fetched"
+            return [], f"{self._prefix} skipped: stamp {stamp.short} not fetched", "no-stamp"
         if self._query_task == QUERY_TASK:
             vector = self._embedder.embed_query(query)  # the embedder's default task
         else:
@@ -327,7 +352,7 @@ class CloudLeg:
                     continue  # a code chunk without a usable range points nowhere: the local leg serves the file
                 start, end = _locate(worktree, path, text, read)
             out.append(Hit(self._kind, path, start, end, text, legs=self._legs))
-        return out, None
+        return out, None, None
 
     def _nearest(self, vector: Any, limit: int, doc_types: tuple[str, ...]) -> list[dict[str, Any]]:
         collection = self._db.get().collection(self._collection)
@@ -490,6 +515,16 @@ class DegradedLeg:
         doc_types: Sequence[str] = (),
     ) -> tuple[list[Hit], str | None]:
         return [], f"{self.note_prefix} failed: {self.reason}"
+
+    def hits_with_reason(
+        self,
+        query: str,
+        allowed: set[str],
+        worktree: Path,
+        limit: int,
+        doc_types: Sequence[str] = (),
+    ) -> _Answer:
+        return [], f"{self.note_prefix} failed: {self.reason}", "failed"
 
     def status_lines(self, worktree: Path) -> list[str]:
         return [f"{self.note_prefix}: unavailable: {self.reason}"]

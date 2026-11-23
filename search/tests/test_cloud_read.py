@@ -1019,3 +1019,86 @@ def test_build_cloud_legs_per_config(tmp_path: Path, monkeypatch: pytest.MonkeyP
     docs, code = build_cloud_legs(full_cfg(tmp_path, code={"timeout_s": 3}), tmp_path)
     assert isinstance(docs, CloudLeg) and isinstance(code, CloudLeg)
     assert (docs.deadline_s, code.deadline_s) == (25.0, 8.0)
+
+
+# --- why a leg did not contribute (cloud-code design section 9) ----------------------------------------------
+
+
+def test_hits_with_reason_names_why_the_leg_gave_nothing(git_repo, tmp_path: Path) -> None:
+    w = scene(git_repo)
+    hits, note, reason = w.leg.hits_with_reason("refund", ALL, w.root, 30)
+    assert hits and note is None and reason is None, "an answer has no reason"
+    assert w.leg.hits("refund", ALL, w.root, 30) == (hits, None), "hits keeps its two values"
+
+    missing = code_scene(git_repo, tmp_path, stamp=False)
+    assert missing.leg.hits_with_reason("refund", CODE_ALLOWED, missing.root, 30) == (
+        [],
+        "cloud code skipped: no corpus stamp (corpus_meta/code-index)",
+        "no-stamp",
+    )
+    unfetched = code_scene(git_repo, tmp_path)
+    set_code_stamp(unfetched.fs, "0123456789abcdef0123456789abcdef01234567")
+    assert unfetched.leg.hits_with_reason("refund", CODE_ALLOWED, unfetched.root, 30) == (
+        [],
+        "cloud code skipped: stamp 0123456 not fetched",
+        "no-stamp",
+    )
+
+    down = scene(git_repo)
+    down.genai.script = [api_error(503, "UNAVAILABLE")] * 4
+    hits, note, reason = down.leg.hits_with_reason("refund", ALL, down.root, 30)
+    assert hits == [] and note is not None and note.startswith("cloud failed: ServerError: 503") and reason == "failed"
+    assert down.leg.hits_with_reason("refund", ALL, down.root, 30) == ([], note, "failed"), "from memory"
+
+    assert DegradedLeg("boom", note_prefix="cloud code").hits_with_reason("q", {"a.py"}, tmp_path, 30) == (
+        [],
+        "cloud code failed: boom",
+        "failed",
+    )
+
+
+def test_timeout_memory_keeps_reason_timeout(git_repo) -> None:
+    w = scene(git_repo)
+    release = threading.Event()
+
+    class Stuck:
+        id = "vertex:stuck/1"
+
+        def embed_query(self, text: str):
+            release.wait(30)
+            raise RuntimeError("released")
+
+    leg = CloudLeg(cloud_cfg(), Stuck(), client=w.fs, clock=w.clock, deadline_s=0.2)
+    try:
+        first = leg.hits_with_reason("refund", ALL, w.root, 30)
+        w.clock.now += 59  # within the failure memory: held back, not asked
+        started = time.monotonic()
+        again = leg.hits_with_reason("refund", ALL, w.root, 30)
+        waited = time.monotonic() - started
+    finally:
+        release.set()
+
+    note = "cloud failed: TimeoutError: no answer within 0.2 s"
+    assert first == ([], note, "timeout")
+    assert again == ([], note, "timeout"), "held back after an overrun is still a timeout, not a failure"
+    assert waited < 0.1
+
+
+def test_docs_cloud_reasons_reach_the_header(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    head = seed_repo(repo)
+    w = make_world(repo, tiny_model)
+
+    resp = w.search(w.leg(FakeFirestore()), "refund rounding", scope="docs")
+    assert resp.header.notes == ("cloud skipped: no corpus stamp (corpus_meta/index)",)
+    assert resp.header.local_only == (("docs", "no-stamp"),)
+
+    fs = FakeFirestore()
+    fs.set_stamp(head)
+    seed_chunks(fs)
+    resp = w.search(w.leg(fs, embedder=RaisingEmbedder(CloudUnavailable("no credentials"))), "refund", scope="docs")
+    assert resp.header.notes == ("cloud failed: no credentials",)
+    assert resp.header.local_only == (("docs", "failed"),)
+
+    resp = w.search(w.leg(fs), "refund rounding", scope="docs")
+    assert resp.header.notes == () and resp.header.local_only == (), "the cloud answered"

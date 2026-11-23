@@ -238,8 +238,9 @@ def test_query_json_shape(repo, run) -> None:
     assert done.code == 0 and done.err == ""
     payload = json.loads(done.out)
     assert set(payload) == {"header", "hits"}
-    assert set(payload["header"]) == {"docs_model", "code", "cloud", "notes", "truncated"}
+    assert set(payload["header"]) == {"docs_model", "code", "cloud", "notes", "truncated", "local_only", "code_cloud"}
     assert payload["header"]["notes"] == [] and payload["header"]["truncated"] is False
+    assert payload["header"]["local_only"] == [] and payload["header"]["code_cloud"] is None
     assert payload["hits"], "the seeded docs answer this query"
     assert len(payload["hits"]) <= 5
     first = payload["hits"][0]

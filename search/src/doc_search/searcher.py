@@ -29,6 +29,12 @@ keep their places. When it is off, failed or not run, the code list is the local
 
 A first build can outlast the wait; the pool then says which half is ready and the answer comes
 from that half with a note, unless the half the scope needs is the one still building.
+
+The header's `local_only` says which kinds' cloud legs did not contribute, and why (cloud-code design
+section 9): a leg that ran and failed (`failed`), overran (`timeout`) or found no usable stamp (`no-stamp`),
+and a docs leg not started because the docs index is building (`building`). A leg that is off, not run for
+the request (a `path_prefix` or an identifier-shaped query for code, an empty allowed set) or that answered
+with no hits is not local-only. The notes keep their text.
 """
 
 from __future__ import annotations
@@ -55,7 +61,7 @@ from .fusion import fuse_by_file, fuse_code, identifier_shaped, interleave_with_
 from .render import flat
 from .repo import GitError, RepoInfo, norm_rel
 from .transformer import PREFIX
-from .types import HeaderInfo, Hit, SearchRequest, SearchResponse
+from .types import HeaderInfo, Hit, LocalOnlyReason, SearchRequest, SearchResponse
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +84,8 @@ PREFER = ("docs", "cloud", "code", "ident")
 FALLBACK_NOTE = "docs: semble's static index while the transformer index builds (see status)"
 CLOUD_JOIN_MARGIN_S = 1.0  # a search waits this much longer than the cloud leg's own deadline, so its note comes first
 
+_Answer = tuple[list[Hit], str | None, LocalOnlyReason | None]  # a cloud leg's hits, note and local-only reason
+
 _TOKEN_STRIP = "\"'`,;:!?()[]{}<>\u201c\u201d\u2018\u2019"  # not ".": a name can start with one
 # A hyphen is not here: `end-to-end`, `sign-in`, `read-only` are English. A hyphenated id has a number
 # (`ADR-114`, `chat-70`), and one without is rarely the subject of a query.
@@ -88,7 +96,9 @@ class CloudLeg(Protocol):
     """An optional remote leg: the docs one (`cloud`) or the code one (`code_cloud`).
 
     A leg may also have a `deadline_s`, how long it waits for the cloud itself; the code leg's sets the
-    searcher's default `code_cloud_wait_s`.
+    searcher's default `code_cloud_wait_s`. And it may have `hits_with_reason`, `hits` with a third value: why
+    the cloud gave nothing (`failed`, `timeout`, `no-stamp`) or None. A leg without one that returns a note and
+    no hits is taken to have failed.
     """
 
     def hits(
@@ -301,6 +311,7 @@ class Searcher:
             notes.append(FALLBACK_NOTE)
 
         allowed = self._allowed(corpus, worktree, req) if scope != "code" else frozenset()
+        local_only: list[tuple[str, LocalOnlyReason]] = []  # docs, then code
         code_cloud_run: _Background | None = None
         if self._code_cloud is not None and scope != "docs" and code.usable and not req.path_prefix:
             if not identifier_shaped(query):  # on a name the local code leg answers alone
@@ -319,6 +330,8 @@ class Searcher:
                     lambda: self._cloud_leg(query, limit, allowed, worktree, req.doc_type), "doc-search-cloud-leg"
                 )
             docs_leg = self._docs_leg(query, limit, docs.index, allowed, worktree)
+        elif scope != "code" and docs.building and self._cloud is not None and allowed:
+            local_only.append(("docs", "building"))  # the docs cloud leg waits for the docs index it fuses with
         ident_leg = self._ident_leg(query, limit, allowed, corpus, docs.index, docs_leg, worktree)
 
         code_leg: list[Hit] = []
@@ -331,17 +344,21 @@ class Searcher:
 
         cloud_leg: list[Hit] = []
         if cloud_run is not None:
-            cloud_leg, note = cloud_run.result(self.cloud_wait_s)
+            cloud_leg, note, reason = cloud_run.result(self.cloud_wait_s)
             if note:
                 notes.append(note)
+            if reason:
+                local_only.append(("docs", reason))
             # the code leg ran without knowing what the cloud shows: a doc shown by the cloud is not shown twice
             cloud_paths = {hit.path for hit in cloud_leg}
             code_leg = [hit for hit in code_leg if hit.kind == "code" or hit.path not in cloud_paths]
         if code_cloud_run is not None:
             # its own budget, counted from its start: a slow docs cloud leg joined first does not extend it
-            code_cloud_leg, note = code_cloud_run.result(self.code_cloud_wait_s, from_start=True)
+            code_cloud_leg, note, reason = code_cloud_run.result(self.code_cloud_wait_s, from_start=True)
             if note:
                 notes.append(note)
+            if reason:
+                local_only.append(("code", reason))
             if code_cloud_leg:
                 fused = fuse_code([hit for hit in code_leg if hit.kind == "code"], code_cloud_leg)
                 code_leg = _fill_code_places(code_leg, fused)
@@ -359,12 +376,15 @@ class Searcher:
             final = interleave_with_floor(docs_fused, code_leg, limit, docs_scores=docs_scores)
 
         hits = [enrich_hit(hit, corpus) for hit in final]
+        code_label = self._pool.semble_version() if code.usable or code.building else "off"
         header = HeaderInfo(
             docs_model=model_label(static.docs_model if static is not None else self.cfg.docs.model),
-            code=self._pool.semble_version() if code.usable or code.building else "off",
-            cloud=self._cloud_label(),
+            code=code_label,
+            cloud=self._cloud_label(self._cloud),
             notes=tuple(notes),
             truncated=False,
+            local_only=tuple(local_only),
+            code_cloud=self._cloud_label(self._code_cloud) if code_label != "off" else None,
         )
         return SearchResponse(hits=hits, header=header)
 
@@ -411,8 +431,8 @@ class Searcher:
             return f"doc-search: no search index is available (docs: {docs.reason()}; code: {code.reason()})"
         return None
 
-    def _cloud_label(self) -> str | None:
-        if self._cloud is None:
+    def _cloud_label(self, leg: CloudLeg | None) -> str | None:
+        if leg is None:
             return None
         return self.cfg.cloud.vertex.model if self.cfg.cloud else "cloud"
 
@@ -469,23 +489,21 @@ class Searcher:
 
     def _cloud_leg(
         self, query: str, limit: int, allowed: frozenset[str], worktree: Path, doc_types: tuple[str, ...]
-    ) -> tuple[list[Hit], str | None]:
+    ) -> _Answer:
         try:
-            hits, note = self._cloud.hits(query, set(allowed), worktree, limit * DOCS_FETCH, doc_types=doc_types)
+            hits, note, reason = _ask(self._cloud, query, set(allowed), worktree, limit * DOCS_FETCH, doc_types)
         except Exception as err:  # noqa: BLE001 - the remote leg must never take local search down
             logger.debug("doc-search: cloud leg failed", exc_info=True)
-            return [], f"cloud leg failed ({type(err).__name__})"
-        return [hit for hit in hits if hit.path in allowed], note
+            return [], f"cloud leg failed ({type(err).__name__})", "failed"
+        return [hit for hit in hits if hit.path in allowed], note, reason
 
-    def _code_cloud_leg(
-        self, query: str, limit: int, allowed: frozenset[str], worktree: Path
-    ) -> tuple[list[Hit], str | None]:
+    def _code_cloud_leg(self, query: str, limit: int, allowed: frozenset[str], worktree: Path) -> _Answer:
         try:
-            hits, note = self._code_cloud.hits(query, set(allowed), worktree, limit * DOCS_FETCH)
+            hits, note, reason = _ask(self._code_cloud, query, set(allowed), worktree, limit * DOCS_FETCH)
         except Exception as err:  # noqa: BLE001 - the remote leg must never take local search down
             logger.debug("doc-search: cloud code leg failed", exc_info=True)
-            return [], f"cloud code failed: {describe(err)}"
-        return [hit for hit in hits if hit.path in allowed], note
+            return [], f"cloud code failed: {describe(err)}", "failed"
+        return [hit for hit in hits if hit.path in allowed], note, reason
 
     def _code_leg(
         self,
@@ -623,20 +641,29 @@ class Searcher:
         return entry.rows
 
 
+def _ask(
+    leg: CloudLeg, query: str, allowed: set[str], worktree: Path, limit: int, doc_types: tuple[str, ...] = ()
+) -> _Answer:
+    """`leg`'s hits, note and local-only reason: its own `hits_with_reason`, else `failed` for a note without hits."""
+    with_reason = getattr(leg, "hits_with_reason", None)
+    if with_reason is not None:
+        return with_reason(query, allowed, worktree, limit, doc_types=doc_types)
+    hits, note = leg.hits(query, allowed, worktree, limit, doc_types=doc_types)
+    return hits, note, "failed" if note and not hits else None
+
+
 class _Background:
     """`work()` running on a daemon thread from the moment of construction, until `result` collects it.
 
-    `work` is `Searcher._cloud_leg` or `Searcher._code_cloud_leg`: each turns any failure into a note, so
-    there is always an outcome. `note_prefix` names the leg in the timeout note (`cloud`, `cloud code`).
-    A call stuck in a library is left behind when its wait is over, not killed.
+    `work` is `Searcher._cloud_leg` or `Searcher._code_cloud_leg`: each turns any failure into a note and a
+    reason, so there is always an outcome. `note_prefix` names the leg in the timeout note (`cloud`, `cloud
+    code`). A call stuck in a library is left behind when its wait is over, not killed.
     """
 
-    def __init__(
-        self, work: Callable[[], tuple[list[Hit], str | None]], name: str, *, note_prefix: str = "cloud"
-    ) -> None:
+    def __init__(self, work: Callable[[], _Answer], name: str, *, note_prefix: str = "cloud") -> None:
         self._work = work
         self._note_prefix = note_prefix
-        self._outcome: tuple[list[Hit], str | None] | None = None
+        self._outcome: _Answer | None = None
         self._started = time.monotonic()
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
@@ -644,8 +671,8 @@ class _Background:
     def _run(self) -> None:
         self._outcome = self._work()
 
-    def result(self, wait_s: float, *, from_start: bool = False) -> tuple[list[Hit], str | None]:
-        """The outcome, waiting at most `wait_s`; no hits and the same note a leg's own deadline gives otherwise.
+    def result(self, wait_s: float, *, from_start: bool = False) -> _Answer:
+        """The outcome, waiting at most `wait_s`; otherwise no hits, the note a leg's own deadline gives, `timeout`.
 
         With `from_start` the wait is counted from the moment the work started, not from this call.
         """
@@ -653,7 +680,8 @@ class _Background:
         # a huge `cloud.timeout_s` is valid, an overflow is not
         self._thread.join(max(0.0, min(join_s, threading.TIMEOUT_MAX)))
         if self._thread.is_alive() or self._outcome is None:
-            return [], f"{self._note_prefix} failed: {describe(TimeoutError(f'no answer within {wait_s:g} s'))}"
+            note = f"{self._note_prefix} failed: {describe(TimeoutError(f'no answer within {wait_s:g} s'))}"
+            return [], note, "timeout"
         return self._outcome
 
 
