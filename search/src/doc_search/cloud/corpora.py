@@ -76,8 +76,11 @@ CODE_DENY: tuple[str, ...] = (
     ".netrc",
 )
 
-# The ignore files semble's walker reads in each directory, in its order (`_load_ignore_for_dir`).
+# The ignore files semble's walker reads in each directory, in its order (`_load_ignore_for_dir`). Matched on
+# the lowercased name: on a case-insensitive file system semble reads a committed `.GitIgnore` too.
 IGNORE_FILES = (".gitignore", ".sembleignore")
+SYMLINK_MODE = "120000"
+MAX_LINK_HOPS = 32  # past this many links a path resolves to nothing, as ELOOP does (macOS's MAXSYMLINKS)
 
 # semble's major.minor: pinned `>=0.7,<0.8`, so a patch never changes it. Raised by hand (`semble-0.7.r2`) only
 # when the boundary pins in the tests show a lock bump moved the cuts.
@@ -196,34 +199,100 @@ def _denied(path: str) -> bool:
     return any(fnmatch.fnmatchcase(name, pattern) for pattern in CODE_DENY)
 
 
-def _head_ignores(top: Path) -> dict[str, GitIgnoreSpec]:
-    """Each directory's ignore rules as HEAD holds them ('' is the root), parsed as semble parses a checkout's.
+class _Escapes(Exception):
+    """A symlinked ignore file points outside the repository (or at an absolute path): HEAD cannot say what it
+    holds."""
+
+
+_Entry = tuple[str, str, str]  # (mode, type, oid) of one path in HEAD's tree
+
+
+def _follow(top: Path, entries: dict[str, _Entry], link: str) -> str | None:
+    """The oid of the regular blob that the symlink at `link` ends at inside HEAD's tree, resolved as the file
+    system resolves it in a checkout; None where `Path.is_file()` would be False there (a target missing, a
+    directory, a submodule, a path through a file, a chain past MAX_LINK_HOPS).
+
+    Raises _Escapes for a target that is absolute or climbs out of the repository: a checkout would read a file
+    HEAD does not hold.
+    """
+    hops = 0
+    resolved: list[str] = []  # the components walked so far, every one a directory of HEAD's tree
+    pending = link.split("/")
+    while pending:
+        part = pending.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not resolved:
+                raise _Escapes(link)
+            resolved.pop()
+            continue
+        here = "/".join([*resolved, part])
+        entry = entries.get(here)
+        if entry is not None and entry[0] == SYMLINK_MODE:
+            hops += 1
+            if hops > MAX_LINK_HOPS:
+                return None
+            target = git_bytes(top, "cat-file", "blob", entry[2]).decode("utf-8", errors="surrogateescape")
+            if target.startswith("/"):
+                raise _Escapes(link)
+            pending = target.split("/") + pending  # relative to the link's own directory: `resolved`
+            continue
+        if pending and (entry is None or entry[1] != "tree"):
+            return None  # a path through a missing entry or a file (`file/`, `missing/..`) resolves to nothing
+        resolved.append(part)
+    entry = entries.get("/".join(resolved))
+    return entry[2] if entry is not None and entry[1] == "blob" and entry[0] in REGULAR_MODES else None
+
+
+def _head_ignores(top: Path) -> tuple[dict[str, GitIgnoreSpec], frozenset[str]]:
+    """Each directory's ignore rules as HEAD holds them ('' is the root), parsed as semble parses a checkout's,
+    and the directories whose rules HEAD cannot answer for.
+
+    A symlinked ignore file is read through its link, inside HEAD's tree; one that resolves to nothing gives no
+    rules, as `Path.is_file()` is False for it in a checkout. A directory is sealed (it and everything under it
+    out of scope) when one of its ignore files points outside the repository, or when it holds two names that
+    differ only in case (`.gitignore` and `.GitIgnore`: which one a case-insensitive checkout holds is
+    unknowable). Sealing fails closed: the cloud then holds less than the local index, never more.
 
     A repository with no commit has no files, so no rules. A git failure is raised, never read as "no rules":
     that would widen what is sent.
     """
     head = rev_parse(top, "HEAD")
     if head is None:
-        return {}
-    blobs: dict[str, dict[str, str]] = {}
-    for record in git(top, "ls-tree", "-r", "-z", "--full-tree", head).split("\0"):
+        return {}, frozenset()
+    entries: dict[str, _Entry] = {}
+    named: dict[str, dict[str, list[str]]] = {}  # directory -> ignore name -> the paths spelling it
+    for record in git(top, "ls-tree", "-r", "-t", "-z", "--full-tree", head).split("\0"):
         info, _, path = record.partition("\t")
         parts = info.split(" ")
-        if not path or len(parts) != 3 or parts[1] != "blob" or parts[0] not in REGULAR_MODES:
+        if not path or len(parts) != 3:
             continue
+        entries[path] = (parts[0], parts[1], parts[2])
         directory, _, name = path.rpartition("/")
-        if name in IGNORE_FILES:
-            blobs.setdefault(directory, {})[name] = parts[2]
+        if name.lower() in IGNORE_FILES:
+            named.setdefault(directory, {}).setdefault(name.lower(), []).append(path)
     rules: dict[str, GitIgnoreSpec] = {}
-    for directory, found in blobs.items():
+    sealed: set[str] = set()
+    for directory, found in named.items():
         lines: list[str] = []
-        for name in IGNORE_FILES:
-            if name in found:
-                data = git_bytes(top, "cat-file", "blob", found[name])
-                lines.extend(data.decode("utf-8", errors="ignore").splitlines())
+        try:
+            for name in IGNORE_FILES:
+                spellings = found.get(name, [])
+                if len(spellings) > 1:
+                    raise _Escapes(directory)
+                if not spellings:
+                    continue
+                oid = _follow(top, entries, spellings[0])
+                if oid is not None:
+                    data = git_bytes(top, "cat-file", "blob", oid)
+                    lines.extend(data.decode("utf-8", errors="ignore").splitlines())
+        except _Escapes:
+            sealed.add(directory)
+            continue
         if lines:
             rules[directory] = GitIgnoreSpec.from_lines(lines)
-    return rules
+    return rules, frozenset(sealed)
 
 
 class CodeCloudCorpus:
@@ -250,6 +319,7 @@ class CodeCloudCorpus:
         self._base = GitIgnoreSpec.from_lines(sorted(_DEFAULT_IGNORED_DIRS), backend="simple")
         self._lock = threading.Lock()
         self._ignores: dict[str, GitIgnoreSpec] | None = None  # HEAD's, read on first use
+        self._sealed: frozenset[str] = frozenset()  # directories whose ignore rules HEAD cannot answer for
         self._dirs: dict[str, list[IgnoreSpec] | None] = {}
 
     # -- scope ------------------------------------------------------------------------------------
@@ -276,13 +346,15 @@ class CodeCloudCorpus:
         if directory in self._dirs:
             return self._dirs[directory]
         if self._ignores is None:
-            self._ignores = _head_ignores(self._top)
+            self._ignores, self._sealed = _head_ignores(self._top)
         specs: list[IgnoreSpec] | None
         if not directory:
             specs = [IgnoreSpec(base=_ROOT, spec=self._base)]
         else:
             outer = self._specs_in(directory.rpartition("/")[0])
             specs = None if outer is None or _is_ignored(Path(directory), True, outer)[0] else outer
+        if directory in self._sealed:
+            specs = None
         own = self._ignores.get(directory)
         if specs is not None and own is not None:
             specs = [*specs, IgnoreSpec(base=Path(directory) if directory else _ROOT, spec=own)]

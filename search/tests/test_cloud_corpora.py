@@ -9,6 +9,7 @@ checkout of the same commit, and the boundary pins hold semble's cuts still acro
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -291,6 +292,109 @@ def test_code_corpus_parity_with_semble_walker(git_repo, tmp_path: Path, content
     }
     if "all" in content:
         assert "docs/archive/old.md" in expected and "docs/guide.md" in walked - expected
+
+
+def link(repo: Any, rel: str, target: str) -> None:
+    path = repo.root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(target, path)
+
+
+def test_code_corpus_parity_with_symlinked_ignores(git_repo, tmp_path: Path) -> None:
+    """semble reads an ignore file through its link (`Path.is_file()` follows it); so does the cloud scope,
+    inside HEAD's tree. A link that resolves to nothing gives no rules on both sides."""
+    repo = git_repo()
+    commit_all(
+        repo,
+        {
+            "shared/root.ignore": "private/\n",
+            "shared/sub.ignore": "gen/\n",
+            "shared/lib.ignore": "old_*.py\n",
+            "shared/tools.ignore": "scratch.py\n",
+            "a.py": "a = 1\n",
+            "private/leak.py": "leak = 1\n",
+            "sub/gen/out.py": "out = 1\n",
+            "sub/main.py": "main = 1\n",
+            "lib/old_x.py": "x = 1\n",
+            "lib/new_x.py": "x = 1\n",
+            "tools/scratch.py": "s = 1\n",
+            "tools/run.py": "r = 1\n",
+            "dangling/kept.py": "k = 1\n",
+            "dirlink/kept.py": "k = 1\n",
+            "loop/kept.py": "k = 1\n",
+            "through/kept.py": "k = 1\n",
+        },
+    )
+    link(repo, ".gitignore", "shared/root.ignore")  # in-tree target
+    link(repo, "sub/.sembleignore", "../shared/sub.ignore")
+    link(repo, "links/l1", "../shared/lib.ignore")
+    link(repo, "lib/.gitignore", "../links/l1")  # a chain of two links
+    link(repo, "conf", "shared")  # a symlinked directory on the way to the target
+    link(repo, "tools/.gitignore", "../conf/tools.ignore")
+    link(repo, "dangling/.gitignore", "../nowhere.ignore")  # missing: no rules
+    link(repo, "dirlink/.gitignore", "../shared")  # a directory: no rules
+    link(repo, "loop/.gitignore", "other")  # a loop: no rules (ELOOP)
+    link(repo, "loop/other", ".gitignore")
+    link(repo, "through/.gitignore", "../a.py/x")  # through a file: no rules
+    commit_all(repo, {}, "links")
+    assert repo.git("status", "--porcelain", "--ignored") == ""
+    corpus = CodeCloudCorpus(make_cfg(tmp_path), repo.root)
+
+    walked = {p.relative_to(repo.root).as_posix() for p in walk_files(repo.root, get_extensions(content_types(("code",))))}
+    assert scope(corpus, repo) == walked
+    assert walked == {
+        "a.py",
+        "sub/main.py",
+        "lib/new_x.py",
+        "tools/run.py",
+        "dangling/kept.py",
+        "dirlink/kept.py",
+        "loop/kept.py",
+        "through/kept.py",
+    }
+
+
+def test_code_corpus_seals_a_directory_whose_ignore_file_escapes(git_repo, tmp_path: Path) -> None:
+    """A link out of the repository (or to an absolute path) names a file HEAD does not hold: that directory and
+    everything under it are out of scope, so the cloud holds less than the local index, never more."""
+    repo = git_repo()
+    commit_all(
+        repo,
+        {
+            "a.py": "a = 1\n",
+            "esc/x.py": "x = 1\n",
+            "esc/deep/y.py": "y = 1\n",
+            "abs/z.py": "z = 1\n",
+            "back/w.py": "w = 1\n",
+            "other/v.py": "v = 1\n",
+        },
+    )
+    link(repo, "esc/.gitignore", "../../outside.ignore")
+    link(repo, "abs/.sembleignore", "/etc/hosts")
+    link(repo, "back/.gitignore", f"../../{repo.root.name}/other/v.py")  # out and back in: still out
+    commit_all(repo, {}, "escaping links")
+    corpus = CodeCloudCorpus(make_cfg(tmp_path), repo.root)
+    assert scope(corpus, repo) == {"a.py", "other/v.py"}
+    assert not corpus.in_scope("esc/deep/new.py")
+
+
+def test_code_corpus_ignore_names_are_case_insensitive(git_repo, tmp_path: Path) -> None:
+    repo = git_repo()
+    commit_all(repo, {"cased/.GitIgnore": "drop.py\n", "cased/drop.py": "d\n", "cased/keep.py": "k\n"})
+    # two spellings in one directory, as only a case-sensitive host can commit them: which one a case-insensitive
+    # checkout holds is unknowable, so the directory is sealed
+    rules = tmp_path / "rules.txt"
+    rules.write_text("nothing.py\n", encoding="utf-8")
+    blob = repo.git("hash-object", "-w", str(rules)).strip()
+    for name in (".gitignore", ".GITIGNORE"):
+        repo.git("update-index", "--add", "--cacheinfo", f"100644,{blob},twice/{name}")
+    repo.write("twice/a.py", "a\n")
+    repo.write("plain.py", "p\n")
+    repo.git("add", "twice/a.py", "plain.py")
+    repo.git("commit", "-q", "-m", "two spellings")
+    assert {".gitignore", ".GITIGNORE"} <= {p.rpartition("/")[2] for p in head_files(repo)}
+    corpus = CodeCloudCorpus(make_cfg(tmp_path), repo.root)
+    assert scope(corpus, repo) == {"cased/keep.py", "plain.py"}
 
 
 def test_code_corpus_deny_list(git_repo, tmp_path: Path) -> None:
