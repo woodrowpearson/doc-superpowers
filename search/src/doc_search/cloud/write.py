@@ -1,4 +1,10 @@
-"""The cloud docs leg, write path (design section 8): the guarded indexer. Only the CLI runs it, never the server.
+"""The cloud legs, write path (design section 8; the code corpus, cloud-code design sections 5 and 6): the
+guarded indexer. Only the CLI runs it, never the server.
+
+It writes one corpus per run, described by a `CloudCorpus` (`corpora.py`): the docs corpus by default, or the
+code corpus. Every name below (collection, stamp, lease), the file scope, how a file is read and cut, the fields a
+chunk carries and the chunker the stamp names come from it; the steps are the same for both. The docs corpus's
+documents, stamp and lease are what they have always been.
 
 One run, in this order (consumer's guarantees, carried over, plus the checks of the review):
 
@@ -18,23 +24,28 @@ One run, in this order (consumer's guarantees, carried over, plus the checks of 
       a full run. Another embedder or chunker version in the stamp makes a catch-up a full run that trusts no
       sha.
     A refusal or a no-op writes nothing, not even the lease.
- 4. Lease: a transactional lease document (`<meta>/catch_up_lease`, 1800 s) keeps two hosts from rewriting the
-    same files at once. It is released in `finally`, renewed every 5 minutes, and checked again before orphans
-    are deleted and before the stamp. A lease another host took ends the run (`LeaseLost`): no more writes, no
-    stamp. So does a lease document that is gone: only a holder deletes it, so another run took ours (it
-    expired while this one stalled), finished and released it, and may have written. Only the first
-    acquisition creates the document.
+ 4. Lease: a transactional lease document (`<meta>/catch_up_lease`, the code corpus's
+    `<meta>/code_catch_up_lease`; 1800 s) keeps two hosts from rewriting the same files at once. It is released
+    in `finally`, renewed every 5 minutes, and checked again before orphans are deleted and before the stamp. A
+    lease another host took ends the run (`LeaseLost`): no more writes, no stamp. So does a lease document that
+    is gone: only a holder deletes it, so another run took ours (it expired while this one stalled), finished
+    and released it, and may have written. Only the first acquisition creates the document.
  5. The file set: every in-scope file of HEAD for `full`; the files changed from the stamp to HEAD for
     `catch-up`. `prune-orphans` indexes nothing.
  6. Per file: sha256 against the stored chunk 0's `fileSha256`, then chunk, embed (`RETRIEVAL_DOCUMENT`), and
     replace the file's chunks in batches of at most 500 operations.
- 7. A deleted file's chunks go only when `git ls-tree HEAD -- <path>` says it is gone.
- 8. Orphans (`full`, `prune-orphans`): corpus paths git no longer knows. More than max(20, 10% of the corpus's
-    paths) are not pruned without `force` (the corpus measured as it was before this run wrote anything): that
-    many means this is not the repository the corpus was built from. The run reports them
+ 7. A deleted file's chunks go only when `git ls-tree HEAD -- <path>` says it is gone. The code corpus holds
+    only what is in scope at HEAD: a changed file HEAD still holds that is no longer in scope (or no longer a
+    regular file) goes too.
+ 8. Orphans (`full`, `prune-orphans`): corpus paths git no longer knows; for the code corpus, every indexed
+    path that is not a regular file in scope at HEAD. A code catch-up whose range changes an ignore file
+    (`.gitignore`, `.sembleignore`) or the search config runs this pass as well. More than max(20, 10% of the
+    corpus's paths) are not pruned without `force` (the corpus measured as it was before this run wrote
+    anything): that many means this is not the repository the corpus was built from. The run reports them
     (`orphans_pending`) and is not stamped.
- 9. The stamp (`<meta>/index`) is written only when no file failed and nothing is pending: it is the lower
-    bound of the next catch-up, so stamping over a failure would drop that file from every later run's range.
+ 9. The stamp (`<meta>/index`, the code corpus's `<meta>/code-index`) is written only when no file failed and
+    nothing is pending: it is the lower bound of the next catch-up, so stamping over a failure would drop that
+    file from every later run's range.
 
 What is indexed is what HEAD holds, not the working tree: the stamp says "built from this commit", and a
 dirty checkout must not put its edits in the shared corpus under that commit. The files come from
@@ -42,9 +53,10 @@ dirty checkout must not put its edits in the shared corpus under that commit. Th
 
 Chunk documents have deterministic ids (a hash of the path, and the ordinal), so a rewrite replaces a chunk
 in place and an interrupted run leaves no duplicates. A file's chunks are written highest ordinal first:
-chunk 0 carries the sha the next run trusts, so it is the last thing a file's write commits. The ten fields
-are consumer's, plus `startLine` and `endLine`; `headingPath` is a list of strings, as consumer's reader
-expects.
+chunk 0 carries the sha the next run trusts, so it is the last thing a file's write commits. The docs corpus's
+ten fields are consumer's, plus `startLine` and `endLine`; `headingPath` is a list of strings, as consumer's
+reader expects. A code chunk also names its chunker and embedder (`chunkerId`, `embedderId`), so a rewrite cut
+short resumes: it skips a file whose chunk 0 already has this run's sha, chunker and embedder.
 """
 
 from __future__ import annotations
@@ -55,21 +67,19 @@ import os
 import socket
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from ..chunker import CHUNKER_VERSION, CloudChunk, chunk_lines, chunk_markdown
-from ..config import Config
-from ..corpus import Corpus
-from ..docindex import DocIndex
+from ..chunker import CloudChunk
+from ..config import CONFIG_REL, Config
 from ..repo import git, git_bytes, is_ancestor, rev_parse
 from . import CloudUnavailable, LazyClient, describe, import_module
-from .corpora import LEASE_DOC, MARKDOWN_SUFFIXES, MAX_FILE_BYTES, REGULAR_MODES, decode_text
-from .read import STAMP_DOC, CorpusStamp, _parse_stamp, resolve_base_ref
+from .corpora import IGNORE_FILES, REGULAR_MODES, CloudCorpus, DocsCloudCorpus
+from .read import CorpusStamp, _parse_stamp, resolve_base_ref
 from .vertex import VertexEmbedder
 
 logger = logging.getLogger(__name__)
@@ -222,12 +232,21 @@ def _is_line(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 1
 
 
+def _moves_scope(path: str) -> bool:
+    """Whether a change to `path` can move the code corpus's scope for files it did not touch: an ignore file
+    (any directory's, its name matched case-insensitively, as `corpora._head_ignores` reads them) or the config."""
+    return PurePosixPath(path).name.lower() in IGNORE_FILES or path == CONFIG_REL
+
+
 class CloudIndexer:
-    """Writes the cloud docs corpus for the checkout at `top`.
+    """Writes one cloud corpus for the checkout at `top`: `corpus`, by default the docs corpus.
 
     `embedder` embeds the chunks. `client` stands in for `firestore.Client` (tests); otherwise one is built on
     first use. `clock` (epoch seconds) times the lease; `holder` names this run in it, by default
     `host:pid:<8 random hex digits>`.
+
+    The default docs corpus is built afresh for each run, as it always was. A corpus passed in is used as it
+    is: the code corpus reads HEAD's ignore rules once, so build one per run (the CLI does).
     """
 
     def __init__(
@@ -238,6 +257,8 @@ class CloudIndexer:
         client: Any = None,
         clock: Callable[[], float] = time.time,
         holder: str | None = None,
+        *,
+        corpus: CloudCorpus | None = None,
     ) -> None:
         if cfg.cloud is None:
             raise CloudUnavailable("cloud is not configured (set the cloud object in docs/search/config.json)")
@@ -255,6 +276,8 @@ class CloudIndexer:
         # host:pid is not unique on its own (containers reuse pids under one host name): a random suffix makes it so
         self._holder = holder or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._checked_at = 0.0  # when this run last confirmed its lease
+        self._given = corpus
+        self._corpus: CloudCorpus = corpus if corpus is not None else DocsCloudCorpus(cfg, self._top)
 
     def _make_db(self) -> Any:
         firestore = import_module("google.cloud.firestore")
@@ -277,6 +300,8 @@ class CloudIndexer:
         """
         if mode not in MODES:
             raise ValueError(f"unknown mode {mode!r} (expected one of {', '.join(MODES)})")
+        if self._given is None:  # the working tree is read for each doc's type and title: this run's, not a cache's
+            self._corpus = DocsCloudCorpus(self._cfg, self._top)
         head = self._check_base(allow_off_base)
         db = self._db.get()
         repo_id = repo_identity(self._top, head)
@@ -300,10 +325,7 @@ class CloudIndexer:
                 "use a different collection or force"
             )
         other_embedder = bool(stamp.embedder_id and stamp.embedder_id != self._embedder.id)
-        # a stamp this indexer wrote (it names an embedder) names the chunker too; consumer's names neither
-        other_chunker = (
-            stamp.chunker_version != CHUNKER_VERSION if stamp.chunker_version is not None else bool(stamp.embedder_id)
-        )
+        other_chunker = not self._corpus.chunker_matches(stamp)
         rewrite = other_embedder or other_chunker  # the stored vectors or cuts are not this run's: trust no sha
         sha = rev_parse(self._top, stamp.built_from_commit)
         if sha is None:
@@ -344,28 +366,38 @@ class CloudIndexer:
             self._prune_orphans(db, tree, self._indexed_paths(db), report, force)
             return
 
-        corpus = Corpus(self._top, self._cfg, DocIndex(self._top))
-        # the corpus as it was before this run: the prune cap measures it, and the files written below are not in it
-        indexed = self._indexed_paths(db) if plan.mode == "full" else set()
+        corpus = self._corpus
+        rescope = False  # a catch-up whose range may have moved the code corpus's scope: check every indexed path
         if plan.mode == "full":
             todo = sorted(path for path in tree.regular if corpus.in_scope(path))
             deletions: list[str] = []
+            left: list[str] = []
         else:
             assert plan.base is not None
             changed = self._changed(plan.base, head)
-            todo = [path for path in changed if path in tree.regular and corpus.in_scope(path)]
+            todo = [path for path in changed if self._holds(tree, path)]
             deletions = [path for path in changed if path not in tree.everything and corpus.in_scope(path)]
+            # a file HEAD still holds that the code corpus no longer does (out of scope, not a regular file)
+            left = (
+                [path for path in changed if path in tree.everything and not self._holds(tree, path)]
+                if corpus.purges_out_of_scope
+                else []
+            )
+            rescope = corpus.purges_out_of_scope and any(_moves_scope(path) for path in changed)
+        # the corpus as it was before this run: the prune cap measures it, and the files written below are not in it
+        indexed = self._indexed_paths(db) if plan.mode == "full" or rescope else set()
 
         for path in todo:
             self._tick(db)
-            self._guarded(
-                report, path, lambda path=path: self._index_file(db, corpus, tree, path, report, plan.rewrite)
-            )
+            self._guarded(report, path, lambda path=path: self._index_file(db, tree, path, report, plan.rewrite))
         for path in deletions:
             self._tick(db)
             self._guarded(report, path, lambda path=path: self._delete_file(db, head, path, report))
-        if plan.mode == "full":
-            self._prune_orphans(db, tree, indexed, report, force)
+        for path in left:
+            self._tick(db)
+            self._guarded(report, path, lambda path=path: self._drop_file(db, path, report))
+        if plan.mode == "full" or rescope:
+            self._prune_orphans(db, tree, indexed, report, force, handled=frozenset([*todo, *deletions, *left]))
 
         if not report.files_failed and not report.orphans_pending:
             self._check_lease(db)
@@ -426,7 +458,7 @@ class CloudIndexer:
             self._drop_lease(db)
 
     def _lease_ref(self, db: Any) -> Any:
-        return db.collection(self._fs.meta_collection).document(LEASE_DOC)
+        return db.collection(self._fs.meta_collection).document(self._corpus.lease_doc)
 
     def _hold_lease(self, db: Any, *, taking: bool) -> None:
         """Take the lease (`taking`), or confirm it is still ours and extend it by the TTL.
@@ -500,8 +532,14 @@ class CloudIndexer:
         return _Tree(regular, frozenset(everything))
 
     def _read_stamp(self, db: Any) -> CorpusStamp | None:
-        snapshot = db.collection(self._fs.meta_collection).document(STAMP_DOC).get(timeout=self._timeout_s)
+        ref = db.collection(self._fs.meta_collection).document(self._corpus.stamp_doc)
+        snapshot = ref.get(timeout=self._timeout_s)
         return _parse_stamp(snapshot.to_dict() if snapshot.exists else None)
+
+    def _holds(self, tree: _Tree, path: str) -> bool:
+        """Whether the corpus holds `path` at HEAD: a regular file there, and in scope. Scope is a path test
+        alone (it says yes to a link or a submodule), so the tree is always asked too."""
+        return path in tree.regular and self._corpus.in_scope(path)
 
     def _changed(self, base: str, head: str) -> list[str]:
         out = git(self._top, "diff", "--name-only", "--no-renames", "-z", base, head, "--")
@@ -509,21 +547,21 @@ class CloudIndexer:
 
     # -- step 5: one file -----------------------------------------------------------------------
 
-    def _chunks(self, corpus: Corpus, path: str, text: str) -> list[CloudChunk]:
-        meta = corpus.meta(path)
-        title = meta.title if meta else ""
-        if PurePosixPath(path).suffix.lower() in MARKDOWN_SUFFIXES:
-            return chunk_markdown(path, text, title)
-        return chunk_lines(path, text, title)
-
-    def _index_file(self, db: Any, corpus: Corpus, tree: _Tree, path: str, report: IndexReport, rewrite: bool) -> None:
+    def _index_file(self, db: Any, tree: _Tree, path: str, report: IndexReport, rewrite: bool) -> None:
+        corpus = self._corpus
         data = git_bytes(self._top, "cat-file", "blob", tree.regular[path])
         sha = hashlib.sha256(data).hexdigest()
-        if not rewrite and self._is_current(db, path, sha):
+        if rewrite:
+            # a rewrite trusts no stored sha; a corpus whose chunks name their chunker and embedder resumes one
+            # that was cut short, skipping a file this run's rules already wrote
+            current = bool(corpus.chunk_identity()) and corpus.resumable_current(self._chunk0(db, path), sha)
+        else:
+            current = self._is_current(db, path, sha)
+        if current:
             report.files_skipped += 1
             return
-        text = decode_text(data, MAX_FILE_BYTES)
-        chunks = self._chunks(corpus, path, text) if text is not None else []
+        text = corpus.readable(path, data)
+        chunks = corpus.chunks(path, text) if text is not None else []
         if not chunks:
             # a content defect (binary, not UTF-8, too large, empty) fails identically on every run, so it is
             # not a failure; but the cloud must not keep serving an older version of what it cannot hold now
@@ -535,37 +573,41 @@ class CloudIndexer:
         # the embedding is the slow, retried part (and where a sleeping laptop loses its lease): look again before
         # this file's chunks land, or they would sit under a newer stamp another run has written meanwhile
         self._tick(db)
-        meta = corpus.meta(path)
-        doc_type = ((meta.doc_type if meta else None) or "other").lower()
-        self._replace(db, path, sha, doc_type, chunks, vectors)
+        self._replace(db, path, sha, chunks, vectors)
         report.files_written += 1
         report.chunks_written += len(chunks)
 
     def _collection(self, db: Any) -> Any:
-        return db.collection(self._fs.collection)
+        return db.collection(self._corpus.collection)
 
     def _where_path(self, db: Any, path: str) -> Any:
         field_filter = import_module("google.cloud.firestore_v1.base_query").FieldFilter
         return self._collection(db).where(filter=field_filter("path", "==", path))
 
-    def _is_current(self, db: Any, path: str, sha: str) -> bool:
-        """True when the stored chunk 0 has this sha and the line range (consumer's chunks lack it: rewritten once)."""
+    def _chunk0(self, db: Any, path: str) -> Mapping[str, Any] | None:
+        """The stored chunk 0 of `path`, or None when the corpus holds none."""
         field_filter = import_module("google.cloud.firestore_v1.base_query").FieldFilter
         query = self._where_path(db, path).where(filter=field_filter("chunkIndex", "==", 0)).limit(1)
         for snapshot in query.stream(timeout=READ_TIMEOUT_S):
-            stored = snapshot.to_dict() or {}
-            return (
-                stored.get("fileSha256") == sha
-                and _is_line(stored.get("startLine"))
-                and _is_line(stored.get("endLine"))
-            )
-        return False
+            return snapshot.to_dict() or {}
+        return None
 
-    def _replace(self, db: Any, path: str, sha: str, doc_type: str, chunks: list[CloudChunk], vectors: Any) -> None:
+    def _is_current(self, db: Any, path: str, sha: str) -> bool:
+        """True when the stored chunk 0 has this sha and the line range (consumer's chunks lack it: rewritten once)."""
+        stored = self._chunk0(db, path)
+        return (
+            stored is not None
+            and stored.get("fileSha256") == sha
+            and _is_line(stored.get("startLine"))
+            and _is_line(stored.get("endLine"))
+        )
+
+    def _replace(self, db: Any, path: str, sha: str, chunks: list[CloudChunk], vectors: Any) -> None:
         """Make the cloud hold exactly `chunks` for `path`: delete what is stale, then write highest ordinal first."""
         firestore = import_module("google.cloud.firestore")
         vector_type = import_module("google.cloud.firestore_v1.vector").Vector
         collection = self._collection(db)
+        identity = self._corpus.chunk_identity()
         keep = {chunk_id(path, chunk.ordinal) for chunk in chunks}
         ops: list[tuple[str, Any, dict[str, Any] | None]] = [
             ("delete", ref, None) for ref in self._refs(db, path) if ref.id not in keep
@@ -576,12 +618,12 @@ class CloudIndexer:
                 "chunkIndex": chunk.ordinal,
                 "text": chunk.text,
                 "embedding": vector_type([float(x) for x in vectors[chunk.ordinal]]),
-                "headingPath": list(chunk.heading_path),
                 "lastIndexedAt": firestore.SERVER_TIMESTAMP,
                 "fileSha256": sha,
-                "docType": doc_type,
                 "startLine": chunk.start_line,
                 "endLine": chunk.end_line,
+                **self._corpus.fields(path, chunk),
+                **identity,
             }
             ops.append(("set", collection.document(chunk_id(path, chunk.ordinal)), data))
         self._commit(db, ops)
@@ -618,6 +660,11 @@ class CloudIndexer:
         if self._purge(db, path):
             report.files_deleted += 1
 
+    def _drop_file(self, db: Any, path: str, report: IndexReport) -> None:
+        """Remove the chunks of a file HEAD still holds but the corpus no longer does (the code corpus only)."""
+        if self._purge(db, path):
+            report.files_deleted += 1
+
     # -- step 7: orphans ------------------------------------------------------------------------
 
     def _indexed_paths(self, db: Any) -> set[str]:
@@ -629,19 +676,32 @@ class CloudIndexer:
                 indexed.add(value)
         return indexed
 
-    def _prune_orphans(self, db: Any, tree: _Tree, indexed: set[str], report: IndexReport, force: bool) -> None:
+    def _prune_orphans(
+        self,
+        db: Any,
+        tree: _Tree,
+        indexed: set[str],
+        report: IndexReport,
+        force: bool,
+        handled: frozenset[str] = frozenset(),
+    ) -> None:
         """Delete the chunks of the paths in `indexed` that git no longer knows: absent from HEAD and the index.
 
         `indexed` is the corpus as it was before this run wrote anything. The cap is measured against it: a run
-        that has just written every file of HEAD must not count them as the corpus it is pruning.
+        that has just written every file of HEAD must not count them as the corpus it is pruning. `handled` are
+        the paths this run already wrote or removed (or tried to): they are not orphans.
 
-        The test is "the file is gone", not "the file is out of scope": an archived doc that still exists keeps
-        its chunks (they are what `include_terminal` searches). More orphans than the cap is not a cleanup but a
-        sign that the corpus and the repository do not match (a shared collection, the wrong checkout): they are
-        reported, not deleted, unless `force`.
+        For the docs corpus the test is "the file is gone", not "the file is out of scope": an archived doc that
+        still exists keeps its chunks (they are what `include_terminal` searches). The code corpus holds only
+        what is in scope at HEAD, so every indexed path it does not hold there is an orphan. More orphans than
+        the cap is not a cleanup but a sign that the corpus and the repository do not match (a shared
+        collection, the wrong checkout): they are reported, not deleted, unless `force`.
         """
-        known = tree.everything | {p for p in git(self._top, "ls-files", "-z").split("\0") if p}
-        orphans = sorted(indexed - known)
+        if self._corpus.purges_out_of_scope:
+            orphans = sorted(path for path in indexed - handled if not self._holds(tree, path))
+        else:
+            known = tree.everything | {p for p in git(self._top, "ls-files", "-z").split("\0") if p}
+            orphans = sorted(indexed - handled - known)
         if not orphans:
             return
         cap = max(PRUNE_CAP_MIN, PRUNE_CAP_RATIO * len(indexed))
@@ -672,8 +732,9 @@ class CloudIndexer:
             "built_at": firestore.SERVER_TIMESTAMP,
             "mode": mode,
             "embedder_id": self._embedder.id,
-            "chunker_version": CHUNKER_VERSION,
+            **self._corpus.chunker_stamp(),
         }
         if repo_id:  # unknown in a shallow clone: leave what the stamp already says
             stamp["repo_id"] = repo_id
-        db.collection(self._fs.meta_collection).document(STAMP_DOC).set(stamp, merge=True, timeout=COMMIT_TIMEOUT_S)
+        ref = db.collection(self._fs.meta_collection).document(self._corpus.stamp_doc)
+        ref.set(stamp, merge=True, timeout=COMMIT_TIMEOUT_S)

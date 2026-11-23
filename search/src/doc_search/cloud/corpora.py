@@ -99,6 +99,10 @@ class CloudCorpus(Protocol):
     query_task: str
     hit_kind: Literal["doc", "code"]
     note_prefix: str  # "cloud" / "cloud code": the first words of the leg's notes and status lines
+    # True: the collection holds only what is in scope at HEAD, so a file that leaves scope while HEAD still holds
+    # it (newly ignored, excluded, sealed) loses its chunks. False: only a file git no longer knows is an orphan
+    # (an archived doc keeps its chunks).
+    purges_out_of_scope: bool
 
     def in_scope(self, path: str) -> bool:
         """Whether the corpus holds `path`: a test of the path alone, so it answers for a deleted one too."""
@@ -114,6 +118,11 @@ class CloudCorpus(Protocol):
 
     def fields(self, path: str, chunk: CloudChunk) -> dict[str, Any]:
         """The fields a chunk document carries beyond the common ones."""
+        ...
+
+    def chunk_identity(self) -> dict[str, Any]:
+        """The fields every chunk document carries that name the chunker and embedder that made it; empty when
+        the corpus's chunks name neither (then a rewrite cannot resume, and `resumable_current` is never asked)."""
         ...
 
     def chunker_stamp(self) -> dict[str, Any]:
@@ -154,6 +163,7 @@ class DocsCloudCorpus:
     stamp_doc = STAMP_DOC
     lease_doc = LEASE_DOC
     query_task = QUERY_TASK
+    purges_out_of_scope = False
 
     def __init__(self, cfg: Config, top: Path) -> None:
         self.collection = _cloud(cfg).firestore.collection
@@ -179,6 +189,9 @@ class DocsCloudCorpus:
             "docType": ((meta.doc_type if meta else None) or "other").lower(),
             "headingPath": list(chunk.heading_path),
         }
+
+    def chunk_identity(self) -> dict[str, Any]:
+        return {}  # the docs documents are unchanged: no chunker or embedder named
 
     def chunker_stamp(self) -> dict[str, Any]:
         return {"chunker_version": CHUNKER_VERSION}
@@ -304,6 +317,7 @@ class CodeCloudCorpus:
     stamp_doc = CODE_STAMP_DOC
     lease_doc = CODE_LEASE_DOC
     query_task = CODE_QUERY_TASK
+    purges_out_of_scope = True
 
     def __init__(self, cfg: Config, top: Path) -> None:
         cloud = _cloud(cfg)
@@ -375,6 +389,9 @@ class CodeCloudCorpus:
 
     def fields(self, path: str, chunk: CloudChunk) -> dict[str, Any]:
         return {"language": detect_language(PurePosixPath(path)), "headingPath": []}
+
+    def chunk_identity(self) -> dict[str, Any]:
+        return {"chunkerId": CODE_CHUNKER_ID, "embedderId": self._embedder_id}
 
     # -- the stamp ---------------------------------------------------------------------------------
 

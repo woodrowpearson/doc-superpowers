@@ -24,6 +24,7 @@ from fakes import FakeFirestore, FakeGenai
 import doc_search.cloud.write as write
 from doc_search.chunker import CHUNKER_VERSION
 from doc_search.cloud import CloudUnavailable
+from doc_search.cloud.corpora import CODE_CHUNKER_ID, CodeCloudCorpus, DocsCloudCorpus
 from doc_search.cloud.vertex import VertexEmbedder
 from doc_search.cloud.write import (
     MODES,
@@ -1062,3 +1063,442 @@ def test_reads_and_commits_are_bounded(git_repo) -> None:
     assert w.fs.request_options, "reads were recorded"
     for op, options in w.fs.request_options:
         assert options.get("timeout"), f"{op} has a timeout"
+
+
+# --- the code corpus (design sections 5 and 6) ------------------------------------------------------------
+
+CODE_FIELDS = {
+    "path",
+    "chunkIndex",
+    "text",
+    "startLine",
+    "endLine",
+    "fileSha256",
+    "chunkerId",
+    "embedderId",
+    "embedding",
+    "language",
+    "headingPath",
+    "lastIndexedAt",
+}
+CODE_STAMP = ("corpus_meta", "code-index")
+CODE_LEASE = ("corpus_meta", "code_catch_up_lease")
+OTHER_EMBEDDER = "vertex:gemini-embedding-001/256"
+APP = "def main():\n    return 1\n"
+CODE = {"app.py": APP, "docs/guide.md": "# Guide\n\nHow to run the app.\n"}
+
+
+def py(name: str) -> str:
+    """A small python file whose one chunk names it."""
+    return f"def {name}():\n    return '{name}'\n"
+
+
+class CodeWorld(World):
+    """A world whose indexer writes the code corpus. Each run builds its config, corpus and indexer anew, as the
+    CLI does: a corpus reads HEAD's scope (its ignore files, the config) once."""
+
+    def run(self, mode: str = "full", **kw: Any) -> IndexReport:
+        self.indexer = code_indexer(self.repo, self.fs, self.genai, self.clock)
+        return self.indexer.run(mode, **kw)  # type: ignore[arg-type]
+
+    def chunks(self, path: str) -> list[dict[str, Any]]:
+        docs = self.fs.collection("code_chunks").docs.values()
+        return sorted((d for d in docs if d["path"] == path), key=lambda d: d["chunkIndex"])
+
+    def paths(self) -> set[str]:
+        return {d["path"] for d in self.fs.collection("code_chunks").docs.values()}
+
+    def stamp(self) -> dict[str, Any] | None:
+        return self.fs.collection(CODE_STAMP[0]).docs.get(CODE_STAMP[1])
+
+    def lease(self) -> dict[str, Any] | None:
+        return self.fs.collection(CODE_LEASE[0]).docs.get(CODE_LEASE[1])
+
+    def steal_lease(self, holder: str = "b:2", *, wait: float = 0.0) -> None:
+        self.fs.put(*CODE_LEASE, {"holder": holder, "expires_at": self.clock.at(+900)})
+        self.clock.now += wait
+
+    def put_stamp(self, **fields: Any) -> None:
+        """The code stamp as this indexer writes it, with `fields` over it."""
+        doc = {
+            "built_from_commit": self.head,
+            "built_at": self.fs.server_time,
+            "mode": "full",
+            "embedder_id": EMBEDDER_ID,
+            "repo_id": self.repo_id,
+            "chunker_id": CODE_CHUNKER_ID,
+            **fields,
+        }
+        self.fs.put(*CODE_STAMP, doc)
+
+    def mark(self, path: str | None = None, **fields: Any) -> None:
+        """Set `fields` on the stored chunks of `path` (every path when None): what an older run wrote."""
+        for doc in self.fs.collection("code_chunks").docs.values():
+            if path is None or doc["path"] == path:
+                doc.update(fields)
+
+
+def code_config(exclude: tuple[str, ...] = ()) -> str:
+    cloud: dict[str, Any] = {
+        "vertex": {"project": "p"},
+        "firestore": {"project": "p", "base_ref": "main"},
+        "code": {"exclude": list(exclude)},
+    }
+    return json.dumps({"code": {"content": ["code"]}, "cloud": cloud})
+
+
+def code_indexer(repo: Any, fs: FakeFirestore, genai: FakeGenai, clock: Clock) -> CloudIndexer:
+    cfg = load_config(repo.root, {})
+    assert cfg is not None and cfg.cloud is not None and cfg.cloud.code is not None
+    embedder = VertexEmbedder(cfg.cloud, client=genai, sleep=no_sleep)
+    corpus = CodeCloudCorpus(cfg, repo.root)
+    return CloudIndexer(cfg, repo.root, embedder, client=fs, clock=clock, holder="a:1", corpus=corpus)
+
+
+def make_code_world(git_repo, files: dict[str, str] | None = None, exclude: tuple[str, ...] = ()) -> CodeWorld:
+    repo = git_repo()
+    repo.write("docs/search/config.json", code_config(exclude))
+    for path, text in (CODE if files is None else files).items():
+        repo.write(path, text)
+    head = repo.commit("seed")
+    fs, genai, clock = FakeFirestore(), FakeGenai(), Clock()
+    indexer = code_indexer(repo, fs, genai, clock)
+    return CodeWorld(repo, indexer._cfg, fs, genai, clock, indexer, head)
+
+
+def test_code_run_writes_code_fields(git_repo) -> None:
+    w = make_code_world(git_repo)
+
+    report = w.run("full")
+
+    assert report.files_written == 1 and report.stamped and report.files_failed == {}
+    assert w.paths() == {"app.py"}, "the docs corpus's file is the docs leg's"
+    assert "doc_chunks" not in w.fs.collections or not w.fs.collection("doc_chunks").docs
+    (chunk,) = w.chunks("app.py")
+    assert set(chunk) == CODE_FIELDS, "exactly the code fields: no docType"
+    assert chunk["chunkerId"] == CODE_CHUNKER_ID and chunk["embedderId"] == EMBEDDER_ID
+    assert chunk["language"] == "python" and chunk["headingPath"] == []
+    assert chunk["fileSha256"] == hashlib.sha256(APP.encode()).hexdigest()
+    assert (chunk["startLine"], chunk["endLine"]) == (1, 2) and "def main" in chunk["text"]
+    assert isinstance(chunk["embedding"], Vector) and len(list(chunk["embedding"])) == 768
+    assert chunk["lastIndexedAt"] == w.fs.server_time
+    assert w.genai.calls[0].task_type == "RETRIEVAL_DOCUMENT"
+
+
+def test_code_text_is_capped(git_repo) -> None:
+    body = "x = [\n" + "".join(f"    {i},\n" for i in range(3000)) + "]\n"
+    w = make_code_world(git_repo, {"big.py": body})
+
+    w.run("full")
+
+    texts = [d["text"] for d in w.chunks("big.py")]
+    assert texts and all(len(text) <= 6000 for text in texts)
+    assert all(len(text) <= 6000 for text in w.embedded())
+
+
+def test_code_run_stamps_code_index(git_repo) -> None:
+    w = make_code_world(git_repo)
+
+    w.run("full")
+
+    assert w.stamp() == {
+        "built_from_commit": w.head,
+        "built_at": w.fs.server_time,
+        "mode": "full",
+        "embedder_id": EMBEDDER_ID,
+        "repo_id": w.repo_id,
+        "chunker_id": CODE_CHUNKER_ID,
+    }
+    assert "index" not in w.fs.collection("corpus_meta").docs, "the docs stamp is untouched"
+
+
+def test_code_lease_is_its_own(git_repo) -> None:
+    w = make_code_world(git_repo)
+    docs_lease = {"holder": "b:2", "expires_at": w.clock.at(+900)}
+    w.fs.put(*LEASE_PATH, docs_lease)
+    held: list[Any] = []
+    w.genai.on_call = lambda: held.append(w.lease())
+
+    report = w.run("full")
+
+    assert report.stamped, "another host's docs lease does not block the code corpus"
+    assert held and held[0]["holder"] == "a:1", "the run held the code lease"
+    assert w.lease() is None, "and released it"
+    assert w.fs.collection(LEASE_PATH[0]).docs[LEASE_PATH[1]] == docs_lease, "the docs lease is untouched"
+
+    w.commit({"app.py": APP + "\n\ndef more():\n    return 2\n"})
+    w.genai.on_call = None
+    w.steal_lease()
+    with pytest.raises(LeaseHeld, match="the corpus lease is held by b:2"):
+        w.run("catch-up")
+
+
+def test_code_catch_up_rewrites_only_changed_files(git_repo) -> None:
+    w = make_code_world(git_repo, {"a.py": py("a"), "b.py": py("b"), "c.py": py("c"), "docs/guide.md": "# G\n"})
+    first = w.run("full")
+    assert first.files_written == 3
+    calls = len(w.genai.calls)
+
+    w.commit({"b.py": py("bee"), "d.py": py("d"), "c.py": None, "docs/guide.md": "# G\n\nMore.\n"})
+    report = w.run("catch-up")
+
+    assert (report.mode, report.files_written, report.files_deleted, report.files_skipped) == ("catch-up", 2, 1, 0)
+    assert report.stamped and w.stamp()["built_from_commit"] == w.head and w.stamp()["mode"] == "catch-up"
+    assert w.paths() == {"a.py", "b.py", "d.py"}
+    new = [text for call in w.genai.calls[calls:] for text in call.texts]
+    assert len(new) == 2 and any("bee" in t for t in new) and any("'d'" in t for t in new)
+    assert not any("'a'" in t for t in new), "a.py did not change"
+
+
+def test_another_semble_makes_a_full_run(git_repo) -> None:
+    w = make_code_world(git_repo, {"a.py": py("a"), "b.py": py("b")})
+    w.run("full")
+    calls = len(w.genai.calls)
+    w.put_stamp(chunker_id="semble-0.6")
+    w.mark(chunkerId="semble-0.6")  # what that semble's run wrote
+
+    report = w.run("catch-up")
+
+    assert report.mode == "full" and report.files_written == 2 and report.files_skipped == 0
+    assert len(w.genai.calls) > calls and w.stamp()["chunker_id"] == CODE_CHUNKER_ID
+    assert {d["chunkerId"] for d in w.fs.collection("code_chunks").docs.values()} == {CODE_CHUNKER_ID}
+
+
+def test_code_file_grown_past_limit_is_purged(git_repo) -> None:
+    w = make_code_world(git_repo, {"app.py": APP, "lib.py": py("lib")})
+    w.run("full")
+    assert w.chunks("app.py")
+
+    grown = APP + "#" * (1_000_001 - len(APP) - 1) + "\n"
+    assert len(grown.encode()) == 1_000_001
+    w.commit({"app.py": grown})
+    report = w.run("catch-up")
+
+    assert report.files_deleted == 1 and report.files_written == 0 and report.files_failed == {}
+    assert w.paths() == {"lib.py"}
+    assert report.stamped and w.stamp()["built_from_commit"] == w.head, "a content defect is not a failure"
+
+
+def test_code_file_turned_binary_is_purged(git_repo) -> None:
+    w = make_code_world(git_repo, {"app.py": APP, "lib.py": py("lib")})
+    w.run("full")
+
+    w.commit({"app.py": APP + "\0\n"})
+    report = w.run("catch-up")
+
+    assert report.files_deleted == 1 and report.files_failed == {} and w.paths() == {"lib.py"}
+    assert report.stamped and w.stamp()["built_from_commit"] == w.head
+
+
+FOUR = {"a.py": py("a"), "b.py": py("b"), "c.py": py("c"), "d.py": py("d")}
+
+
+def test_code_rewrite_resumes(git_repo) -> None:
+    w = make_code_world(git_repo, FOUR)
+    w.run("full")
+    w.put_stamp(embedder_id=OTHER_EMBEDDER)
+    w.mark(embedderId=OTHER_EMBEDDER)  # every vector is another embedder's: a rewrite
+    old_stamp = dict(w.stamp())
+    calls = 0
+
+    def third_loses_the_lease() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            w.steal_lease(wait=400)
+
+    w.genai.on_call = third_loses_the_lease
+    with pytest.raises(LeaseLost) as lost:
+        w.run("catch-up")
+
+    assert lost.value.report.files_written == 2, "a.py and b.py were rewritten before the lease went"
+    assert w.stamp() == old_stamp, "nothing stamped"
+    assert {p for p in FOUR if w.chunks(p)[0]["embedderId"] == EMBEDDER_ID} == {"a.py", "b.py"}
+
+    del w.fs.collection(CODE_LEASE[0]).docs[CODE_LEASE[1]]  # the other host finished
+    stamps: list[Any] = []
+    w.genai.on_call = lambda: stamps.append(dict(w.stamp()))
+    before = len(w.genai.calls)
+
+    report = w.run("catch-up")
+
+    assert report.mode == "full" and (report.files_written, report.files_skipped) == (2, 2)
+    new = [text for call in w.genai.calls[before:] for text in call.texts]
+    assert len(new) == 2 and any("'c'" in t for t in new) and any("'d'" in t for t in new), "only the other two"
+    assert stamps == [old_stamp, old_stamp], "the stamp is not written while files remain"
+    assert w.stamp()["embedder_id"] == EMBEDDER_ID and w.stamp()["built_from_commit"] == w.head
+
+
+def test_code_rewrite_redoes_a_file_of_the_old_chunker(git_repo) -> None:
+    w = make_code_world(git_repo, FOUR)
+    w.run("full")
+    w.put_stamp(embedder_id=OTHER_EMBEDDER)  # a rewrite; every chunk 0 already has this run's identity...
+    w.mark("a.py", chunkerId="semble-0.6")  # ...but a.py's, which an older chunker cut
+    w.mark("b.py", fileSha256="0" * 64)  # and b.py's, which is of other bytes
+    before = len(w.genai.calls)
+
+    report = w.run("catch-up")
+
+    assert report.mode == "full" and (report.files_written, report.files_skipped) == (2, 2)
+    new = [text for call in w.genai.calls[before:] for text in call.texts]
+    assert len(new) == 2 and any("'a'" in t for t in new) and any("'b'" in t for t in new)
+    assert w.chunks("a.py")[0]["chunkerId"] == CODE_CHUNKER_ID
+
+
+def test_docs_run_unchanged_by_code_config(git_repo) -> None:
+    repo = git_repo()
+    repo.write("docs/search/config.json", code_config())
+    for path, text in {**DOCS, "app.py": APP}.items():
+        repo.write(path, text)
+    repo.commit("seed")
+    cfg = load_config(repo.root, {})
+    assert cfg is not None and cfg.cloud is not None and cfg.cloud.code is not None
+    fs, genai = FakeFirestore(), FakeGenai()
+    embedder = VertexEmbedder(cfg.cloud, client=genai, sleep=no_sleep)
+    for corpus in (None, DocsCloudCorpus(cfg, repo.root)):
+        CloudIndexer(cfg, repo.root, embedder, client=fs, clock=Clock(), holder="a:1", corpus=corpus).run("full")
+
+        docs = fs.collection("doc_chunks").docs
+        assert {d["path"] for d in docs.values()} == set(DOCS), "no code in the docs corpus"
+        assert all(set(d) == FIELDS for d in docs.values()), "exactly today's fields: no chunkerId, no embedderId"
+        stamp = fs.collection("corpus_meta").docs["index"]
+        assert stamp["chunker_version"] == CHUNKER_VERSION and "chunker_id" not in stamp
+        assert "code-index" not in fs.collection("corpus_meta").docs
+        assert "code_chunks" not in fs.collections
+
+
+# --- R1: regular files only ----------------------------------------------------------------------------
+
+
+def test_code_corpus_takes_regular_blobs_only(git_repo) -> None:
+    w = make_code_world(git_repo, {"app.py": APP, "lib.py": py("lib")})
+    os.symlink("app.py", w.repo.root / "link.py")
+    sub = w.repo.git("rev-parse", "HEAD").strip()
+    w.repo.git("update-index", "--add", "--cacheinfo", f"160000,{sub},vendored.py")
+    w.head = w.repo.commit("a link and a gitlink")
+    corpus = CodeCloudCorpus(w.indexer._cfg, w.repo.root)
+    assert corpus.in_scope("link.py") and corpus.in_scope("vendored.py"), "scope is a path test alone"
+
+    report = w.run("full")
+
+    assert w.paths() == {"app.py", "lib.py"} and report.files_written == 2
+
+    os.unlink(w.repo.root / "lib.py")
+    os.symlink("app.py", w.repo.root / "lib.py")  # a file that turned into a link leaves the corpus
+    w.head = w.repo.commit("lib is a link now")
+    report = w.run("catch-up")
+
+    assert w.paths() == {"app.py"} and report.files_deleted == 1 and report.files_written == 0
+    assert report.stamped
+
+
+# --- R2: a file HEAD still holds that left code scope ------------------------------------------------
+
+
+def test_code_catch_up_drops_a_changed_file_that_left_scope(git_repo) -> None:
+    w = make_code_world(git_repo, {"app.py": APP, "old/x.py": py("x"), "old/y.py": py("y")})
+    w.run("full")
+    assert w.paths() == {"app.py", "old/x.py", "old/y.py"}
+
+    w.commit({"old/x.py": py("xx"), "old/.sembleignore": "*.py\n"})
+    report = w.run("catch-up")
+
+    assert w.paths() == {"app.py"}, "both left scope: the changed one, and the one the new ignore file covers"
+    assert report.files_deleted == 1, "the changed file goes as a removed file would"
+    assert report.orphans_removed == 1, "the ignore file changed: the indexed paths were checked too"
+    assert report.files_written == 0 and report.stamped
+
+
+def test_code_full_and_prune_orphans_drop_what_left_scope(git_repo) -> None:
+    w = make_code_world(git_repo, {"app.py": APP, "legacy/a.py": py("a"), "legacy/b.py": py("b")})
+    w.run("full")
+    w.commit({".gitignore": "legacy/\n"})
+
+    report = w.run("prune-orphans")
+
+    assert report.orphans_removed == 2 and w.paths() == {"app.py"} and not report.stamped
+
+    w.commit({".gitignore": "legacy/b.py\n"})  # a.py comes back in; b.py stays out
+    report = w.run("full")
+
+    assert w.paths() == {"app.py", "legacy/a.py"} and report.orphans_removed == 0, "b.py's chunks went already"
+    assert report.files_written == 1 and report.stamped
+
+    w.commit({".gitignore": "legacy/a.py\n"})  # and now the other way round
+    report = w.run("full")
+
+    assert w.paths() == {"app.py", "legacy/b.py"} and report.orphans_removed == 1 and report.stamped
+
+
+def test_code_out_of_scope_orphans_obey_the_cap(git_repo) -> None:
+    legacy = {f"legacy/m{i:02d}.py": py(f"m{i:02d}") for i in range(21)}
+    w = make_code_world(git_repo, {"app.py": APP, **legacy})
+    w.run("full")
+    w.commit({".gitignore": "legacy/\n"})
+
+    report = w.run("catch-up")
+
+    assert report.orphans_pending == 21 and report.orphans_removed == 0 and not report.stamped
+    assert set(legacy) <= w.paths(), "too many to prune without force"
+
+    forced = w.run("full", force=True)
+
+    assert forced.orphans_removed == 21 and forced.stamped and w.paths() == {"app.py"}
+
+
+@pytest.mark.parametrize("ignore", ["src/.GitIgnore", "src/.sembleignore", ".gitignore"])
+def test_code_catch_up_rechecks_scope_when_an_ignore_file_changes(git_repo, ignore: str) -> None:
+    w = make_code_world(git_repo, {"app.py": APP, "src/gen.py": py("gen"), "src/keep.py": py("keep")})
+    w.run("full")
+
+    w.commit({ignore: "gen.py\n" if ignore.startswith("src/") else "src/gen.py\n"})
+    report = w.run("catch-up")
+
+    assert w.paths() == {"app.py", "src/keep.py"} and report.orphans_removed == 1 and report.stamped
+
+
+def test_code_catch_up_drops_a_file_deleted_as_its_directory_is_ignored(git_repo) -> None:
+    w = make_code_world(git_repo, {"app.py": APP, "legacy/x.py": py("x")})
+    w.run("full")
+
+    w.commit({"legacy/x.py": None, ".gitignore": "legacy/\n"})  # out of scope now, and gone
+    report = w.run("catch-up")
+
+    assert w.paths() == {"app.py"} and report.stamped
+
+
+def test_code_catch_up_rechecks_scope_when_the_config_changes(git_repo) -> None:
+    w = make_code_world(git_repo, {"app.py": APP, "gen/out.py": py("out")})
+    w.run("full")
+
+    w.commit({"docs/search/config.json": code_config(exclude=("gen/**",))})
+    report = w.run("catch-up")
+
+    assert w.paths() == {"app.py"} and report.orphans_removed == 1 and report.stamped
+
+
+def test_code_catch_up_without_a_scope_change_scans_nothing(git_repo) -> None:
+    w = make_code_world(git_repo, {"app.py": APP, "lib.py": py("lib")})
+    w.run("full")
+    w.fs.add_chunk("gone.py", "a file deleted long ago", collection="code_chunks", start=1, end=1)
+
+    w.commit({"lib.py": py("lib2")})
+    report = w.run("catch-up")
+
+    assert report.orphans_removed == 0 and "gone.py" in w.paths(), "a plain catch-up does not reconcile"
+
+
+def test_docs_keep_a_doc_that_left_scope(git_repo) -> None:
+    w = make_world(git_repo, {**DOCS, "docs/old/legacy.md": "# Legacy\n\nOld.\n"})
+    w.run("full")
+    config = json.loads((w.repo.root / "docs/search/config.json").read_text(encoding="utf-8"))
+    config["docs"] = {"exclude": ["docs/old/**"]}
+    w.commit({"docs/search/config.json": json.dumps(config), ".gitignore": "docs/old/\n"})
+    w.indexer = CloudIndexer(
+        load_config(w.repo.root, {}), w.repo.root, w.indexer._embedder, client=w.fs, clock=w.clock, holder="a:1"
+    )
+
+    for mode in ("catch-up", "full", "prune-orphans"):
+        report = w.run(mode)
+        assert report.orphans_removed == 0 and report.files_deleted == 0
+        assert "docs/old/legacy.md" in w.paths(), f"{mode}: an out-of-scope doc HEAD still holds keeps its chunks"
