@@ -687,7 +687,14 @@ def _eval(args: argparse.Namespace) -> int:
     try:
         with _progress_lines(rt, rt.repo.top):
             report = run_eval(
-                rt.searcher, rt.pool, Path(args.file), args.k, rt.repo.top, cloud=rt.cloud, corpus_for=rt.corpus_for
+                rt.searcher,
+                rt.pool,
+                Path(args.file),
+                args.k,
+                rt.repo.top,
+                cloud=rt.cloud,
+                code_cloud=rt.code_cloud,
+                corpus_for=rt.corpus_for,
             )
     except EvalFileError as err:
         where = f"{args.file} {err}" if err.line else f"{args.file}: {err}"

@@ -10,8 +10,10 @@ a leg's ranked hits are collapsed to distinct paths in rank order and the first 
 Legs, in the order they are reported:
 
  - `docs`: the searcher with `scope=docs` (docs index, the identifier leg, and the cloud leg when it is on).
- - `code`: `scope=code`.
+ - `code`: `scope=code` (the fused code list, with the code cloud leg's hits, when that leg is on).
  - `cloud`: the cloud leg alone, asked directly with the allowed set (only when a cloud leg is given).
+ - `cloud-code`: the code cloud leg alone, asked with the code index's files outside the docs corpus (only when
+   a code cloud leg is given).
  - `all`: `scope=all`, the joined result.
  - `semble-single`: one semble index over docs and code (`docs.model`), queried at `k x 3` chunks and collapsed
    per file. It is skipped for a transformer `docs.model`: the single index would encode the code with it.
@@ -51,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 TOLERANCE = 0.02  # the decision rule of section 3(b)
 SINGLE_FETCH = 3  # semble-single is asked for k x 3 chunks: collapsing them per file leaves fewer
-LEG_ORDER = ("docs", "code", "cloud", "all", "semble-single")
+LEG_ORDER = ("docs", "code", "cloud", "cloud-code", "all", "semble-single")
 NO_KIND = "(no kind)"
 TERMINAL_NOTE = "(terminal docs included)"  # on the report's first line: the docs and all legs search terminal docs
 EPSILON = 1e-9
@@ -231,11 +233,13 @@ def run_eval(
     worktree: Path,
     *,
     cloud: CloudLeg | None = None,
+    code_cloud: CloudLeg | None = None,
     corpus_for: Callable[[Path], Corpus] | None = None,
 ) -> EvalReport:
     """Score every leg over the cases of `path` for `worktree`.
 
-    `cloud` (with `corpus_for`, for the allowed set) adds the cloud-alone leg. The file is read first, so a
+    `cloud` (with `corpus_for`, for the allowed set) adds the cloud-alone leg; `code_cloud` adds the code cloud
+    leg alone, asked with the code index's files minus the docs corpus's. The file is read first, so a
     malformed one raises EvalFileError before any index is touched; the indexes are then built (waited for)
     once, and the legs run one after the other.
     """
@@ -266,6 +270,8 @@ def run_eval(
     ]
     if cloud is not None:
         legs.append(("cloud", lambda: _cloud_ranker(cloud, corpus_for, worktree, k)))
+    if code_cloud is not None:
+        legs.append(("cloud-code", lambda: _code_cloud_ranker(code_cloud, pool, corpus_for, worktree, k)))
     legs += [
         ("all", lambda: searched("all")),
         ("semble-single", lambda: _single_ranker(searcher.cfg, worktree, k)),
@@ -314,6 +320,31 @@ def _cloud_ranker(cloud: CloudLeg, corpus_for: Callable[[Path], Corpus] | None, 
         except Exception as err:  # noqa: BLE001 - a remote leg that fails is a note, as in search
             raise _Unanswered(f"cloud leg failed ({describe(err)})") from err
         if note and not hits:  # a degraded leg, or one with no stamp to read: it said why it has nothing
+            raise _Unanswered(note)
+        return _distinct([hit.path for hit in hits if hit.path in allowed]), [note] if note else []
+
+    return rank
+
+
+def _code_cloud_ranker(
+    code_cloud: CloudLeg,
+    pool: IndexPool,
+    corpus_for: Callable[[Path], Corpus] | None,
+    worktree: Path,
+    k: int,
+) -> Ranker:
+    if corpus_for is None:
+        raise _Skip("no corpus to name the docs files")
+    allowed = set(pool.indexed_files(worktree, "code")) - set(corpus_for(worktree).files())
+    if not allowed:
+        raise _Skip("the code index holds no file outside the docs corpus")
+
+    def rank(query: str) -> tuple[list[str], list[str]]:
+        try:
+            hits, note = code_cloud.hits(query, allowed, worktree, k * SINGLE_FETCH)
+        except Exception as err:  # noqa: BLE001 - a remote leg that fails is a note, as in search
+            raise _Unanswered(f"cloud code leg failed ({describe(err)})") from err
+        if note and not hits:
             raise _Unanswered(note)
         return _distinct([hit.path for hit in hits if hit.path in allowed]), [note] if note else []
 

@@ -1431,3 +1431,63 @@ def test_nothing_is_left_building(repo, run, tmp_path: Path) -> None:
     for argv in (("index",), ("query", "refund"), ("eval", str(cases_file(tmp_path, KNOWN[0])))):
         assert run(*argv).code == 0
     assert build_threads() == []
+
+
+class StubCodeCloud:
+    """A code cloud leg that answers from a fixed list of paths and records what it was asked."""
+
+    def __init__(self, paths: list[str]) -> None:
+        self.paths = paths
+        self.asked: list[tuple[str, set[str], int]] = []
+
+    def hits(self, query, allowed, worktree, limit, doc_types=()):
+        self.asked.append((query, set(allowed), limit))
+        return [Hit("code", p, 1, 3, "text", legs=("cloud",)) for p in self.paths][:limit], None
+
+    def status_lines(self, worktree):
+        return ["cloud code: stub"]
+
+
+def test_eval_reports_cloud_code_leg(repo, tmp_path: Path) -> None:
+    code_cloud = StubCodeCloud([CODE_PATH])
+    _, info, pool, corpus_for, searcher = eval_parts(repo)
+    path = cases_file(tmp_path, {"query": "anything", "expect": [CODE_PATH], "kind": "k"})
+
+    report = run_eval(searcher, pool, path, 2, info.top, code_cloud=code_cloud, corpus_for=corpus_for)
+
+    assert [leg.name for leg in report.legs] == ["docs", "code", "cloud-code", "all", "semble-single"]
+    leg = report.leg("cloud-code")
+    assert (leg.overall.recall, leg.overall.mrr) == (1.0, 1.0)
+    query, allowed, limit = code_cloud.asked[0]
+    assert limit == 2 * 3, "k x SINGLE_FETCH chunks"
+    assert CODE_PATH in allowed and SHIPPING_PATH not in allowed, "the code index's files minus the docs corpus's"
+
+
+def test_eval_without_code_cloud_has_no_leg(repo, tmp_path: Path) -> None:
+    _, info, pool, corpus_for, searcher = eval_parts(repo)
+    path = cases_file(tmp_path, {"query": "anything", "expect": [CODE_PATH]})
+
+    report = run_eval(searcher, pool, path, 2, info.top, corpus_for=corpus_for)
+
+    assert "cloud-code" not in [leg.name for leg in report.legs]
+
+
+def test_eval_code_leg_is_fused_when_on(repo, tmp_path: Path) -> None:
+    from doc_search.config import load_config
+    from doc_search.corpus import Corpus
+    from doc_search.docindex import DocIndex
+    from doc_search.repo import RepoInfo
+    from doc_search.searcher import Searcher
+
+    cfg = load_config(repo.root, {})
+    info = RepoInfo.from_cwd(repo.root)
+    pool = IndexPool(cfg)
+    corpus = Corpus(info.top, cfg, DocIndex(info.top))
+    code_cloud = StubCodeCloud([CODE_PATH])
+    searcher = Searcher(cfg, info, pool, lambda _w: corpus, code_cloud=code_cloud, wait_s=60)
+    path = cases_file(tmp_path, {"query": "anything", "expect": [CODE_PATH]})
+
+    report = run_eval(searcher, pool, path, 3, info.top, code_cloud=code_cloud, corpus_for=lambda _w: corpus)
+
+    assert len(code_cloud.asked) >= 2, "the searcher's code leg asked it too, beside the cloud-code leg"
+    assert report.leg("code").overall is not None
