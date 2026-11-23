@@ -4264,7 +4264,7 @@ test_index_zero_byte_index_rejected_by_every_verb() {
   echo "# new" > docs/new.md
   : > docs/.doc-index.json
   local verb out rc
-  for verb in check-freshness status update-index add-entry remove-entry move-entry deprecate-entry; do
+  for verb in check-freshness status update-index add-entry remove-entry move-entry deprecate-entry undeprecate-entry; do
     rc=0
     case "$verb" in
       check-freshness) out=$("$DOC_TOOLS" check-freshness 2>&1 >/dev/null) || rc=$? ;;
@@ -4743,6 +4743,7 @@ test_i4_flags_anywhere_and_unknown_flags_exit_2() {
       "update-index --bogus docs/design.md" "update-index docs/design.md -x" \
       "remove-entry --bogus docs/design.md" "deprecate-entry docs/design.md --bogus" \
       "deprecate-entry docs/design.md --superseded-by" "move-entry --bogus docs/design.md docs/x.md" \
+      "undeprecate-entry docs/design.md --bogus" "undeprecate-entry docs/design.md --clear-superseded-by=x" \
       "status docs/design.md --bogus" "check-version --bogus" "fragments list --bogus"; do
     rc=0
     # shellcheck disable=SC2086  # $cmd is a fixed word list
@@ -4995,6 +4996,7 @@ test_i4_outside_a_git_repo() {
   before=$(hash_file docs/.doc-index.json)
   for cmd in "check-freshness" "status docs/architecture.md" "update-index docs/architecture.md" \
       "remove-entry docs/architecture.md" "deprecate-entry docs/architecture.md" \
+      "undeprecate-entry docs/architecture.md" \
       "move-entry docs/architecture.md docs/b.md" "add-entry" "build-index --force" \
       "fragments merge HEAD~1 HEAD"; do
     rc=0
@@ -5168,6 +5170,7 @@ test_i4_arity_errors_exit_2() {
   before=$(hash_file docs/.doc-index.json)
   for cmd in "status" "status docs/architecture.md docs/x.md" "update-index" "remove-entry" \
       "deprecate-entry" "deprecate-entry --superseded-by docs/architecture.md" "move-entry" \
+      "undeprecate-entry" "undeprecate-entry --clear-superseded-by" \
       "move-entry docs/architecture.md" "move-entry docs/a.md docs/b.md docs/c.md" \
       "bump-version" "bump-version 1.0.0 2.0.0" "fragments validate" "fragments validate a.md b.md" \
       "fragments merge HEAD" "fragments merge HEAD~1 HEAD extra" "implementation-status" \
@@ -6173,6 +6176,114 @@ test_deprecate_entry_keeps_an_existing_superseded_by() {
     "--superseded-by replaces an existing superseded_by"
   assert_json_field "$json" '.docs["docs/newer.md"].replaces' "docs/archive/architecture/architecture.md" \
     "…and sets the new successor's empty replaces"
+  teardown
+}
+
+# GH #98: deprecate-entry had no inverse. A doc that came back into use (an
+# issue reopened after a retention job deprecated it) could leave "deprecated"
+# only through remove-entry + add-entry, which drops its baseline and links,
+# or a hand edit of the index. undeprecate-entry drops the stored status and
+# keeps every other field; check-freshness judges the entry again.
+_undep_fixture() {
+  local k
+  for k in new other; do echo "# $k" > "docs/$k.md"; done
+  _i1_commit docs
+  printf '%s\n' docs/architecture.md:src/:architecture docs/new.md:src/:architecture docs/other.md:src/:guide \
+    | "$DOC_TOOLS" build-index 2>/dev/null
+  _mv_inject_sentinels docs/architecture.md
+  _mv_inject_sentinels docs/new.md
+  "$DOC_TOOLS" deprecate-entry docs/architecture.md --superseded-by docs/new.md >/dev/null 2>&1
+}
+
+test_undeprecate_entry_lifts_a_deprecation() {
+  echo "test: GH #98: undeprecate-entry drops the stored status and keeps last_verified and the links"
+  setup
+  _undep_fixture
+  local out rc json
+  rc=0
+  out=$("$DOC_TOOLS" undeprecate-entry docs/architecture.md 2>&1) || rc=$?
+  json=$(cat docs/.doc-index.json)
+  assert_eq "0" "$rc" "undeprecate-entry exits 0"
+  assert_json_field "$json" '.docs["docs/architecture.md"] | has("status")' "false" "the stored status is gone"
+  assert_json_field "$json" '.docs["docs/architecture.md"].last_verified' "2020-01-01T00:00:00Z" \
+    "undeprecating is not a baseline reset: last_verified untouched"
+  assert_json_field "$json" '.docs["docs/architecture.md"].code_commit' "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
+    "…and the recorded baseline is kept"
+  assert_json_field "$json" '.docs["docs/architecture.md"].superseded_by' "docs/new.md" \
+    "without --clear-superseded-by the link is kept"
+  assert_json_field "$json" '.docs["docs/new.md"].replaces' "docs/architecture.md" "…and so is the successor's replaces"
+  assert_contains "$out" "Undeprecated 1 entry:" "the report counts the undeprecated entry"
+  assert_contains "$out" "still names superseded_by 'docs/new.md'" "a kept link is said, with the way to drop it"
+  local fresh
+  fresh=$("$DOC_TOOLS" check-freshness 2>/dev/null) || true
+  assert_json_field "$fresh" '.docs["docs/architecture.md"].status == "deprecated"' "false" \
+    "check-freshness no longer reports it deprecated"
+  # Again: nothing to do, nothing written.
+  cp docs/.doc-index.json docs/.idx.before
+  rc=0
+  out=$("$DOC_TOOLS" undeprecate-entry docs/architecture.md 2>&1) || rc=$?
+  assert_eq "0" "$rc" "undeprecating a live entry exits 0"
+  assert_contains "$out" "(not deprecated)" "…and reports it unchanged"
+  assert_exit_code 0 "…and writes nothing" cmp -s docs/.idx.before docs/.doc-index.json
+  rm -f docs/.idx.before
+  teardown
+}
+
+test_undeprecate_entry_clear_superseded_by() {
+  echo "test: GH #98: undeprecate-entry --clear-superseded-by clears the link and a successor's replaces that names the doc"
+  setup
+  _undep_fixture
+  "$DOC_TOOLS" deprecate-entry docs/other.md --superseded-by docs/new.md >/dev/null 2>&1
+  local out rc json
+  # other's successor replaces another doc: it is left as it is.
+  out=$("$DOC_TOOLS" undeprecate-entry --clear-superseded-by docs/other.md 2>&1) || true
+  json=$(cat docs/.doc-index.json)
+  assert_json_field "$json" '.docs["docs/other.md"] | has("status")' "false" "other is undeprecated"
+  assert_json_field "$json" '.docs["docs/other.md"].superseded_by' "null" "…and its superseded_by cleared"
+  assert_json_field "$json" '.docs["docs/new.md"].replaces' "docs/architecture.md" \
+    "a successor whose replaces names another doc is left as it is"
+  assert_not_contains "$out" "Unlinked" "…and nothing is reported unlinked"
+  rc=0
+  out=$("$DOC_TOOLS" undeprecate-entry docs/architecture.md --clear-superseded-by 2>&1) || rc=$?
+  json=$(cat docs/.doc-index.json)
+  assert_eq "0" "$rc" "undeprecate-entry <doc> --clear-superseded-by exits 0"
+  assert_json_field "$json" '.docs["docs/architecture.md"] | has("status")' "false" "architecture is undeprecated"
+  assert_json_field "$json" '.docs["docs/architecture.md"].superseded_by' "null" "…its superseded_by cleared"
+  assert_json_field "$json" '.docs["docs/new.md"].replaces' "null" "…and its successor no longer replaces it"
+  assert_json_field "$json" '.docs["docs/new.md"].last_verified' "2020-01-01T00:00:00Z" \
+    "…the successor's last_verified untouched"
+  assert_contains "$out" "Unlinked: 'docs/new.md' no longer replaces 'docs/architecture.md'." "the unlink is reported"
+  assert_not_contains "$out" "still names superseded_by" "no kept-link note once it is cleared"
+  # A successor that is not indexed: the link is cleared, nothing invented.
+  "$DOC_TOOLS" deprecate-entry docs/other.md --superseded-by docs/nope.md >/dev/null 2>&1
+  rc=0
+  "$DOC_TOOLS" undeprecate-entry --clear-superseded-by docs/other.md >/dev/null 2>&1 || rc=$?
+  json=$(cat docs/.doc-index.json)
+  assert_eq "0" "$rc" "an unindexed successor is no error"
+  assert_json_field "$json" '.docs["docs/other.md"].superseded_by' "null" "…the link is cleared"
+  assert_json_field "$json" '.docs | has("docs/nope.md")' "false" "…and no entry is made for it"
+  teardown
+}
+
+test_undeprecate_entry_reports_unknown_and_missing() {
+  echo "test: GH #98: undeprecate-entry skips a path not indexed (exit 1) and undeprecates a doc whose file is gone"
+  setup
+  _undep_fixture
+  local out rc json
+  rc=0
+  out=$("$DOC_TOOLS" undeprecate-entry docs/architecture.md docs/nope.md 2>&1) || rc=$?
+  json=$(cat docs/.doc-index.json)
+  assert_eq "1" "$rc" "a path not in the index makes the run exit 1"
+  assert_contains "$out" "'docs/nope.md' not found in index" "…and is named"
+  assert_json_field "$json" '.docs["docs/architecture.md"] | has("status")' "false" "the indexed path is still undeprecated"
+  "$DOC_TOOLS" deprecate-entry docs/other.md >/dev/null 2>&1
+  git rm -q docs/other.md
+  rc=0
+  "$DOC_TOOLS" undeprecate-entry docs/other.md >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "a deprecated entry whose file is gone is undeprecated (no file read)"
+  local fresh
+  fresh=$("$DOC_TOOLS" check-freshness 2>/dev/null) || true
+  assert_json_field "$fresh" '.docs["docs/other.md"].status' "missing" "…and check-freshness then reports it missing"
   teardown
 }
 
@@ -10141,6 +10252,9 @@ run_tests() {
   test_i3_add_entry_baselines_to_the_docs_last_commit
   test_i3_deprecate_entry_sets_replaces_not_last_verified
   test_deprecate_entry_keeps_an_existing_superseded_by
+  test_undeprecate_entry_lifts_a_deprecation
+  test_undeprecate_entry_clear_superseded_by
+  test_undeprecate_entry_reports_unknown_and_missing
   test_i3_set_code_refs_edits_in_place
   test_i3_set_code_refs_on_a_legacy_entry
   test_i3_set_code_refs_added_ref_never_masks_commits_behind

@@ -1490,11 +1490,16 @@ _INDEX_WROTE=0
 #   {"key": k, "add":   {...}}   insert the entry unless k is already indexed
 #   {"key": k, "merge": {...}}   merge fields into an existing entry (else skip)
 #   {"key": k, "del":   true}    delete the entry (absent: no-op)
+#   {"key": k, "unset": [f, …]}  delete those fields from an existing entry
+#                                (else skip); a "merge" in the same row is
+#                                then merged in (undeprecate-entry)
 # `+=` keeps existing field positions and appends new fields, so a merge
 # serializes exactly as the old field-by-field assignments did.
 # shellcheck disable=SC2016  # jq program, not shell expansion
 _INDEX_PATCH='reduce $patch[] as $x (.;
   if ($x | has("del")) then del(.docs[$x.key])
+  elif ($x | has("unset")) then (if (.docs | has($x.key))
+    then .docs[$x.key] |= (delpaths([$x.unset[] | [.]]) + ($x.merge // {})) else . end)
   elif ($x | has("add")) then (if (.docs | has($x.key)) then . else .docs[$x.key] = $x.add end)
   elif ($x | has("merge")) then (if (.docs | has($x.key)) then .docs[$x.key] += $x.merge else . end)
   else error("doc-tools: unknown index patch row: \($x | tojson)") end)'
@@ -2188,7 +2193,7 @@ update-index|cmd_update_index|repo|
   claims carry verification): re-hash, record code_oids (each code ref's
   content in the working tree) and code_commit, stamp last_verified. Run it
   only for a doc you read against its code. A deprecated entry stays
-  deprecated. Reports Refreshed (something recorded changed), Re-verified
+  deprecated (undeprecate-entry lifts it). Reports Refreshed (something recorded changed), Re-verified
   (only last_verified did) or Unchanged (re-baselined this second already). A
   doc whose file is gone is skipped with advice. A path that is not
   indexed is reported and skipped; the others are still applied, and the
@@ -2295,6 +2300,18 @@ deprecate-entry|cmd_deprecate_entry|repo|superseded-by=
   baseline reset. A path that is not indexed is reported and skipped; the
   others are still applied, and the run exits 1 (so an archive step that
   names the old path after move-entry, deprecating nothing, fails).
+undeprecate-entry|cmd_undeprecate_entry|repo|clear-superseded-by
+  [--clear-superseded-by] <doc_path>...
+  Reverse deprecate-entry for a doc back in use (reopened, or deprecated
+  by mistake): drop the stored status, so check-freshness judges the entry
+  current or stale against its recorded baseline again. last_verified and
+  every other field are kept: undeprecating is not a baseline reset. An
+  entry's superseded_by is kept (and said) unless --clear-superseded-by is
+  given, which sets it to null and clears its successor's replaces when
+  that names the doc (a replaces naming another doc is left as it is). An
+  entry not deprecated is reported unchanged. A path that is not indexed
+  is reported and skipped; the others are still applied, and the run
+  exits 1.
 status|cmd_status|repo|tree=
   [--tree <tree-ish>] <doc_path>
   Freshness of one doc (read-only, JSON): the same verdict check-freshness
@@ -3234,7 +3251,8 @@ Doc paths:
 
 Index writes:
   build-index, update-index, add-entry, remove-entry, move-entry,
-  set-code-refs, set-doc-type and deprecate-entry take the lock
+  set-code-refs, set-doc-type, upgrade-entries, deprecate-entry and
+  undeprecate-entry take the lock
   docs/.doc-index.json.lock and replace the index atomically, so they are
   safe to run concurrently and an interrupted run leaves the previous index
   intact. An index that is a symbolic link is refused, writing nothing: the
@@ -3275,7 +3293,9 @@ Stored state (who may re-baseline):
   in place (an index written before v3 typed design specs "spec": retype
   them design-spec). Archiving a doc is git mv into docs/archive/<type>/,
   then move-entry, then deprecate-entry on the new path (which keeps the
-  doc's superseded_by).
+  doc's superseded_by). A doc back in use after a deprecation is
+  undeprecate-entry, never remove-entry + add-entry (which drops its
+  baseline and links).
 
 Spec claims (claims validate, run, promote, render, gate, attest, rulings):
   Claims live in docs/spec-claims/: one <DOC-ID>.json sidecar per governing
@@ -6381,6 +6401,109 @@ cmd_deprecate_entry() {
       echo "WARNING: '$succ' already replaces '$succ_replaces'; replaces holds one path, so it is left as it is." >&2
     fi
   fi
+  if [ "$unknown" -gt 0 ]; then
+    echo "$unknown $([ "$unknown" -eq 1 ] && echo path was || echo paths were) not in the index (see above)." >&2
+    exit 1
+  fi
+}
+
+# The inverse of deprecate-entry (GH #98). status is stored only as
+# "deprecated", so undeprecating deletes it — the shape a git revert of the
+# deprecation leaves, which the merge driver already merges field by field.
+# Before it, a doc back in use (an issue reopened after a retention job
+# deprecated it) could leave "deprecated" only through remove-entry +
+# add-entry, which drops its baseline and links, or a hand edit.
+cmd_undeprecate_entry() {
+  if [ ! -f "$INDEX_FILE" ]; then
+    echo "ERROR: doc-index.json not found at $INDEX_FILE. Run build-index first." >&2
+    exit 1
+  fi
+
+  [ $# -gt 0 ] || _usage_error undeprecate-entry "requires at least one doc path argument"
+
+  local clear=false
+  if _opt_seen clear-superseded-by; then clear=true; fi
+
+  local targets=()
+  _targets_from_args "$@"
+  targets=("${_TARGETS[@]}")
+  set --   # see _targets_from_args: keep function calls O(1) under bash 3.2
+
+  # Undeprecating is not a baseline reset: last_verified is left as it is.
+  _scratch_init
+  local patch="$_SCRATCH/undeprecate-patch.jsonl"
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  jq -nc --argjson clear "$clear" \
+    '$ARGS.positional[] | {key: ., unset: ["status"]}
+       + (if $clear then {merge: {superseded_by: null}} else {} end)' \
+    --args "${targets[@]}" > "$patch"
+
+  # What each target holds is read under the lock the write then takes
+  # (re-entrant), so the report describes the write: per target, whether it
+  # was deprecated, its superseded_by, and whether that successor's replaces
+  # names it (the link --clear-superseded-by clears).
+  _index_lock
+  local snap facts="$_SCRATCH/undeprecate-facts"
+  snap=$(_index_load) || exit 1
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  jq -j '.docs as $d | $ARGS.positional[] | ($d[.] // null) as $e | . as $p
+      | (if ($e | type) == "object" and $e.status == "deprecated" then "1" else "0" end) + "\u0000"
+        + (if ($e | type) == "object" and ($e.superseded_by | type) == "string" then $e.superseded_by else "" end) + "\u0000"
+        + (if ($e | type) == "object" and ($e.superseded_by | type) == "string"
+             and ($d[$e.superseded_by] | type) == "object" and $d[$e.superseded_by].replaces == $p
+           then "1" else "0" end) + "\u0000"' \
+    --args "${targets[@]}" < "$snap" > "$facts" || _die "cannot read $INDEX_FILE"
+  local was=() sup=() links=() w s l
+  while IFS= read -r -d '' w && IFS= read -r -d '' s && IFS= read -r -d '' l; do
+    was+=("$w"); sup+=("$s"); links+=("$l")
+  done < "$facts"
+
+  # shellcheck disable=SC2016  # jq program, not shell expansion
+  _index_apply --report '.docs as $__pre | '"$_INDEX_PATCH"' | if $clear
+      then reduce ($patch[] | .key as $p | ($__pre[$p] // null) as $e
+                   | select(($e | type) == "object" and ($e.superseded_by | type) == "string")
+                   | [$p, $e.superseded_by]) as $ps (.;
+             if (.docs[$ps[1]] | type) == "object" and .docs[$ps[1]].replaces == $ps[0]
+             then .docs[$ps[1]].replaces = null else . end)
+      else . end' \
+    --slurpfile patch "$patch" --argjson clear "$clear"
+
+  local undeprecated=() cleared=() unchanged=() i=0 unknown=0
+  while [ "$i" -lt "${#targets[@]}" ]; do
+    case "${_INDEX_CLASSES:$i:1}" in
+      c)
+        if [ "${was[$i]}" = 1 ]; then
+          undeprecated+=("${targets[$i]}")
+        else
+          cleared+=("${targets[$i]}")
+        fi
+        ;;
+      u) unchanged+=("${targets[$i]}") ;;
+      *)
+        echo "ERROR: '${targets[$i]}' not found in index; skipped (after a move-entry, name the new path)." >&2
+        unknown=$((unknown + 1))
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  _report_keys "Undeprecated" "" "${undeprecated[@]+"${undeprecated[@]}"}"
+  if [ ${#cleared[@]} -gt 0 ]; then
+    _report_keys "Cleared" "(superseded_by only: not deprecated)" "${cleared[@]}"
+  fi
+  if [ ${#unchanged[@]} -gt 0 ]; then
+    _report_keys "Unchanged" "(not deprecated)" "${unchanged[@]}"
+  fi
+  i=0
+  while [ "$i" -lt "${#targets[@]}" ]; do
+    if [ "${_INDEX_CLASSES:$i:1}" = c ] && [ -n "${sup[$i]}" ]; then
+      if [ "$clear" = true ] && [ "${links[$i]}" = 1 ]; then
+        echo "Unlinked: '${sup[$i]}' no longer replaces '${targets[$i]}'." >&2
+      elif [ "$clear" = false ]; then
+        echo "NOTE: '${targets[$i]}' still names superseded_by '${sup[$i]}' (pass --clear-superseded-by to drop the link)." >&2
+      fi
+    fi
+    i=$((i + 1))
+  done
   if [ "$unknown" -gt 0 ]; then
     echo "$unknown $([ "$unknown" -eq 1 ] && echo path was || echo paths were) not in the index (see above)." >&2
     exit 1
