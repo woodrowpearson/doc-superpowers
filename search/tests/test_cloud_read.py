@@ -20,7 +20,7 @@ from fakes import DIMS, FakeFirestore, FakeGenai, text_vector, unit
 
 from doc_search.cloud import CloudUnavailable
 from doc_search.cloud.read import CloudLeg, CorpusStamp, DegradedLeg, build_cloud_leg, resolve_base_ref
-from doc_search.cloud.vertex import VertexEmbedder
+from doc_search.cloud.vertex import CODE_QUERY_TASK, VertexEmbedder
 from doc_search.config import CloudCfg, Config, FirestoreCfg, VertexCfg, load_config
 from doc_search.corpus import Corpus
 from doc_search.docindex import DocIndex
@@ -185,6 +185,16 @@ def test_a_query_embedding_retries_within_one_budget() -> None:
     genai = FakeGenai(script=[api_error(503, "UNAVAILABLE")] * 3)
     assert embedder(genai).embed_documents(["a"]).shape == (1, DIMS)
     assert len(genai.calls) == 4 and slept == [1.0, 2.0, 4.0]
+
+
+def test_embed_query_passes_the_task() -> None:
+    genai = FakeGenai()
+    embedder = VertexEmbedder(cloud_cfg(), client=genai)
+
+    embedder.embed_query("q", CODE_QUERY_TASK)
+    embedder.embed_query("q")
+
+    assert [call.task_type for call in genai.calls] == ["CODE_RETRIEVAL_QUERY", "RETRIEVAL_QUERY"]
 
 
 def test_vertex_unavailable_reasons(monkeypatch: pytest.MonkeyPatch) -> None:

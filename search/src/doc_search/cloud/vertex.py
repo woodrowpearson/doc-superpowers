@@ -25,6 +25,7 @@ BACKOFF_S = 1.0  # the first retry waits about this long, the next twice that, .
 BACKOFF_CAP_S = 30.0
 
 QUERY_TASK = "RETRIEVAL_QUERY"
+CODE_QUERY_TASK = "CODE_RETRIEVAL_QUERY"
 DOCUMENT_TASK = "RETRIEVAL_DOCUMENT"
 
 
@@ -74,9 +75,9 @@ class VertexEmbedder:
 
     # -- public ------------------------------------------------------------------------------
 
-    def embed_query(self, text: str) -> np.ndarray:
-        """The unit vector of one query, shape (dimensions,)."""
-        return self._embed([text], QUERY_TASK, budget_s=self._timeout_s)[0]
+    def embed_query(self, text: str, task: str = QUERY_TASK) -> np.ndarray:
+        """The unit vector of one query, shape (dimensions,); `task` is its task type (docs or code)."""
+        return self._embed([text], task, budget_s=self._timeout_s)[0]
 
     def embed_documents(self, texts: Sequence[str]) -> np.ndarray:
         """The unit vectors of `texts`, shape (len(texts), dimensions), embedded 200 at a time."""
