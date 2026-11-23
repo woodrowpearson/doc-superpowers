@@ -1,9 +1,9 @@
 """Vertex AI embeddings through `google-genai` (design section 8).
 
-Query vectors use the `RETRIEVAL_QUERY` task type and document vectors `RETRIEVAL_DOCUMENT`, both
-`gemini-embedding-001` at the configured dimensions (768). The API does not normalize a truncated
-vector, so every row is L2-normalized here. Documents go in batches of 200; a 429, a 5xx or a
-deadline is retried 3 times with exponential backoff and jitter.
+Query vectors use the `RETRIEVAL_QUERY` task type (`CODE_RETRIEVAL_QUERY` for the code leg's queries) and
+document vectors `RETRIEVAL_DOCUMENT`, all `gemini-embedding-001` at the configured dimensions (768). The API
+does not normalize a truncated vector, so every row is L2-normalized here. Documents go in batches of 200; a
+429, a 5xx or a deadline is retried 3 times with exponential backoff and jitter.
 """
 
 from __future__ import annotations
