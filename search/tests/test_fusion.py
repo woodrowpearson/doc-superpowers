@@ -6,7 +6,16 @@ import math
 
 import pytest
 
-from doc_search.fusion import collapse_by_file, fuse_by_file, interleave_with_floor, rrf
+from doc_search.fusion import (
+    CODE_CLOUD_WEIGHT,
+    collapse_by_file,
+    fuse_by_file,
+    fuse_code,
+    identifier_shaped,
+    interleave_with_floor,
+    rrf,
+    weighted_rrf,
+)
 from doc_search.types import Hit
 
 
@@ -218,3 +227,73 @@ def test_fuse_by_file_missing_and_empty_legs() -> None:
 def test_fuse_by_file_needs_a_preference_for_every_leg() -> None:
     with pytest.raises(ValueError):
         fuse_by_file({}, rank_order=["docs", "cloud"], prefer=["docs"])
+
+
+# --- the code cloud leg: identifier-shaped queries, weighted RRF, fuse_code ------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["ItemDetailSheet", "make_index", "a/b.py", "v3.20", "HTTPServer", "getURL", "APIs", "`make_index`,"],
+)
+def test_identifier_shaped(query: str) -> None:
+    assert identifier_shaped(query)
+    assert identifier_shaped(f"where is {query} used")  # one such word is enough
+
+
+@pytest.mark.parametrize("query", ["where is the refund rounded", "end-to-end", "CTA", "", "URL", "the end."])
+def test_identifier_shaped_not(query: str) -> None:
+    assert not identifier_shaped(query)
+
+
+def test_weighted_rrf_weights() -> None:
+    fused = weighted_rrf([["a", "b"], ["b", "c"]], [1.0, 10.0])
+    assert [key for key, _ in fused] == ["b", "c", "a"]
+    scores = dict(fused)
+    assert scores["b"] == pytest.approx(1 / 62 + 10 / 61, abs=1e-9)
+    assert scores["c"] == pytest.approx(10 / 62, abs=1e-9)
+    assert scores["a"] == pytest.approx(1 / 61, abs=1e-9)
+    # rrf is the weighted form with every weight 1, ties and all
+    lists = [["a", "b", "c"], ["b", "a"]]
+    assert rrf(lists) == weighted_rrf(lists, [1.0, 1.0])
+    assert weighted_rrf([["x"]], [2.0], k=10) == [("x", pytest.approx(2 / 11))]
+    with pytest.raises(ValueError):
+        weighted_rrf([["a"], ["b"]], [1.0])
+
+
+def local_code(path: str, start: int = 1) -> Hit:
+    text = f"local:{path}:{start}"
+    return Hit(kind="code", path=path, start_line=start, end_line=start + 5, snippet=text, legs=("code",))
+
+
+def cloud_code(path: str, start: int = 1) -> Hit:
+    text = f"cloud:{path}:{start}"
+    return Hit(kind="code", path=path, start_line=start, end_line=start + 5, snippet=text, legs=("cloud-code",))
+
+
+def test_fuse_code_leans_on_cloud() -> None:
+    assert CODE_CLOUD_WEIGHT == 10.0
+    local = [local_code("a.py"), local_code("b.py"), local_code("c.py")]
+    cloud = [cloud_code("d.py"), cloud_code("c.py", 40)]
+    hits = fuse_code(local, cloud)
+    # c: 1/63 + 10/62; d: 10/61; a: 1/61; b: 1/62 -- the cloud's first file (d) is above the local's first (a)
+    assert [h.path for h in hits] == ["c.py", "d.py", "a.py", "b.py"]
+    by_path = {h.path: h for h in hits}
+    assert by_path["d.py"].legs == ("cloud-code",) and by_path["d.py"].snippet == "cloud:d.py:1"
+    assert by_path["c.py"].legs == ("code", "cloud-code")
+    assert (by_path["c.py"].start_line, by_path["c.py"].snippet) == (1, "local:c.py:1"), "the local chunk represents it"
+    assert by_path["a.py"].legs == ("code",)
+    assert fuse_code(local, []) == local
+    assert fuse_code([], []) == []
+
+
+def test_fuse_code_more_in_file_sums() -> None:
+    local = [local_code("a.py", 1), local_code("b.py"), local_code("a.py", 20)]
+    cloud = [cloud_code("a.py", 40), cloud_code("a.py", 80), cloud_code("a.py", 90), cloud_code("e.py")]
+    hits = fuse_code(local, cloud)
+    by_path = {h.path: h for h in hits}
+    assert len(hits) == 3 and [h.path for h in hits][0] == "a.py"
+    assert (by_path["a.py"].start_line, by_path["a.py"].more_in_file) == (1, 1 + 2)
+    assert by_path["b.py"].more_in_file == 0 and by_path["e.py"].more_in_file == 0
+    # only one leg found it: that leg's own count
+    assert fuse_code([], cloud)[0].more_in_file == 2

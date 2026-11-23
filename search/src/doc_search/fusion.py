@@ -1,11 +1,14 @@
 """Rank fusion for the join: reciprocal rank fusion, one hit per file, a floor per kind.
 
 RRF is rank-based, so semble's fused scores and cosine similarities never have to be compared.
+The code cloud leg joins the local code leg by weighted RRF (`fuse_code`), and only for a query
+that is not identifier-shaped (`identifier_shaped`): on a name, the local leg alone answers.
 """
 
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import replace
 from typing import TypeVar
@@ -15,23 +18,60 @@ from .types import Hit
 K = TypeVar("K", bound=Hashable)
 
 RRF_K = 60
+CODE_CLOUD_WEIGHT = 10.0  # the code cloud leg against the local code leg's 1 (the spike's best on paraphrases)
+
+_SHAPE_STRIP = "`'\"()[]{},:;?! "
+# a lowercase letter or digit, then an uppercase one (`getURL`); two uppercase, then a lowercase (`HTTPServer`, `APIs`)
+_SHAPE_CASE = re.compile(r"[a-z0-9][A-Z]|[A-Z]{2}[a-z]")
 
 
-def rrf(lists: Sequence[Sequence[K]], k: int = RRF_K) -> list[tuple[K, float]]:
-    """Reciprocal rank fusion: a key's score is the sum of 1 / (k + rank) over the lists naming it.
+def weighted_rrf(lists: Sequence[Sequence[K]], weights: Sequence[float], k: int = RRF_K) -> list[tuple[K, float]]:
+    """Weighted reciprocal rank fusion: a key's score is the sum of weight / (k + rank) over the lists naming it.
 
-    Ranks start at 1; a key repeated within one list counts at its first place only. Best score
-    first; equal scores keep the order of first appearance (earlier list, then earlier place).
+    `weights[i]` is the weight of `lists[i]`. Ranks start at 1; a key repeated within one list counts
+    at its first place only. Best score first; equal scores keep the order of first appearance
+    (earlier list, then earlier place).
     """
+    if len(weights) != len(lists):
+        raise ValueError("weights must have one weight per list")
     scores: dict[K, float] = {}
-    for ranked in lists:
+    for ranked, weight in zip(lists, weights, strict=True):
         seen: set[K] = set()
         for rank, key in enumerate(ranked, start=1):
             if key in seen:
                 continue
             seen.add(key)
-            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+            scores[key] = scores.get(key, 0.0) + weight / (k + rank)
     return sorted(scores.items(), key=lambda item: -item[1])  # sorted() is stable
+
+
+def rrf(lists: Sequence[Sequence[K]], k: int = RRF_K) -> list[tuple[K, float]]:
+    """Reciprocal rank fusion: `weighted_rrf` with every list weighing 1."""
+    return weighted_rrf(lists, [1.0] * len(lists), k)
+
+
+def identifier_shaped(query: str) -> bool:
+    """True when a word of `query` looks like a code name: the code cloud leg is then not asked.
+
+    A whitespace word qualifies when, stripped of surrounding quotes, brackets and punctuation and of a
+    final `.`, it has at least 4 characters and contains `_`, `.`, `/` or a digit, a lowercase letter or
+    digit followed by an uppercase one (`ItemDetailSheet`, `getURL`), or two uppercase letters followed
+    by a lowercase one (`HTTPServer`, `APIs`). `CTA` and `end-to-end` do not.
+    """
+    for word in query.split():
+        token = word
+        while True:
+            cleaned = token.strip(_SHAPE_STRIP)
+            if cleaned.endswith("."):
+                cleaned = cleaned[:-1]
+            if cleaned == token:
+                break
+            token = cleaned
+        if len(token) < 4:
+            continue
+        if any(c in "_./" or c.isdigit() for c in token) or _SHAPE_CASE.search(token):
+            return True
+    return False
 
 
 def collapse_by_file(hits: list[Hit]) -> list[Hit]:
@@ -88,6 +128,32 @@ def fuse_by_file(
         hits.append(replace(rep, legs=tuple(named)) if len(found) > 1 else rep)
         scores.append(score)
     return hits, scores
+
+
+def fuse_code(local: Sequence[Hit], cloud: Sequence[Hit]) -> list[Hit]:
+    """The local code leg's hits and the code cloud leg's, fused per file, best first.
+
+    Each leg is collapsed to its best chunk per file first (its other chunks counted in `more_in_file`),
+    then the files are ranked by weighted RRF, the cloud weighing CODE_CLOUD_WEIGHT to the local leg's 1.
+    A file both legs found is shown by the local chunk, naming the legs of both, its `more_in_file` the
+    sum of the two legs' counts. With no cloud hits the local hits come back as they are.
+    """
+    if not cloud:
+        return list(local)
+    mine = collapse_by_file(list(local))
+    theirs = collapse_by_file(list(cloud))
+    local_by_path = {hit.path: hit for hit in mine}
+    cloud_by_path = {hit.path: hit for hit in theirs}
+    fused = weighted_rrf([[hit.path for hit in theirs], [hit.path for hit in mine]], [CODE_CLOUD_WEIGHT, 1.0])
+    out: list[Hit] = []
+    for path, _ in fused:
+        near, far = local_by_path.get(path), cloud_by_path.get(path)
+        if near is not None and far is not None:
+            legs = near.legs + tuple(leg for leg in far.legs if leg not in near.legs)
+            out.append(replace(near, legs=legs, more_in_file=near.more_in_file + far.more_in_file))
+        else:  # one leg found it: that leg's hit, as it is
+            out.append(near if near is not None else cloud_by_path[path])
+    return out
 
 
 def interleave_with_floor(

@@ -1434,3 +1434,201 @@ def test_header_names_the_static_model_while_the_transformer_index_builds(
     assert done.header.docs_model == "transformer:test-tiny" and done.header.notes == ()
     head = render_search(done).splitlines()[0]
     assert head.startswith("doc-search · docs: semble transformer:test-tiny · code: semble ")
+
+
+# --- the code cloud leg ------------------------------------------------------------------------------
+
+
+def code_cloud_hit(path: str, start: int = 1, end: int = 5) -> Hit:
+    text = f"cloud code {path}"
+    return Hit(kind="code", path=path, start_line=start, end_line=end, snippet=text, legs=("cloud-code",))
+
+
+def code_cloud_world(repo, tiny_model: str, code_chunks: list[FakeChunk], *, extra_code=(), **kw) -> Searcher:
+    """A searcher over fake indexes: docs d0..d3 committed, d0 in the docs index; the code index holds `code_chunks`
+    and indexes `extra_code` too (files none of its answers name)."""
+    for i in range(4):
+        repo.write(f"docs/d{i}.md", f"# Doc {i}\n\nrefund rounding {i}.\n")
+    repo.commit("docs")
+    cfg = make_cfg(repo, tiny_model)
+    docs = FakeIndex([FakeChunk("docs/d0.md", 1, 3, "d0 local")])
+    code = FakeIndex(code_chunks)
+    pool = FakePool(
+        WorktreeIndexes(docs=docs, code=code),
+        docs={"docs/d0.md"},
+        code={c.file_path for c in code_chunks} | set(extra_code),
+    )
+    return stub_searcher(cfg, repo, pool, **kw)
+
+
+CODE_CHUNKS = [
+    FakeChunk("src/c0.py", 1, 2, "c0 a"),
+    FakeChunk("src/c1.py", 1, 2, "c1"),
+    FakeChunk("src/c2.py", 1, 2, "c2"),
+    FakeChunk("src/c0.py", 10, 12, "c0 b"),
+]
+
+
+def ask(searcher: Searcher, repo, query: str = "refund rounding", **kw) -> SearchResponse:
+    resp = searcher.search(SearchRequest(query=query, **kw), repo.root)
+    assert isinstance(resp, SearchResponse), resp
+    return resp
+
+
+def test_scope_code_fuses_the_code_cloud_leg(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    code_cloud = SlowCloud(delay=0.0, answer=[code_cloud_hit("src/c2.py", 40, 60), code_cloud_hit("src/c9.py")])
+    searcher = code_cloud_world(repo, tiny_model, CODE_CHUNKS, extra_code={"src/c9.py"}, code_cloud=code_cloud)
+
+    resp = ask(searcher, repo, scope="code", limit=10)
+
+    # c2: local 3rd file (1/63) + cloud 1st (10/61); c9: cloud 2nd (10/62); c0: 1/61; c1: 1/62
+    assert paths(resp) == ["src/c2.py", "src/c9.py", "src/c0.py", "src/c1.py"]
+    c2, c9, c0, _ = resp.hits
+    assert c2.legs == ("code", "cloud-code") and (c2.start_line, c2.snippet) == (1, "c2"), "the local chunk shows it"
+    assert c9.legs == ("cloud-code",) and c9.snippet == "cloud code src/c9.py"
+    assert c0.more_in_file == 1
+    query, _, worktree, fetch = code_cloud.calls[0]
+    assert (query, worktree, fetch) == ("refund rounding", repo.root, 30), "limit x 3 chunks"
+    assert code_cloud.threads == ["doc-search-cloud-code-leg"], "off the searching thread"
+    assert resp.header.notes == ()
+
+
+def test_code_cloud_allowed_set_excludes_docs_corpus(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    code_cloud = FakeCloud(
+        answer=[code_cloud_hit("docs/d3.md"), code_cloud_hit("src/unindexed.py"), code_cloud_hit("src/c9.py")]
+    )
+    # the code index holds a corpus file (docs/d3.md): the cloud is never asked about it
+    searcher = code_cloud_world(
+        repo, tiny_model, CODE_CHUNKS, extra_code={"src/c9.py", "docs/d3.md"}, code_cloud=code_cloud
+    )
+
+    resp = ask(searcher, repo, scope="code", limit=10)
+
+    _, allowed, _, _ = code_cloud.calls[0]
+    assert allowed == {"src/c0.py", "src/c1.py", "src/c2.py", "src/c9.py"}
+    assert "docs/d3.md" not in paths(resp) and "src/unindexed.py" not in paths(resp), "a hit outside it is dropped"
+    assert "src/c9.py" in paths(resp)
+
+
+def test_no_code_cloud_is_todays_code_list(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    searcher = code_cloud_world(repo, tiny_model, CODE_CHUNKS)
+
+    resp = ask(searcher, repo, scope="code", limit=10)
+
+    assert paths(resp) == ["src/c0.py", "src/c1.py", "src/c2.py", "src/c0.py"], "chunks, as the local leg ranks them"
+    assert all(hit.legs == ("code",) and hit.more_in_file == 0 for hit in resp.hits)
+    assert searcher.code_cloud_wait_s == 10 + 5 + 1, "no cloud config: the default code timeout"
+
+
+def test_identifier_query_skips_the_code_cloud(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    code_cloud = FakeCloud(answer=[code_cloud_hit("src/c2.py")])
+    searcher = code_cloud_world(repo, tiny_model, CODE_CHUNKS, code_cloud=code_cloud)
+    plain = stub_searcher(searcher.cfg, repo, searcher._pool)
+
+    for scope in ("code", "all"):
+        resp = ask(searcher, repo, "where is make_index called", scope=scope, limit=10)
+        assert resp.hits == ask(plain, repo, "where is make_index called", scope=scope, limit=10).hits
+    assert code_cloud.calls == []
+
+
+def test_scope_docs_never_asks_the_code_cloud(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    code_cloud = FakeCloud(answer=[code_cloud_hit("src/c2.py")])
+    searcher = code_cloud_world(repo, tiny_model, CODE_CHUNKS, code_cloud=code_cloud)
+
+    resp = ask(searcher, repo, scope="docs")
+
+    assert paths(resp, "code") == [] and code_cloud.calls == []
+
+
+def test_path_prefix_skips_the_code_cloud(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    code_cloud = FakeCloud(answer=[code_cloud_hit("src/c2.py")])
+    searcher = code_cloud_world(repo, tiny_model, CODE_CHUNKS, code_cloud=code_cloud)
+
+    for scope in ("code", "all"):
+        resp = ask(searcher, repo, scope=scope, path_prefix="src/", limit=10)
+        assert all(hit.legs == ("code",) for hit in resp.hits if hit.kind == "code")
+    assert code_cloud.calls == []
+
+
+def test_scope_all_doc_kind_code_hits_keep_their_place(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    # the code index holds a corpus file: d3 comes back from it as a doc hit, second in the code list
+    chunks = [CODE_CHUNKS[0], FakeChunk("docs/d3.md", 1, 3, "d3 via code"), *CODE_CHUNKS[1:3]]
+    code_cloud = FakeCloud(answer=[code_cloud_hit("src/c2.py", 40, 60)])
+    searcher = code_cloud_world(repo, tiny_model, chunks, code_cloud=code_cloud)
+    plain = stub_searcher(searcher.cfg, repo, searcher._pool)
+
+    before = ask(plain, repo, limit=10)
+    resp = ask(searcher, repo, limit=10)
+
+    # docs [d0]; the code list [c0, d3, c1, c2] becomes [c2, d3, c0, c1]: d3 keeps its place, the fused
+    # code hits fill the others in order; the join is the interleave it always was (a tie goes to the docs list)
+    assert paths(before) == ["docs/d0.md", "src/c0.py", "docs/d3.md", "src/c1.py", "src/c2.py"]
+    assert paths(resp) == ["docs/d0.md", "src/c2.py", "docs/d3.md", "src/c0.py", "src/c1.py"]
+    d3 = resp.hits[2]
+    assert d3.kind == "doc" and d3.legs == ("code",)
+    assert resp.hits[1].legs == ("code", "cloud-code")
+
+
+def test_code_cloud_failure_keeps_local_code(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    plain = code_cloud_world(repo, tiny_model, CODE_CHUNKS)
+    local = ask(plain, repo, scope="code", limit=10).hits
+    pool = plain._pool
+
+    raising = stub_searcher(plain.cfg, repo, pool, code_cloud=FakeCloud(raises=RuntimeError("boom")))
+    resp = ask(raising, repo, scope="code", limit=10)
+    assert resp.hits == local
+    assert resp.header.notes == ("cloud code failed: RuntimeError: boom",)
+
+    noted = FakeCloud(note="cloud code skipped: stamp abc1234 not fetched")
+    resp = ask(stub_searcher(plain.cfg, repo, pool, code_cloud=noted), repo, scope="code", limit=10)
+    assert resp.hits == local
+    assert resp.header.notes == ("cloud code skipped: stamp abc1234 not fetched",)
+
+
+def test_code_cloud_timeout_is_its_own_budget(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    plain = code_cloud_world(repo, tiny_model, CODE_CHUNKS)
+    local = ask(plain, repo, scope="code", limit=10).hits
+    release = threading.Event()
+
+    class Hung:
+        deadline_s = 0.2
+
+        def hits(self, query, allowed, worktree, limit, doc_types=()):
+            release.wait(30)  # past the code budget, well within the docs one
+            return [code_cloud_hit("src/c2.py")], None
+
+    searcher = stub_searcher(plain.cfg, repo, plain._pool, code_cloud=Hung(), cloud_wait_s=30)
+    assert searcher.code_cloud_wait_s == pytest.approx(1.2), "the code leg's own deadline and the join margin"
+    assert searcher.cloud_wait_s == 30
+    try:
+        started = time.monotonic()
+        resp = ask(searcher, repo, scope="code", limit=10)
+        took = time.monotonic() - started
+    finally:
+        release.set()  # let the abandoned worker finish
+
+    assert resp.hits == local
+    assert resp.header.notes == ("cloud code failed: TimeoutError: no answer within 1.2 s",)
+    assert took < searcher.code_cloud_wait_s + 1
+
+
+def test_the_code_cloud_wait_follows_the_configured_timeout(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    cfg = make_cfg(
+        repo,
+        tiny_model,
+        cloud={"timeout_s": 12, "code": {"timeout_s": 3}, "vertex": {"project": "p"}, "firestore": {"project": "p"}},
+    )
+    pool = FakePool(WorktreeIndexes())
+    assert stub_searcher(cfg, repo, pool, code_cloud=FakeCloud()).code_cloud_wait_s == 3 + 5 + 1
+    assert stub_searcher(cfg, repo, pool, code_cloud=FakeCloud()).cloud_wait_s == 12 + 5 + 1, "the docs wait unchanged"
