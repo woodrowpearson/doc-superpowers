@@ -465,11 +465,12 @@ The `docs/.doc-index.json` file is the machine-readable freshness index. It foll
 - **`upgrade-entries`** fills `code_oids` on entries written before schema 3 from each ref's content at the entry's stored `code_commit` (GH #21). Only `code_oids` is written: it is not a baseline reset, and `last_verified` is kept. An entry it cannot fill is reported and left as it is; the rest are applied, and it exits 1
 - **`remove-entry`** deletes entries by path. A path that is not indexed is a `SKIP` with exit 0: the entry being absent is the end state asked for, so removing twice is safe
 - **`deprecate-entry`** stores `status: "deprecated"` (and `--superseded-by`, which also sets the successor's `replaces`). It does not touch `last_verified`
+- **`undeprecate-entry`** reverses it for a doc back in use (GH #98): it drops the stored `status` and keeps `last_verified` and every other field, so `check-freshness` judges the entry again. `superseded_by` is kept unless `--clear-superseded-by` is given, which also clears a successor's `replaces` that names the doc. A path not indexed is reported and skipped, exit 1
 - **`check-freshness`** is read-only (reports staleness without modifying)
 - **`status`** reports one doc's freshness (read-only): the verdict `check-freshness` gives for it
 - **`audit-merges`** works out what each merge in a range should have recorded (the changed side's index when only one side changed it, else the merge driver run as an oracle) and reports the entries a recorded merge got differently (read-only, GH #25)
 
-Those nine writers (`build-index`, `add-entry`, `update-index`, `set-code-refs`, `set-doc-type`, `upgrade-entries`, `move-entry`, `remove-entry`, `deprecate-entry`) are the only ones that write the index. They take its lock and replace it atomically. `implementation-status` and `fragments list|validate` read without writing, and `set-implementation` edits one doc's realization block, not the index. The `claims` verbs never write the index either: they write only sidecars and gate records under `docs/spec-claims/`, a governing doc's generated claim status block, and the local verdict store under the git directory. Nor do the `ledger` verbs, which read it: they write item files (their frontmatter and `## Log` / `## Rulings` lines), `docs/ledger/` (config, registry, legacy and finalized maps), the cache `<git common dir>/doc-superpowers/ledger/`, and on the remote the counter ref, the in-flight refs and the views branch.
+Those ten writers (`build-index`, `add-entry`, `update-index`, `set-code-refs`, `set-doc-type`, `upgrade-entries`, `move-entry`, `remove-entry`, `deprecate-entry`, `undeprecate-entry`) are the only ones that write the index. They take its lock and replace it atomically. `implementation-status` and `fragments list|validate` read without writing, and `set-implementation` edits one doc's realization block, not the index. The `claims` verbs never write the index either: they write only sidecars and gate records under `docs/spec-claims/`, a governing doc's generated claim status block, and the local verdict store under the git directory. Nor do the `ledger` verbs, which read it: they write item files (their frontmatter and `## Log` / `## Rulings` lines), `docs/ledger/` (config, registry, legacy and finalized maps), the cache `<git common dir>/doc-superpowers/ledger/`, and on the remote the counter ref, the in-flight refs and the views branch.
 
 ### Freshness Model
 
@@ -504,8 +505,9 @@ Only `deprecated` is **stored**. `current`, `stale` and `missing` are **computed
 | any but `deprecated` / `missing` | `current` (computed, `"record": true`) | Record docs (`plan`, `issue`, `audit`, `design-spec`, `docs/archive/`) are never compared |
 | any | `deprecated` (stored) | `deprecate-entry`: a human decision, or spec supersession via `spec-generate` (`--superseded-by` also sets the successor's `replaces`) |
 | `deprecated` | — | Terminal for automated tools: `update-index`, `move-entry`, `set-code-refs`, `set-doc-type` and `build-index --force` all keep it |
+| `deprecated` | `current` / `stale` (computed) | `undeprecate-entry`: a human decision (the doc is back in use); the recorded baseline and `last_verified` are kept |
 
-`deprecated` is a terminal state for automated tools.
+`deprecated` is a terminal state for automated tools; only `undeprecate-entry`, run by a person, lifts it.
 
 ### Entry Schema
 
