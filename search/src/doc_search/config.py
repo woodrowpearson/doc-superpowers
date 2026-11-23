@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pathspec import PathSpec
+
 from .transformer import PREFIX, TransformerSpec, UnknownTransformer, parse_model
 
 INERT_LINE = "doc-search: not enabled (no docs/search/config.json)"
@@ -61,8 +63,24 @@ _VERSION = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)")
 # `requires`'s one form: a floor, `>=` and a version.
 _REQUIRES_PREFIX = ">="
 
+# The cloud code leg's stamp and lease documents (in `cloud.firestore.meta_collection`), its default
+# collection, and its own per-call budget.
+CODE_STAMP_DOC = "code-index"
+CODE_LEASE_DOC = "code_catch_up_lease"
+DEFAULT_CODE_COLLECTION = "code_chunks"
+DEFAULT_CODE_TIMEOUT_S = 10.0
+
+# What `cloud.code` merges over when the config gives an object.
+CLOUD_CODE_DEFAULTS: dict[str, Any] = {
+    "collection": DEFAULT_CODE_COLLECTION,
+    "exclude": [],
+    "timeout_s": DEFAULT_CODE_TIMEOUT_S,
+}
+
 # What `cloud` merges over when the config gives an object.
 CLOUD_DEFAULTS: dict[str, Any] = {
+    "docs": True,
+    "code": None,
     "timeout_s": DEFAULT_TIMEOUT_S,
     "vertex": {
         "project": None,
@@ -128,10 +146,19 @@ class FirestoreCfg:
 
 
 @dataclass(frozen=True)
+class CloudCodeCfg:
+    collection: str
+    exclude: tuple[str, ...]
+    timeout_s: float
+
+
+@dataclass(frozen=True)
 class CloudCfg:
     vertex: VertexCfg
     firestore: FirestoreCfg
     timeout_s: float = DEFAULT_TIMEOUT_S  # per call to Vertex or Firestore; none is retried by the library
+    docs: bool = True  # the docs leg; `cloud.docs: false` leaves only the code leg
+    code: CloudCodeCfg | None = None  # the code leg, off unless `cloud.code` is an object
 
     @property
     def deadline_s(self) -> float:
@@ -186,6 +213,11 @@ def load_config(top: Path, env: Mapping[str, str] = os.environ) -> Config | None
     code = _code(_section(merged, "code"))
     search = _search(_section(merged, "search"))
     cloud = _cloud(merged["cloud"], env.get("GOOGLE_CLOUD_PROJECT") or None)
+    if cloud is not None:  # before the environment override, so a bad config is reported whatever the environment
+        if not cloud.docs and cloud.code is None:
+            raise ConfigError("cloud.docs is false and cloud.code is null: cloud would do nothing")
+        if cloud.code is not None and not code.enabled:
+            raise ConfigError("cloud.code needs code.enabled: true (the cloud code leg fuses with the local code leg)")
     if env.get("DOC_SEARCH_CLOUD", "").strip() == "0":
         cloud = None
     required = merged["required"]
@@ -233,6 +265,8 @@ def _reject_unknown(given: Mapping[str, Any], known: Mapping[str, Any], prefix: 
         dotted = f"{prefix}{key}"
         if dotted == "cloud" and isinstance(value, dict):
             _reject_unknown(value, CLOUD_DEFAULTS, "cloud.")
+        elif dotted == "cloud.code" and isinstance(value, dict):
+            _reject_unknown(value, CLOUD_CODE_DEFAULTS, "cloud.code.")
         elif dotted == "docs.types" and isinstance(value, list):
             for i, rule in enumerate(value):
                 if isinstance(rule, dict):
@@ -256,10 +290,29 @@ def _str(value: Any, key: str, *, nullable: bool = False) -> Any:
     return value
 
 
+def compile_globs(patterns: tuple[str, ...], where: str) -> PathSpec:
+    """A gitignore-style matcher of `patterns`; ConfigError naming `where` for an invalid one. pathspec 1.x
+    names the factory `gitignore`; 0.x `gitwildmatch`."""
+    try:
+        try:
+            return PathSpec.from_lines("gitignore", patterns)
+        except KeyError:
+            return PathSpec.from_lines("gitwildmatch", patterns)
+    except (ValueError, re.error) as err:  # pathspec: a malformed pattern, or one that makes a bad regex (`[z-a]`)
+        raise ConfigError(f"{where} has an invalid pattern: {err}") from err
+
+
 def _str_list(value: Any, key: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
         raise ConfigError(f"{key} must be an array of non-empty strings")
     return tuple(value)
+
+
+def _globs(value: Any, key: str) -> tuple[str, ...]:
+    """A non-empty string list whose globs compile: an invalid one is a config error at load, not at each use."""
+    patterns = _str_list(value, key)
+    compile_globs(patterns, key)
+    return patterns
 
 
 def _int(value: Any, key: str, *, minimum: int, maximum: int | None = None) -> int:
@@ -359,6 +412,16 @@ def _cloud(value: Any, env_project: str | None) -> CloudCfg | None:
     merged = _merge(CLOUD_DEFAULTS, value)
     vertex = _section(merged, "vertex", "cloud.vertex")
     firestore = _section(merged, "firestore", "cloud.firestore")
+    docs = merged["docs"]
+    if not isinstance(docs, bool):
+        raise ConfigError("cloud.docs must be true or false")
+    firestore_cfg = FirestoreCfg(
+        project=_str(firestore["project"], "cloud.firestore.project", nullable=True) or env_project,
+        database=_str(firestore["database"], "cloud.firestore.database"),
+        collection=_str(firestore["collection"], "cloud.firestore.collection"),
+        meta_collection=_str(firestore["meta_collection"], "cloud.firestore.meta_collection"),
+        base_ref=_str(firestore["base_ref"], "cloud.firestore.base_ref", nullable=True),
+    )
     return CloudCfg(
         vertex=VertexCfg(
             project=_str(vertex["project"], "cloud.vertex.project", nullable=True) or env_project,
@@ -366,12 +429,29 @@ def _cloud(value: Any, env_project: str | None) -> CloudCfg | None:
             model=_str(vertex["model"], "cloud.vertex.model"),
             dimensions=_int(vertex["dimensions"], "cloud.vertex.dimensions", minimum=1),
         ),
-        firestore=FirestoreCfg(
-            project=_str(firestore["project"], "cloud.firestore.project", nullable=True) or env_project,
-            database=_str(firestore["database"], "cloud.firestore.database"),
-            collection=_str(firestore["collection"], "cloud.firestore.collection"),
-            meta_collection=_str(firestore["meta_collection"], "cloud.firestore.meta_collection"),
-            base_ref=_str(firestore["base_ref"], "cloud.firestore.base_ref", nullable=True),
-        ),
+        firestore=firestore_cfg,
         timeout_s=_seconds(merged["timeout_s"], "cloud.timeout_s"),
+        docs=docs,
+        code=_cloud_code(merged["code"], firestore_cfg),
+    )
+
+
+def _cloud_code(value: Any, firestore: FirestoreCfg) -> CloudCodeCfg | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ConfigError("cloud.code must be an object or null")
+    merged = _merge(CLOUD_CODE_DEFAULTS, value)
+    collection = _str(merged["collection"], "cloud.code.collection")
+    # the code writer prunes every path it does not hold: sharing a collection would delete the docs' chunks
+    for other, key in ((firestore.collection, "collection"), (firestore.meta_collection, "meta_collection")):
+        if collection == other:
+            raise ConfigError(
+                f"cloud.code.collection must differ from cloud.firestore.{key} ({other!r}): "
+                "the code corpus needs a collection of its own"
+            )
+    return CloudCodeCfg(
+        collection=collection,
+        exclude=_globs(merged["exclude"], "cloud.code.exclude"),
+        timeout_s=_seconds(merged["timeout_s"], "cloud.code.timeout_s"),
     )

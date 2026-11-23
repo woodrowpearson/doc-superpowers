@@ -8,6 +8,13 @@ Default:    off. docs/search/config.json turns it on ({} is complete);
             Needs uv, git and jq. The first build downloads packages and an
             embedding model; model gte (transformer:gte-modernbert-base) is
             a larger download and a long first build.
+            The cloud legs are off too: "cloud" in the config sends the
+            docs to Google Cloud (Vertex, Firestore), and "cloud": {"code":
+            {}} the code as well; doc-superpowers search index --cloud
+            [--corpus docs|code] writes them from the base branch.
+            A search header's "local-only: code (failed)" says a cloud leg
+            did not answer: a session asks the user once before relying
+            on it (failed only; timeout, no-stamp and building never ask).
 Terminal:   doc-superpowers setup --set search=on [--set search.model=gte]
             doc-superpowers search init | index | query "<text>" | status
             doc-superpowers hooks install --search    (needs the config)

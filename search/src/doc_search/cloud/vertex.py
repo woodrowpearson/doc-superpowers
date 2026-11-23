@@ -1,9 +1,9 @@
 """Vertex AI embeddings through `google-genai` (design section 8).
 
-Query vectors use the `RETRIEVAL_QUERY` task type and document vectors `RETRIEVAL_DOCUMENT`, both
-`gemini-embedding-001` at the configured dimensions (768). The API does not normalize a truncated
-vector, so every row is L2-normalized here. Documents go in batches of 200; a 429, a 5xx or a
-deadline is retried 3 times with exponential backoff and jitter.
+Query vectors use the `RETRIEVAL_QUERY` task type (`CODE_RETRIEVAL_QUERY` for the code leg's queries) and
+document vectors `RETRIEVAL_DOCUMENT`, all `gemini-embedding-001` at the configured dimensions (768). The API
+does not normalize a truncated vector, so every row is L2-normalized here. Documents go in batches of 200; a
+429, a 5xx or a deadline is retried 3 times with exponential backoff and jitter.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from ..config import CloudCfg
+from ..config import CloudCfg, VertexCfg
 from . import CloudUnavailable, LazyClient, import_module
 
 BATCH_SIZE = 200
@@ -25,7 +25,13 @@ BACKOFF_S = 1.0  # the first retry waits about this long, the next twice that, .
 BACKOFF_CAP_S = 30.0
 
 QUERY_TASK = "RETRIEVAL_QUERY"
+CODE_QUERY_TASK = "CODE_RETRIEVAL_QUERY"
 DOCUMENT_TASK = "RETRIEVAL_DOCUMENT"
+
+
+def embedder_id(vertex: VertexCfg) -> str:
+    """The id a stamp and a code chunk 0 record for the vectors `vertex` makes: model and dimensions."""
+    return f"vertex:{vertex.model}/{vertex.dimensions}"
 
 
 class VertexEmbedder:
@@ -60,7 +66,7 @@ class VertexEmbedder:
         self._jitter = jitter
         self._backoff_s = backoff_s
         self._clock = clock
-        self.id = f"vertex:{vertex.model}/{vertex.dimensions}"
+        self.id = embedder_id(vertex)
 
     def _make_client(self) -> Any:
         genai = import_module("google.genai")
@@ -74,9 +80,9 @@ class VertexEmbedder:
 
     # -- public ------------------------------------------------------------------------------
 
-    def embed_query(self, text: str) -> np.ndarray:
-        """The unit vector of one query, shape (dimensions,)."""
-        return self._embed([text], QUERY_TASK, budget_s=self._timeout_s)[0]
+    def embed_query(self, text: str, task: str = QUERY_TASK) -> np.ndarray:
+        """The unit vector of one query, shape (dimensions,); `task` is its task type (docs or code)."""
+        return self._embed([text], task, budget_s=self._timeout_s)[0]
 
     def embed_documents(self, texts: Sequence[str]) -> np.ndarray:
         """The unit vectors of `texts`, shape (len(texts), dimensions), embedded 200 at a time."""

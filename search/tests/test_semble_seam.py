@@ -101,3 +101,34 @@ def test_other_models_pass_through(fake_transformer: TransformerSpec, tiny_model
     assert dense.load_model() == (model, tiny_model)  # semble's default model (SEMBLE_MODEL_NAME) is static too
     with pytest.raises(ValueError, match="not a current transformer model path"):
         dense._load_cached("transformer:gte-modernbert-base@000000000000")  # a retired revision
+
+
+def test_cloud_code_seam() -> None:
+    """The cloud code corpus (`doc_search.cloud.corpora`) cuts with semble's chunker and scopes with semble's walker.
+
+    It reads semble's ignore matcher and default ignored directories to answer, from HEAD's tree alone, what
+    `walk_files` would yield over a checkout (a parity test holds the two equal), and records the chunker as
+    `semble-<major>.<minor>`.
+    """
+    import inspect
+
+    import semble
+    import semble.chunking.chunking as chunking
+    import semble.index.file_walker as walker
+    import semble.index.files as files
+
+    assert callable(getattr(chunking, "chunk_source", None)), "semble.chunking.chunking.chunk_source moved"
+    assert list(inspect.signature(chunking.chunk_source).parameters) == ["source", "file_path", "language"]
+    assert callable(getattr(files, "detect_language", None)), "semble.index.files.detect_language moved"
+    assert callable(getattr(files, "get_extensions", None)), "semble.index.files.get_extensions moved"
+    assert isinstance(getattr(semble, "__version__", None), str), "semble.__version__ moved"
+    assert semble.__version__.startswith("0.7.")
+    for name in ("walk_files", "_is_ignored", "_load_ignore_for_dir"):
+        assert callable(getattr(walker, name, None)), f"semble.index.file_walker.{name} moved"
+    assert hasattr(walker, "IgnoreSpec"), "semble.index.file_walker.IgnoreSpec moved"
+    assert isinstance(getattr(walker, "_DEFAULT_IGNORED_DIRS", None), frozenset), "_DEFAULT_IGNORED_DIRS moved"
+    assert {"node_modules/", "dist/", "build/", ".venv/", ".git/"} <= walker._DEFAULT_IGNORED_DIRS
+    assert list(inspect.signature(walker._is_ignored).parameters) == ["path", "is_dir", "specs"]
+    # the ignore files semble reads in each directory, in this order (corpora.IGNORE_FILES mirrors it)
+    source = inspect.getsource(walker._load_ignore_for_dir)
+    assert source.index('".gitignore"') < source.index('".sembleignore"')

@@ -1,4 +1,4 @@
-"""The cloud docs leg's read path: Vertex embedder, Firestore query, branch suppression, degradation.
+"""The cloud legs' read path (docs and code): Vertex embedder, Firestore query, branch suppression, degradation.
 
 Everything runs against `FakeGenai` and `FakeFirestore` (tests/fakes.py): no network, no credentials.
 The google libraries are only needed for the real classes the code builds around the fakes
@@ -19,8 +19,16 @@ import pytest
 from fakes import DIMS, FakeFirestore, FakeGenai, text_vector, unit
 
 from doc_search.cloud import CloudUnavailable
-from doc_search.cloud.read import CloudLeg, CorpusStamp, DegradedLeg, build_cloud_leg, resolve_base_ref
-from doc_search.cloud.vertex import VertexEmbedder
+from doc_search.cloud.corpora import CodeCloudCorpus
+from doc_search.cloud.read import (
+    CloudLeg,
+    CorpusStamp,
+    DegradedLeg,
+    build_cloud_leg,
+    build_cloud_legs,
+    resolve_base_ref,
+)
+from doc_search.cloud.vertex import CODE_QUERY_TASK, VertexEmbedder
 from doc_search.config import CloudCfg, Config, FirestoreCfg, VertexCfg, load_config
 from doc_search.corpus import Corpus
 from doc_search.docindex import DocIndex
@@ -185,6 +193,16 @@ def test_a_query_embedding_retries_within_one_budget() -> None:
     genai = FakeGenai(script=[api_error(503, "UNAVAILABLE")] * 3)
     assert embedder(genai).embed_documents(["a"]).shape == (1, DIMS)
     assert len(genai.calls) == 4 and slept == [1.0, 2.0, 4.0]
+
+
+def test_embed_query_passes_the_task() -> None:
+    genai = FakeGenai()
+    embedder = VertexEmbedder(cloud_cfg(), client=genai)
+
+    embedder.embed_query("q", CODE_QUERY_TASK)
+    embedder.embed_query("q")
+
+    assert [call.task_type for call in genai.calls] == ["CODE_RETRIEVAL_QUERY", "RETRIEVAL_QUERY"]
 
 
 def test_vertex_unavailable_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -757,3 +775,330 @@ def test_build_cloud_leg_makes_no_client(monkeypatch: pytest.MonkeyPatch) -> Non
     cfg = cloud_cfg()
     no_project = build_cloud_leg(replace(cfg, firestore=replace(cfg.firestore, project=None)))
     assert isinstance(no_project, DegradedLeg) and "cloud.firestore.project" in no_project.reason
+
+
+# --- the code leg -------------------------------------------------------------------------------------------
+
+REFUND_CHUNK = "def refund_total(lines):\n    return sum(lines)"
+SHIP_PY = "def ship_fee(order):\n    return 5\n"
+SHIP_CHUNK = "def ship_fee(order):\n    return 5"
+CODE_STAMP = {"built_at": "2026-01-01T00:00:00Z", "mode": "full", "embedder_id": f"vertex:gemini-embedding-001/{DIMS}"}
+
+
+def full_cfg(tmp_path: Path, *, docs: bool = True, code: dict | None = None, cloud: bool = True) -> Config:
+    """A config read from its own directory (never the repository under test, where it would be untracked)."""
+    where = tmp_path / f"cfg-{len(list(tmp_path.glob('cfg-*')))}"
+    raw: dict = {"code": {"content": ["code"]}}
+    if cloud:
+        raw["cloud"] = {
+            "vertex": {"project": "p", "dimensions": DIMS},
+            "firestore": {"project": "p"},
+            "docs": docs,
+            "code": code,
+        }
+    (where / "docs/search").mkdir(parents=True)
+    (where / "docs/search/config.json").write_text(json.dumps(raw), encoding="utf-8")
+    cfg = load_config(where, env={})
+    assert cfg is not None
+    return cfg
+
+
+def set_code_stamp(fs: FakeFirestore, commit: str, **extra) -> None:
+    fs.put("corpus_meta", "code-index", {"built_from_commit": commit, **CODE_STAMP, **extra})
+
+
+def add_code_chunk(fs: FakeFirestore, path: str, text: str, start: int, end: int, index: int = 0) -> None:
+    fs.add_chunk(path, text, index=index, collection="code_chunks", start=start, end=end)
+
+
+@dataclass
+class CodeScene:
+    repo: object
+    stamp: str
+    cfg: Config
+    fs: FakeFirestore
+    genai: FakeGenai
+    leg: CloudLeg
+
+    @property
+    def root(self) -> Path:
+        return self.repo.root
+
+
+def code_scene(git_repo, tmp_path: Path, *, stamp: bool = True, code: dict | None = None) -> CodeScene:
+    repo = git_repo()
+    repo.write("src/ship.py", SHIP_PY)
+    head = seed_repo(repo)
+    cfg = full_cfg(tmp_path, code=code or {})
+    assert cfg.cloud is not None
+    fs, genai = FakeFirestore(), FakeGenai()
+    fs.set_stamp(head)  # the docs stamp: never the code leg's
+    if stamp:
+        set_code_stamp(fs, head)
+    add_code_chunk(fs, "src/refund.py", REFUND_CHUNK, 1, 2)
+    add_code_chunk(fs, "src/ship.py", SHIP_CHUNK, 1, 2)
+    fs.add_chunk(SPEC_PATH, SPEC_CHUNK, doc_type="spec", start=10, end=11)  # the docs collection's
+    embedder = VertexEmbedder(cfg.cloud, client=genai, sleep=no_sleep)
+    leg = CloudLeg(cfg.cloud, embedder, client=fs, corpus=CodeCloudCorpus(cfg, repo.root), clock=Clock())
+    return CodeScene(repo, head, cfg, fs, genai, leg)
+
+
+CODE_ALLOWED = {"src/refund.py", "src/ship.py"}
+
+
+def test_code_leg_queries_the_code_collection_with_the_code_task(git_repo, tmp_path: Path) -> None:
+    w = code_scene(git_repo, tmp_path, code={"timeout_s": 4})
+
+    hits, note = w.leg.hits("sum of refund lines", CODE_ALLOWED, w.root, 30, doc_types=("spec",))
+
+    assert note is None and {h.path for h in hits} == CODE_ALLOWED
+    (query,) = w.fs.vector_queries
+    assert query["collection"] == "code_chunks" and query["limit"] == 30
+    assert query["filters"] == [], "the code leg never filters on docType, whatever the request asks"
+    assert w.genai.calls[-1].task_type == "CODE_RETRIEVAL_QUERY"
+    # the code stamp, read with the code leg's own per-call timeout
+    assert w.fs.request_options == [
+        ("document_get", {"retry": None, "timeout": 4}),
+        ("find_nearest", {"retry": None, "timeout": 4}),
+    ]
+    assert w.leg.stamp() == CorpusStamp(w.stamp, "2026-01-01T00:00:00Z", "full", f"vertex:gemini-embedding-001/{DIMS}")
+    assert w.leg.deadline_s == 9, "the code leg's deadline is cloud.code.timeout_s and 5 s more"
+
+    # the docs leg's prefilter fallback never runs: the code collection is asked once, unfiltered
+    w.fs.reject_filtered = FailedPrecondition("The query requires a vector index prefixed by docType")
+    w.fs.vector_queries.clear()
+    hits, note = w.leg.hits("sum", CODE_ALLOWED, w.root, 30, doc_types=("spec",))
+    assert note is None and hits and [q["filters"] for q in w.fs.vector_queries] == [[]]
+
+
+def test_code_leg_drops_branch_changed_files(git_repo, tmp_path: Path) -> None:
+    w = code_scene(git_repo, tmp_path)
+    w.repo.write("src/refund.py", "def refund_total(lines):\n    return sum(lines) + 0\n")  # edited on the branch
+    w.repo.write("src/new.py", "def fresh():\n    pass\n")  # untracked
+    add_code_chunk(w.fs, "src/new.py", "def fresh():\n    pass", 1, 2)
+
+    hits, note = w.leg.hits("refund total", CODE_ALLOWED | {"src/new.py"}, w.root, 30)
+
+    assert note is None
+    assert [h.path for h in hits] == ["src/ship.py"], "the local code leg serves the changed files"
+
+
+def test_code_leg_hits_are_code_kind(git_repo, tmp_path: Path) -> None:
+    w = code_scene(git_repo, tmp_path)
+    # stored lines are used as they are: the file is unchanged since the stamp, so they are valid at HEAD
+    add_code_chunk(w.fs, "src/ship.py", "text the file never had", 7, 9, index=1)
+    w.fs.add_chunk("src/ship.py", "no line range", index=2, collection="code_chunks")  # unusable: dropped
+
+    hits, note = w.leg.hits("ship fee", CODE_ALLOWED, w.root, 30)
+
+    assert note is None
+    got = {(h.path, h.snippet): (h.kind, h.legs, h.start_line, h.end_line) for h in hits}
+    assert got == {
+        ("src/refund.py", REFUND_CHUNK): ("code", ("cloud-code",), 1, 2),
+        ("src/ship.py", SHIP_CHUNK): ("code", ("cloud-code",), 1, 2),
+        ("src/ship.py", "text the file never had"): ("code", ("cloud-code",), 7, 9),
+    }
+    hits, _ = w.leg.hits("ship fee", {"src/ship.py"}, w.root, 30)
+    assert {h.path for h in hits} == {"src/ship.py"}, "never from outside the allowed set"
+
+
+def test_code_leg_without_stamp_notes_code_index(git_repo, tmp_path: Path) -> None:
+    w = code_scene(git_repo, tmp_path, stamp=False)
+
+    assert w.leg.hits("refund", CODE_ALLOWED, w.root, 30) == (
+        [],
+        "cloud code skipped: no corpus stamp (corpus_meta/code-index)",
+    )
+    assert w.fs.calls["find_nearest"] == 0
+    assert w.leg.status_lines(w.root)[-1] == (
+        "cloud code: no corpus stamp (corpus_meta/code-index): the cloud code leg is skipped"
+    )
+
+    unfetched = code_scene(git_repo, tmp_path)
+    set_code_stamp(unfetched.fs, "0123456789abcdef0123456789abcdef01234567")
+    assert unfetched.leg.hits("refund", CODE_ALLOWED, unfetched.root, 30) == (
+        [],
+        "cloud code skipped: stamp 0123456 not fetched",
+    )
+
+    other = code_scene(git_repo, tmp_path)
+    other.genai.script = [api_error(400, "INVALID_ARGUMENT")]
+    hits, note = other.leg.hits("refund", CODE_ALLOWED, other.root, 30)
+    assert hits == [] and note is not None and note.startswith("cloud code failed: ClientError: 400")
+
+
+def test_code_degraded_leg_notes_say_cloud_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    leg = DegradedLeg("boom", note_prefix="cloud code")
+    assert leg.hits("q", {"a.py"}, Path("."), 30) == ([], "cloud code failed: boom")
+    assert leg.status_lines(Path(".")) == ["cloud code: unavailable: boom"]
+    assert DegradedLeg("boom").hits("q", {"a.md"}, Path("."), 30) == ([], "cloud failed: boom"), "docs unchanged"
+
+    cfg = full_cfg(tmp_path, code={})
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "google.cloud.firestore", None)
+        docs, code = build_cloud_legs(cfg, tmp_path)
+    assert isinstance(docs, DegradedLeg) and isinstance(code, DegradedLeg)
+    hits, note = code.hits("q", {"a.py"}, tmp_path, 30)
+    assert hits == [] and note is not None and note.startswith("cloud code failed: cloud extra not installed")
+    assert code.status_lines(tmp_path)[0].startswith("cloud code: unavailable: cloud extra not installed")
+    assert docs.hits("q", {"a.md"}, tmp_path, 30)[1].startswith("cloud failed: cloud extra not installed")
+
+
+def test_status_lines_for_code(git_repo, tmp_path: Path) -> None:
+    w = code_scene(git_repo, tmp_path)
+    set_code_stamp(w.fs, w.stamp, chunker_id="semble-0.7")
+    w.repo.write("src/refund.py", "def refund_total(lines):\n    return 0\n")  # a changed code file
+    w.repo.write("src/new.py", "x = 1\n")  # an untracked one
+    w.repo.write(SHIPPING_PATH, SHIPPING + "\nMore.\n")  # a changed doc: the docs leg's, not counted
+    w.repo.write("notes.md", "# Notes\n")  # an untracked doc, not counted either
+
+    lines = w.leg.status_lines(w.root)
+
+    assert lines == [
+        f"cloud code: Firestore p/(default) collection code_chunks, embedder vertex:gemini-embedding-001/{DIMS}",
+        f"cloud code: corpus stamp {w.stamp[:7]} (built 2026-01-01T00:00:00Z, mode full, chunker semble-0.7)",
+        "cloud code: base_ref unknown (no origin/HEAD; set cloud.firestore.base_ref)",
+        "cloud code: 2 branch-changed code files, served by the local index only",
+    ]
+    assert w.fs.calls["stream"] == 0 and w.fs.calls["find_nearest"] == 0, "the collection is never read"
+
+
+def test_status_lines_for_code_scope_each_worktree(git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from google.cloud import firestore
+
+    repo = git_repo()
+    repo.write("src/gen/out.py", "x = 1\n")
+    stamp = seed_repo(repo)
+    fs = FakeFirestore()
+    set_code_stamp(fs, stamp)
+    monkeypatch.setattr(firestore, "Client", lambda **kwargs: fs)
+    other = repo.add_worktree("gen", "gen")
+    _, leg = build_cloud_legs(full_cfg(tmp_path, code={}), repo.root)
+    assert isinstance(leg, CloudLeg)
+
+    def count(tree: Path) -> str:
+        return leg.status_lines(tree)[-1]
+
+    (repo.root / "src/gen/out.py").write_text("x = 2\n", encoding="utf-8")
+    (other / "src/gen/out.py").write_text("x = 2\n", encoding="utf-8")
+    assert count(repo.root) == "cloud code: 1 branch-changed code files, served by the local index only"
+    # the other worktree's HEAD ignores src/gen/ for semble: the file is not the code corpus's there
+    (other / ".sembleignore").write_text("src/gen/\n", encoding="utf-8")
+    repo.git("add", "-A", cwd=other)
+    repo.git("commit", "-q", "-m", "ignore gen", cwd=other)
+    (other / "src/gen/out.py").write_text("x = 3\n", encoding="utf-8")
+    assert count(other) == "cloud code: 0 branch-changed code files, served by the local index only"
+    assert count(repo.root) == "cloud code: 1 branch-changed code files, served by the local index only"
+
+    # a new HEAD in the same worktree reads that HEAD's rules
+    repo.write(".sembleignore", "src/gen/\n")
+    repo.commit("ignore gen here too")
+    repo.write("src/gen/out.py", "x = 4\n")
+    assert count(repo.root) == "cloud code: 0 branch-changed code files, served by the local index only"
+
+
+def test_build_cloud_legs_per_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from google import genai
+    from google.cloud import firestore
+
+    def boom(**kwargs):
+        raise AssertionError("a client was built while constructing the legs")
+
+    monkeypatch.setattr(genai, "Client", boom)
+    monkeypatch.setattr(firestore, "Client", boom)
+
+    def kinds(cfg: Config) -> tuple[str | None, str | None]:
+        docs, code = build_cloud_legs(cfg, tmp_path)
+        return (type(docs).__name__ if docs else None, type(code).__name__ if code else None)
+
+    assert kinds(full_cfg(tmp_path)) == ("CloudLeg", None), "today's config: the docs leg alone"
+    assert kinds(full_cfg(tmp_path, docs=False, code={})) == (None, "CloudLeg")
+    assert kinds(full_cfg(tmp_path, code={})) == ("CloudLeg", "CloudLeg")
+    assert kinds(full_cfg(tmp_path, cloud=False)) == (None, None)
+
+    docs, code = build_cloud_legs(full_cfg(tmp_path, code={"timeout_s": 3}), tmp_path)
+    assert isinstance(docs, CloudLeg) and isinstance(code, CloudLeg)
+    assert (docs.deadline_s, code.deadline_s) == (25.0, 8.0)
+
+
+# --- why a leg did not contribute (cloud-code design section 9) ----------------------------------------------
+
+
+def test_hits_with_reason_names_why_the_leg_gave_nothing(git_repo, tmp_path: Path) -> None:
+    w = scene(git_repo)
+    hits, note, reason = w.leg.hits_with_reason("refund", ALL, w.root, 30)
+    assert hits and note is None and reason is None, "an answer has no reason"
+    assert w.leg.hits("refund", ALL, w.root, 30) == (hits, None), "hits keeps its two values"
+
+    missing = code_scene(git_repo, tmp_path, stamp=False)
+    assert missing.leg.hits_with_reason("refund", CODE_ALLOWED, missing.root, 30) == (
+        [],
+        "cloud code skipped: no corpus stamp (corpus_meta/code-index)",
+        "no-stamp",
+    )
+    unfetched = code_scene(git_repo, tmp_path)
+    set_code_stamp(unfetched.fs, "0123456789abcdef0123456789abcdef01234567")
+    assert unfetched.leg.hits_with_reason("refund", CODE_ALLOWED, unfetched.root, 30) == (
+        [],
+        "cloud code skipped: stamp 0123456 not fetched",
+        "no-stamp",
+    )
+
+    down = scene(git_repo)
+    down.genai.script = [api_error(503, "UNAVAILABLE")] * 4
+    hits, note, reason = down.leg.hits_with_reason("refund", ALL, down.root, 30)
+    assert hits == [] and note is not None and note.startswith("cloud failed: ServerError: 503") and reason == "failed"
+    assert down.leg.hits_with_reason("refund", ALL, down.root, 30) == ([], note, "failed"), "from memory"
+
+    assert DegradedLeg("boom", note_prefix="cloud code").hits_with_reason("q", {"a.py"}, tmp_path, 30) == (
+        [],
+        "cloud code failed: boom",
+        "failed",
+    )
+
+
+def test_timeout_memory_keeps_reason_timeout(git_repo) -> None:
+    w = scene(git_repo)
+    release = threading.Event()
+
+    class Stuck:
+        id = "vertex:stuck/1"
+
+        def embed_query(self, text: str):
+            release.wait(30)
+            raise RuntimeError("released")
+
+    leg = CloudLeg(cloud_cfg(), Stuck(), client=w.fs, clock=w.clock, deadline_s=0.2)
+    try:
+        first = leg.hits_with_reason("refund", ALL, w.root, 30)
+        w.clock.now += 59  # within the failure memory: held back, not asked
+        started = time.monotonic()
+        again = leg.hits_with_reason("refund", ALL, w.root, 30)
+        waited = time.monotonic() - started
+    finally:
+        release.set()
+
+    note = "cloud failed: TimeoutError: no answer within 0.2 s"
+    assert first == ([], note, "timeout")
+    assert again == ([], note, "timeout"), "held back after an overrun is still a timeout, not a failure"
+    assert waited < 0.1
+
+
+def test_docs_cloud_reasons_reach_the_header(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    head = seed_repo(repo)
+    w = make_world(repo, tiny_model)
+
+    resp = w.search(w.leg(FakeFirestore()), "refund rounding", scope="docs")
+    assert resp.header.notes == ("cloud skipped: no corpus stamp (corpus_meta/index)",)
+    assert resp.header.local_only == (("docs", "no-stamp"),)
+
+    fs = FakeFirestore()
+    fs.set_stamp(head)
+    seed_chunks(fs)
+    resp = w.search(w.leg(fs, embedder=RaisingEmbedder(CloudUnavailable("no credentials"))), "refund", scope="docs")
+    assert resp.header.notes == ("cloud failed: no credentials",)
+    assert resp.header.local_only == (("docs", "failed"),)
+
+    resp = w.search(w.leg(fs), "refund rounding", scope="docs")
+    assert resp.header.notes == () and resp.header.local_only == (), "the cloud answered"

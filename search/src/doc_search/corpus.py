@@ -22,9 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pathspec import PathSpec
-
-from .config import Config, ConfigError
+from .config import Config
+from .config import compile_globs as _compile
 from .docindex import DocIndex
 from .repo import confine, ls_files, norm_rel
 from .types import DocMeta
@@ -64,21 +63,6 @@ _BOLD_STATUS = re.compile(r"^\s*(?:[-*+>]\s+)*\*\*status(?::\*\*|\*\*\s*:)\s*" +
 _FM_STATUS = re.compile(r"\s*" + _STATUS_WORD, re.IGNORECASE)
 _FM_KEY = re.compile(r"^([A-Za-z_][\w-]*)[ \t]*:(.*)$")
 _FM_COMMENT = re.compile(r"[ \t]+#")
-
-
-def _spec(patterns: tuple[str, ...]) -> PathSpec:
-    """A gitignore-style matcher. pathspec 1.x names the factory `gitignore`; 0.x `gitwildmatch`."""
-    try:
-        return PathSpec.from_lines("gitignore", patterns)
-    except KeyError:
-        return PathSpec.from_lines("gitwildmatch", patterns)
-
-
-def _compile(patterns: tuple[str, ...], where: str) -> PathSpec:
-    try:
-        return _spec(patterns)
-    except (ValueError, re.error) as err:  # pathspec: a malformed pattern, or one that makes a bad regex (`[z-a]`)
-        raise ConfigError(f"{where} has an invalid pattern: {err}") from err
 
 
 def _text(value: Any) -> str | None:

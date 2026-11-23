@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Literal
 
 from . import release_cache
-from .config import CONFIG_REL, Config, ConfigError, load_config
+from .config import CONFIG_REL, Config, ConfigError, load_config, parse_version
 from .engines import Building, IndexPool
 from .progress import read_progress
 from .releases import newest_security, parse_releases
@@ -110,6 +110,18 @@ def config_says_required(top: Path) -> bool:
     return _REQUIRED_RE.search(text) is not None
 
 
+def _raw_floor(top: Path) -> tuple[int, int, int] | None:
+    """The `requires` floor from the raw JSON, or None when the file is absent, unparsable or has no valid floor."""
+    try:
+        raw = json.loads((Path(top) / CONFIG_REL).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = raw.get("requires") if isinstance(raw, dict) else None
+    if isinstance(value, str) and value.startswith(">="):
+        return parse_version(value[2:])
+    return None
+
+
 def mcp_line(mcp: Mapping[str, McpState]) -> str:
     """`claude=expected codex=not-registered`: each client's state, as the `mcp:` line shows it."""
     return " ".join(f"{client}={state}" for client, state in mcp.items())
@@ -133,6 +145,16 @@ def assess(top: Path, *, budget_s: float, env: Mapping[str, str], client: Client
         cfg = load_config(top, env)
     except ConfigError as err:
         required = config_says_required(top)
+        floor = _raw_floor(top)
+        if floor is not None and (version is None or version < floor):
+            # the floor first: a key this release does not know reads "plugin too old", not "invalid config"
+            shown = _dotted(version) if version is not None else "(version unknown)"
+            reason = f"doc-superpowers {shown} is below requires >={_dotted(floor)}"
+            launcher = _launcher(top, None)[0]
+            if not required:
+                reason = f"not required here (not-ready: {reason})"
+                return _verdict("not-in-force", reason, None, False, floor, launcher, version, mcp)
+            return _verdict("not-ready", reason, _plugin_fix(env), True, floor, launcher, version, mcp)
         state: State = "not-ready" if required else "not-in-force"
         fix = CONFIG_FIX if required else None
         launcher = _launcher(top, None)[0]

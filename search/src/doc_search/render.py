@@ -1,6 +1,7 @@
 """Markdown text for a search response (design section 6).
 
-    doc-search · docs: semble <model> [(+cloud: <model>)] · code: semble <version>|off · <n> hits
+    doc-search · docs: semble <model> [(+cloud: <model>)] · code: semble <version> [(+cloud: <model>)]|off
+        [· local-only: <kind> (<reason>), …] · <n> hits
     note: <header note>
     1. [doc] path:start-end · Heading › Path · type · status (+N more in this file)
        <snippet, at most 6 lines>
@@ -9,9 +10,10 @@
        <snippet>
        documented by: x, y, z (+N)
 
-Everything in a hit comes from repository content, so each field is kept on its own line: a
-newline in a path or heading never starts a line of its own. The text is at most `cap` characters,
-cut between hits, never inside one; a cut ends with `(truncated at <cap> chars)`.
+The header is one line (wrapped above to fit). Everything in a hit comes from repository content, so
+each field is kept on its own line: a newline in a path or heading never starts a line of its own. The
+text is at most `cap` characters, cut between hits, never inside one; a cut ends with
+`(truncated at <cap> chars)`.
 """
 
 from __future__ import annotations
@@ -72,7 +74,12 @@ def _head(resp: SearchResponse) -> str:
     if info.cloud:
         docs += f" (+cloud: {flat(info.cloud)})"
     code = "code: off" if info.code == "off" else f"code: semble {flat(info.code)}"
-    lines = [SEP.join(["doc-search", docs, code, f"{len(resp.hits)} hits"])]
+    if info.code_cloud:
+        code += f" (+cloud: {flat(info.code_cloud)})"
+    labels = ["doc-search", docs, code]
+    if info.local_only:
+        labels.append("local-only: " + ", ".join(f"{kind} ({reason})" for kind, reason in info.local_only))
+    lines = [SEP.join([*labels, f"{len(resp.hits)} hits"])]
     lines += [f"note: {flat(note)}" for note in info.notes]
     return "\n".join(lines)
 

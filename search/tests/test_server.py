@@ -523,3 +523,32 @@ def test_status_names_the_server_mode(git_repo, tiny_model: str) -> None:
     assert "server: in-process" in call(build_server_for(rt), "status")
     rt.mode = lambda: "shared (pid 7, 2 sessions)"
     assert "server: shared (pid 7, 2 sessions)" in call(build_server_for(rt.view(None)), "status")
+
+
+def test_server_builds_both_legs(git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Leg:
+        def __init__(self, line: str) -> None:
+            self.line = line
+
+        def hits(self, *args, **kwargs):  # pragma: no cover - status never searches
+            raise AssertionError("status must not search the cloud")
+
+        def status_lines(self, worktree: Path) -> list[str]:
+            return [self.line]
+
+    docs, code = Leg("cloud: docs leg"), Leg("cloud code: code leg")
+    seen: list[tuple] = []
+
+    def build(cfg, top, corpus_for=None):
+        seen.append((cfg, top))
+        return docs, code
+
+    monkeypatch.setattr("doc_search.server.build_cloud_legs", build)
+    repo = git_repo()
+    seed(repo, tiny_model)
+    rt = Runtime(repo.root, None, 60.0, warm=False)
+    assert (rt.cloud, rt.code_cloud) == (docs, code)
+    assert rt.searcher._cloud is docs and rt.searcher._code_cloud is code
+    assert len(seen) == 1 and seen[0][1] == repo.root
+    text = call(build_server_for(rt), "status")
+    assert text.index("cloud: docs leg") < text.index("cloud code: code leg")

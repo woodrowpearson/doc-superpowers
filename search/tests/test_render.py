@@ -159,3 +159,38 @@ def test_render_header_flag_forces_the_notice() -> None:
     hit = Hit(kind="code", path="a.py", start_line=1, end_line=2, snippet="x")
     out = render_search(SearchResponse(hits=[hit], header=header(truncated=True)))
     assert out.splitlines()[-1] == "(truncated at 8000 chars)"
+
+
+def test_header_shows_local_only() -> None:
+    resp = SearchResponse(
+        hits=[],
+        header=header(
+            cloud="gemini-embedding-001",
+            notes=("cloud failed: TimeoutError: no answer within 26 s", "cloud code failed: RuntimeError: boom"),
+            local_only=(("docs", "timeout"), ("code", "failed")),
+        ),
+    )
+    assert render_search(resp) == (
+        "doc-search · docs: semble potion-code-16M-v2 (+cloud: gemini-embedding-001) · code: semble 0.7.0"
+        " · local-only: docs (timeout), code (failed) · 0 hits\n"
+        "note: cloud failed: TimeoutError: no answer within 26 s\n"
+        "note: cloud code failed: RuntimeError: boom"
+    ), "after the model labels, docs then code; the notes keep their text"
+
+    one = SearchResponse(hits=[], header=header(local_only=(("code", "no-stamp"),)))
+    first = render_search(one).splitlines()[0]
+    assert first.endswith(" · code: semble 0.7.0 · local-only: code (no-stamp) · 0 hits")
+
+
+def test_header_without_local_only_is_unchanged() -> None:
+    plain = header(cloud="gemini-embedding-001")
+    assert plain.local_only == () and plain.code_cloud is None, "the defaults: nothing local-only, no code cloud"
+    assert render_search(SearchResponse(hits=[], header=plain)) == (
+        "doc-search · docs: semble potion-code-16M-v2 (+cloud: gemini-embedding-001) · code: semble 0.7.0 · 0 hits"
+    )
+    # a code cloud leg is named beside the code model, as the docs one is beside the docs model
+    both = header(cloud="gemini-embedding-001", code_cloud="gemini-embedding-001")
+    assert render_search(SearchResponse(hits=[], header=both)) == (
+        "doc-search · docs: semble potion-code-16M-v2 (+cloud: gemini-embedding-001)"
+        " · code: semble 0.7.0 (+cloud: gemini-embedding-001) · 0 hits"
+    )
