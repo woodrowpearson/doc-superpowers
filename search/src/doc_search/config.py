@@ -61,8 +61,24 @@ _VERSION = re.compile(r"([0-9]+)\.([0-9]+)\.([0-9]+)")
 # `requires`'s one form: a floor, `>=` and a version.
 _REQUIRES_PREFIX = ">="
 
+# The cloud code leg's stamp and lease documents (in `cloud.firestore.meta_collection`), its default
+# collection, and its own per-call budget.
+CODE_STAMP_DOC = "code-index"
+CODE_LEASE_DOC = "code_catch_up_lease"
+DEFAULT_CODE_COLLECTION = "code_chunks"
+DEFAULT_CODE_TIMEOUT_S = 10.0
+
+# What `cloud.code` merges over when the config gives an object.
+CLOUD_CODE_DEFAULTS: dict[str, Any] = {
+    "collection": DEFAULT_CODE_COLLECTION,
+    "exclude": [],
+    "timeout_s": DEFAULT_CODE_TIMEOUT_S,
+}
+
 # What `cloud` merges over when the config gives an object.
 CLOUD_DEFAULTS: dict[str, Any] = {
+    "docs": True,
+    "code": None,
     "timeout_s": DEFAULT_TIMEOUT_S,
     "vertex": {
         "project": None,
@@ -128,10 +144,19 @@ class FirestoreCfg:
 
 
 @dataclass(frozen=True)
+class CloudCodeCfg:
+    collection: str
+    exclude: tuple[str, ...]
+    timeout_s: float
+
+
+@dataclass(frozen=True)
 class CloudCfg:
     vertex: VertexCfg
     firestore: FirestoreCfg
     timeout_s: float = DEFAULT_TIMEOUT_S  # per call to Vertex or Firestore; none is retried by the library
+    docs: bool = True  # the docs leg; `cloud.docs: false` leaves only the code leg
+    code: CloudCodeCfg | None = None  # the code leg, off unless `cloud.code` is an object
 
     @property
     def deadline_s(self) -> float:
@@ -186,6 +211,11 @@ def load_config(top: Path, env: Mapping[str, str] = os.environ) -> Config | None
     code = _code(_section(merged, "code"))
     search = _search(_section(merged, "search"))
     cloud = _cloud(merged["cloud"], env.get("GOOGLE_CLOUD_PROJECT") or None)
+    if cloud is not None:  # before the environment override, so a bad config is reported whatever the environment
+        if not cloud.docs and cloud.code is None:
+            raise ConfigError("cloud.docs is false and cloud.code is null: cloud would do nothing")
+        if cloud.code is not None and not code.enabled:
+            raise ConfigError("cloud.code needs code.enabled: true (the cloud code leg fuses with the local code leg)")
     if env.get("DOC_SEARCH_CLOUD", "").strip() == "0":
         cloud = None
     required = merged["required"]
@@ -233,6 +263,8 @@ def _reject_unknown(given: Mapping[str, Any], known: Mapping[str, Any], prefix: 
         dotted = f"{prefix}{key}"
         if dotted == "cloud" and isinstance(value, dict):
             _reject_unknown(value, CLOUD_DEFAULTS, "cloud.")
+        elif dotted == "cloud.code" and isinstance(value, dict):
+            _reject_unknown(value, CLOUD_CODE_DEFAULTS, "cloud.code.")
         elif dotted == "docs.types" and isinstance(value, list):
             for i, rule in enumerate(value):
                 if isinstance(rule, dict):
@@ -359,6 +391,9 @@ def _cloud(value: Any, env_project: str | None) -> CloudCfg | None:
     merged = _merge(CLOUD_DEFAULTS, value)
     vertex = _section(merged, "vertex", "cloud.vertex")
     firestore = _section(merged, "firestore", "cloud.firestore")
+    docs = merged["docs"]
+    if not isinstance(docs, bool):
+        raise ConfigError("cloud.docs must be true or false")
     return CloudCfg(
         vertex=VertexCfg(
             project=_str(vertex["project"], "cloud.vertex.project", nullable=True) or env_project,
@@ -374,4 +409,19 @@ def _cloud(value: Any, env_project: str | None) -> CloudCfg | None:
             base_ref=_str(firestore["base_ref"], "cloud.firestore.base_ref", nullable=True),
         ),
         timeout_s=_seconds(merged["timeout_s"], "cloud.timeout_s"),
+        docs=docs,
+        code=_cloud_code(merged["code"]),
+    )
+
+
+def _cloud_code(value: Any) -> CloudCodeCfg | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ConfigError("cloud.code must be an object or null")
+    merged = _merge(CLOUD_CODE_DEFAULTS, value)
+    return CloudCodeCfg(
+        collection=_str(merged["collection"], "cloud.code.collection"),
+        exclude=_str_list(merged["exclude"], "cloud.code.exclude"),
+        timeout_s=_seconds(merged["timeout_s"], "cloud.code.timeout_s"),
     )

@@ -12,6 +12,7 @@ import pytest
 from doc_search.config import (
     INERT_LINE,
     CloudCfg,
+    CloudCodeCfg,
     Config,
     ConfigError,
     FirestoreCfg,
@@ -421,3 +422,71 @@ def test_security_floor_must_be_bool(tmp_path: Path, bad: object) -> None:
 )
 def test_parse_version(text: str, parsed: tuple[int, int, int] | None) -> None:
     assert parse_version(text) == parsed
+
+
+def test_cloud_docs_defaults_true_and_code_off(tmp_path: Path) -> None:
+    cfg = load(tmp_path, {"cloud": {"vertex": {"project": "p"}, "firestore": {}}}).cloud
+    assert cfg is not None and cfg.docs is True and cfg.code is None
+
+
+def test_cloud_code_empty_object_takes_defaults(tmp_path: Path) -> None:
+    cfg = load(tmp_path, {"cloud": {"code": {}}}).cloud
+    assert cfg is not None
+    assert cfg.code == CloudCodeCfg("code_chunks", (), 10.0)
+
+
+def test_cloud_code_keys(tmp_path: Path) -> None:
+    value = {"cloud": {"code": {"collection": "cc", "exclude": ["vendor/**", "*.gen.py"], "timeout_s": 4}}}
+    cfg = load(tmp_path, value).cloud
+    assert cfg is not None and cfg.code == CloudCodeCfg("cc", ("vendor/**", "*.gen.py"), 4.0)
+
+
+def test_cloud_nothing_on_is_an_error(tmp_path: Path) -> None:
+    write_config(tmp_path, {"cloud": {"docs": False}})
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, {})
+    assert "cloud.docs" in str(err.value)
+
+
+def test_cloud_code_needs_the_code_leg(tmp_path: Path) -> None:
+    write_config(tmp_path, {"code": {"enabled": False}, "cloud": {"code": {}}})
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, {})
+    assert "cloud.code" in str(err.value)
+
+
+def test_cloud_code_unknown_key(tmp_path: Path) -> None:
+    write_config(tmp_path, {"cloud": {"code": {"colection": "x"}}})
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, {})
+    assert "unknown key cloud.code.colection" in str(err.value)
+
+
+@pytest.mark.parametrize("bad", ["yes", 1, None])
+def test_cloud_docs_must_be_boolean(tmp_path: Path, bad: object) -> None:
+    write_config(tmp_path, {"cloud": {"docs": bad, "code": {}}})
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, {})
+    assert "cloud.docs" in str(err.value)
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, "5"])
+def test_cloud_code_timeout_must_be_positive(tmp_path: Path, bad: object) -> None:
+    write_config(tmp_path, {"cloud": {"code": {"timeout_s": bad}}})
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, {})
+    assert "cloud.code.timeout_s" in str(err.value)
+
+
+@pytest.mark.parametrize("bad", ["a", [1], [""]])
+def test_cloud_code_exclude_must_be_a_string_list(tmp_path: Path, bad: object) -> None:
+    write_config(tmp_path, {"cloud": {"code": {"exclude": bad}}})
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, {})
+    assert "cloud.code.exclude" in str(err.value)
+
+
+def test_cross_checks_run_with_cloud_off_by_env(tmp_path: Path) -> None:
+    write_config(tmp_path, {"cloud": {"docs": False}})
+    with pytest.raises(ConfigError):
+        load_config(tmp_path, {"DOC_SEARCH_CLOUD": "0"})

@@ -310,6 +310,17 @@ def test_check_plugin_below_floor_in_a_plugin_install(gated, run, tmp_path: Path
     assert payload["requires"] == ">=99.0.0" and payload["version"] == "3.18.0"
 
 
+def test_check_reports_the_floor_before_unknown_keys(gated, run, tmp_path: Path, monkeypatch) -> None:
+    fake_root(tmp_path / "ds-checkout", monkeypatch)
+    configure(gated, requires=">=99.0.0", cloud_from_a_later_release=True)
+
+    code, payload = check(run)
+
+    assert code == 1 and payload["state"] == "not-ready"
+    assert payload["reason"] == "doc-superpowers 3.18.0 is below requires >=99.0.0"
+    assert "invalid config" not in payload["reason"]
+
+
 def test_check_plugin_below_floor_in_a_checkout_is_upgraded(gated, run, tmp_path: Path, monkeypatch) -> None:
     root = fake_root(tmp_path / "ds-checkout", monkeypatch)
     configure(gated, requires=">=99.0.0")
