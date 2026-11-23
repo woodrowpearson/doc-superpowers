@@ -27,7 +27,7 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import Field
 
 from . import __version__
-from .cloud.read import CloudLeg, DegradedLeg, build_cloud_leg
+from .cloud.read import CloudLeg, DegradedLeg, build_cloud_legs
 from .config import INERT_LINE, Config, ConfigError, load_config
 from .corpus import Corpus
 from .docindex import DocIndex
@@ -149,6 +149,7 @@ class Runtime:
         self.searcher: Searcher | None = None
         self.tools: DocTools | None = None
         self.cloud: CloudLeg | DegradedLeg | None = None
+        self.code_cloud: CloudLeg | DegradedLeg | None = None
         self.fixed: str | None = None
         self.mode: Callable[[], str] = lambda: "in-process"  # the `server:` line of `status`; the daemon sets its own
         self._lock = threading.Lock()
@@ -180,9 +181,14 @@ class Runtime:
         self.pool = pool if pool is not None else IndexPool(self.cfg, max_worktrees=cap, fallback=fallback)
         # The same cloud leg serves `search` and `status`. It is built without touching the network; one that
         # cannot be built (no cloud extra, no project) is a leg that says so, never a crash.
-        cloud = self.cloud = build_cloud_leg(self.cfg.cloud, corpus_for=self.corpus_for) if self.cfg.cloud else None
-        self.searcher = Searcher(self.cfg, self.repo, self.pool, self.corpus_for, cloud=cloud, wait_s=wait_s)
-        self.tools = DocTools(self.cfg, self.repo, self.pool, self.corpus_for, cloud=cloud, wait_s=wait_s)
+        cloud, code_cloud = build_cloud_legs(self.cfg, self.repo.top, corpus_for=self.corpus_for)
+        self.cloud, self.code_cloud = cloud, code_cloud
+        self.searcher = Searcher(
+            self.cfg, self.repo, self.pool, self.corpus_for, cloud=cloud, code_cloud=code_cloud, wait_s=wait_s
+        )
+        self.tools = DocTools(
+            self.cfg, self.repo, self.pool, self.corpus_for, cloud=cloud, code_cloud=code_cloud, wait_s=wait_s
+        )
         if warm:
             self.pool.get(self.default, wait_s=0)  # start the builds now; the first call finds them under way
             if pool is None:

@@ -25,6 +25,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -48,7 +49,7 @@ from .gate import EVENTS, gate_off, hook_output, judge, verdict_path, write_verd
 from .progress import ProgressView, read_progress
 from .render import render_search
 from .repo import GitError, NotARepo, RepoInfo, resolve_worktree
-from .tools import cloud_status_lines
+from .tools import STATUS_CLOUD_BUDGET_S, cloud_status_lines
 from .types import SearchRequest
 
 logger = logging.getLogger(__name__)
@@ -534,8 +535,14 @@ def _status(args: argparse.Namespace) -> int:
     kinds["docs"]["transformer"] = _transformer_status(rt.cfg, top, progress)
     fallback = {"docs": cache["docs_fallback"]}
     cloud = None
-    if rt.cloud is not None:  # bounded: the probe answers at once, whatever the network does
-        lines = [" ".join(line.split()) for line in cloud_status_lines(rt.cloud, top)]
+    if rt.cloud is not None or rt.code_cloud is not None:  # bounded: answers at once, whatever the network does
+        by = time.monotonic() + STATUS_CLOUD_BUDGET_S  # one budget for both legs
+        lines = []
+        if rt.cloud is not None:
+            lines += cloud_status_lines(rt.cloud, top, by - time.monotonic())
+        if rt.code_cloud is not None:
+            lines += cloud_status_lines(rt.code_cloud, top, by - time.monotonic(), label="cloud code")
+        lines = [" ".join(line.split()) for line in lines]
         cloud = {"configured": True, "lines": lines}
     payload = {
         "enabled": True,

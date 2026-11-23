@@ -609,7 +609,7 @@ def test_status_bounds_the_cloud_lines(git_repo, tiny_model: str, monkeypatch: p
     seed(made, tiny_model, cloud=CLOUD)
     monkeypatch.chdir(made.root)
     leg = SlowCloudLeg()
-    monkeypatch.setattr("doc_search.server.build_cloud_leg", lambda cfg, corpus_for=None: leg)
+    monkeypatch.setattr("doc_search.server.build_cloud_legs", lambda cfg, top, corpus_for=None: (leg, None))
     try:
         start = time.monotonic()
         done = run("status", "--format", fmt)
@@ -627,6 +627,33 @@ def test_status_bounds_the_cloud_lines(git_repo, tiny_model: str, monkeypatch: p
         assert payload["cloud"] == {"configured": True, "lines": [line]}
         assert payload["ready"] is False
         assert payload["cache"] == {"docs": "absent", "code": "absent", "docs_fallback": None}
+
+
+class LinesLeg:
+    def __init__(self, *lines: str) -> None:
+        self.lines = list(lines)
+
+    def hits(self, *args, **kwargs):  # pragma: no cover - status never searches
+        raise AssertionError("status must not search the cloud")
+
+    def status_lines(self, worktree: Path) -> list[str]:
+        return list(self.lines)
+
+
+def test_status_json_lists_the_code_cloud_lines_after_the_docs_ones(
+    git_repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch, run
+) -> None:
+    made = git_repo()
+    seed(made, tiny_model, cloud={**CLOUD, "code": {}})
+    monkeypatch.chdir(made.root)
+    docs, code = LinesLeg("cloud: docs"), LinesLeg("cloud code: code")
+    monkeypatch.setattr("doc_search.server.build_cloud_legs", lambda cfg, top, corpus_for=None: (docs, code))
+    payload = json.loads(run("status", "--format", "json").out)
+    assert payload["cloud"] == {"configured": True, "lines": ["cloud: docs", "cloud code: code"]}
+
+    monkeypatch.setattr("doc_search.server.build_cloud_legs", lambda cfg, top, corpus_for=None: (None, code))
+    payload = json.loads(run("status", "--format", "json").out)
+    assert payload["cloud"] == {"configured": True, "lines": ["cloud code: code"]}
 
 
 # --- index --cloud: the exit-code mapping ----------------------------------------------------------------
@@ -1365,7 +1392,9 @@ def test_eval_cloud_leg_that_cannot_answer_through_the_cli(git_repo, tiny_model:
     made = git_repo()
     seed(made, tiny_model, cloud=CLOUD)
     monkeypatch.chdir(made.root)
-    monkeypatch.setattr("doc_search.server.build_cloud_leg", lambda cfg, corpus_for=None: DegradedLeg("no creds"))
+    monkeypatch.setattr(
+        "doc_search.server.build_cloud_legs", lambda cfg, top, corpus_for=None: (DegradedLeg("no creds"), None)
+    )
 
     done = run("eval", str(cases_file(tmp_path, KNOWN[0], KNOWN[2])))
 
@@ -1379,7 +1408,7 @@ def test_eval_cloud_leg_through_the_cli(git_repo, tiny_model: str, tmp_path: Pat
     seed(made, tiny_model, cloud=CLOUD)
     monkeypatch.chdir(made.root)
     cloud = StubCloud([SHIPPING_PATH], note="cloud failed: no credentials")
-    monkeypatch.setattr("doc_search.server.build_cloud_leg", lambda cfg, corpus_for=None: cloud)
+    monkeypatch.setattr("doc_search.server.build_cloud_legs", lambda cfg, top, corpus_for=None: (cloud, None))
 
     done = run("eval", str(cases_file(tmp_path, KNOWN[0], KNOWN[2])))
 

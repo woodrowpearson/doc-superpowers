@@ -93,7 +93,7 @@ class DocTools:
 
     `corpus_for(worktree)` supplies the worktree's `Corpus` (the caller owns that cache). `wait_s`
     is how long `related` waits for a first build; `fetch` never touches the indexes and `status`
-    never waits. `cloud` is the optional remote docs leg: only its `status_lines` are used here.
+    never waits. `cloud` and `code_cloud` are the optional remote docs and code legs: only their `status_lines` are used here.
     """
 
     def __init__(
@@ -104,6 +104,7 @@ class DocTools:
         corpus_for: Callable[[Path], Corpus],
         cloud: CloudLeg | None = None,
         *,
+        code_cloud: CloudLeg | None = None,
         wait_s: float = 20.0,
     ) -> None:
         self.cfg = cfg
@@ -111,6 +112,7 @@ class DocTools:
         self._pool = pool
         self._corpus_for = corpus_for
         self._cloud = cloud
+        self._code_cloud = code_cloud
         self._wait_s = wait_s
 
     # -- entry points ----------------------------------------------------------------------------
@@ -376,6 +378,8 @@ class DocTools:
             out.append("doc-index: absent (no docs/.doc-index.json: code refs and cross-links are omitted)")
         if self._cloud is not None:
             out += cloud_status_lines(self._cloud, tree, cloud_by - time.monotonic())
+        if self._code_cloud is not None:
+            out += cloud_status_lines(self._code_cloud, tree, cloud_by - time.monotonic(), label="cloud code")
         return out
 
     def _index_lines(self, tree: Path, view: _View) -> list[str]:
@@ -474,13 +478,15 @@ class DocTools:
 # -- helpers ----------------------------------------------------------------------------------------
 
 
-def cloud_status_lines(cloud: CloudLeg, tree: Path, budget_s: float = STATUS_CLOUD_BUDGET_S) -> list[str]:
+def cloud_status_lines(
+    cloud: CloudLeg, tree: Path, budget_s: float = STATUS_CLOUD_BUDGET_S, *, label: str = "cloud"
+) -> list[str]:
     """The cloud leg's `status` lines for `tree`, flattened, waited for at most `budget_s`. Never raises.
 
     They run on a daemon worker: past the budget the answer is a timeout line and the worker is left to
     finish (a stamp it reads is cached by the leg, so a later status is quick). The CLI's probe uses it too.
     """
-    timed_out = [f"cloud: status unavailable (timed out after {STATUS_CLOUD_BUDGET_S:g} s)"]
+    timed_out = [f"{label}: status unavailable (timed out after {STATUS_CLOUD_BUDGET_S:g} s)"]
     if budget_s <= 0:
         return timed_out
     outcome: dict[str, Any] = {}
@@ -489,7 +495,7 @@ def cloud_status_lines(cloud: CloudLeg, tree: Path, budget_s: float = STATUS_CLO
         try:
             outcome["lines"] = [flat(line) for line in cloud.status_lines(tree)]
         except Exception as err:  # noqa: BLE001 - the remote leg must never take status down
-            outcome["lines"] = [f"cloud: status failed ({type(err).__name__})"]
+            outcome["lines"] = [f"{label}: status failed ({type(err).__name__})"]
 
     worker = threading.Thread(target=run, name="doc-search-cloud-status", daemon=True)
     worker.start()

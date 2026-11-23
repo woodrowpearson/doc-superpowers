@@ -138,7 +138,7 @@ class World:
         assert isinstance(self.pool.get(worktree or self.repo.root, wait_s=60), WorktreeIndexes)
 
 
-def make_world(repo, tiny_model: str, *, build: bool = True, cloud=None, clock=None, **sections) -> World:
+def make_world(repo, tiny_model: str, *, build: bool = True, cloud=None, code_cloud=None, clock=None, **sections) -> World:
     cfg = make_cfg(repo, tiny_model, **sections)
     pool = IndexPool(cfg, clock=clock) if clock else IndexPool(cfg)
     corpus = Corpus(repo.root, cfg, DocIndex(repo.root))
@@ -150,7 +150,7 @@ def make_world(repo, tiny_model: str, *, build: bool = True, cloud=None, clock=N
         return corpora[top]
 
     tools = DocTools(
-        cfg, RepoInfo(top=repo.root, common_dir=repo.root / ".git"), pool, corpus_for, cloud=cloud, wait_s=30
+        cfg, RepoInfo(top=repo.root, common_dir=repo.root / ".git"), pool, corpus_for, cloud=cloud, code_cloud=code_cloud, wait_s=30
     )
     world = World(repo, cfg, pool, corpus, tools)
     if build:
@@ -1175,6 +1175,40 @@ def test_status_has_a_hook_for_cloud_lines(git_repo, tiny_model: str) -> None:
     lines = world.tools.status(repo.root).splitlines()
     world.settle()
     assert "cloud: status failed (RuntimeError)" in lines
+
+
+def test_status_shows_cloud_code_lines(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    docs = FakeCloud(["cloud: stamp 1234567 is an ancestor of origin/main"])
+    code = FakeCloud(["cloud code: stamp 7654321 is an ancestor of origin/main", "cloud code: 3 branch-changed code files"])
+    world = make_world(repo, tiny_model, cloud=docs, code_cloud=code)
+
+    lines = world.tools.status(repo.root).splitlines()
+    world.settle()
+    at = lines.index(f"worktree: {repo.root}")
+    docs_at = lines.index("cloud: stamp 1234567 is an ancestor of origin/main", at)
+    assert lines.index("cloud code: stamp 7654321 is an ancestor of origin/main", at) > docs_at
+    assert "cloud code: 3 branch-changed code files" in lines[at:]
+    assert code.asked == [repo.root]
+
+    broken = FakeCloud(error=RuntimeError("no credentials"))
+    only_code = make_world(repo, tiny_model, code_cloud=broken)
+    lines = only_code.tools.status(repo.root).splitlines()
+    only_code.settle()
+    assert "cloud code: status failed (RuntimeError)" in lines
+    assert not any(line.startswith("cloud:") for line in lines)
+
+
+def test_status_without_cloud_code_is_unchanged(git_repo, tiny_model: str) -> None:
+    repo = git_repo()
+    seed(repo)
+    cloud = FakeCloud(["cloud: 2 branch-changed paths"])
+    world = make_world(repo, tiny_model, cloud=cloud)
+    lines = world.tools.status(repo.root).splitlines()
+    world.settle()
+    assert "cloud: 2 branch-changed paths" in lines
+    assert not any(line.startswith("cloud code") for line in lines)
 
 
 class SlowCloud(FakeCloud):
