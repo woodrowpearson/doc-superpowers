@@ -821,6 +821,21 @@ def test_cloud_index_only_lease_refusals_exit_2(both: CorpusStub, run) -> None:
     assert re.search(r"^doc-search: the corpus lease is held by .* \(code\)$", done.err, re.M)
 
 
+def test_cloud_index_a_docs_failure_beside_a_code_lease_refusal(both: CorpusStub, run) -> None:
+    """Both exit 2, so the exit alone cannot tell them apart: a driver reads every `doc-search:` line, and only a
+    run whose every such line is a lease line is "another host is writing"."""
+    both.by_name["docs"] = StubIndexer(raises=BaseRefError("HEAD is not on main"))
+    both.by_name["code"] = StubIndexer(raises=_held())
+
+    done = run("index", "--cloud")
+
+    assert done.code == 2 and done.out == ""
+    err = done.err.splitlines()
+    assert len(err) == 2 and all(line.startswith("doc-search: ") for line in err)
+    assert err[0] == "doc-search: HEAD is not on main (docs)"
+    assert re.fullmatch(r"doc-search: the corpus lease is held by .* \(code\)", err[1])
+
+
 def test_cloud_index_corpus_needs_cloud(repo, stub: StubIndexer, run) -> None:
     assert run("index", "--corpus", "code").code == 3
     assert stub.calls == []
@@ -834,6 +849,21 @@ def test_cloud_index_corpus_code_unconfigured(repo, tiny_model: str, monkeypatch
 
     assert (done.code, done.out) == (2, "")
     assert done.err == "doc-search: cloud code is not configured (set cloud.code)\n"
+    assert stub.calls == []
+
+
+def test_cloud_index_corpus_code_with_the_cloud_turned_off(
+    repo, tiny_model: str, monkeypatch, run, stub: StubIndexer
+) -> None:
+    config = {"docs": {"model": tiny_model}, "code": {"model": tiny_model}, **BOTH}
+    repo.write(CONFIG_REL, json.dumps(config))
+    repo.commit("both corpora")
+    monkeypatch.setenv("DOC_SEARCH_CLOUD", "0")
+
+    done = run("index", "--cloud", "--corpus", "code")
+
+    assert (done.code, done.out) == (2, "")
+    assert done.err == "doc-search: cloud code is not configured (set cloud.code; DOC_SEARCH_CLOUD=0 disables it)\n"
     assert stub.calls == []
 
 

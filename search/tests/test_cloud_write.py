@@ -1447,6 +1447,30 @@ def test_code_out_of_scope_orphans_obey_the_cap(git_repo) -> None:
     assert forced.orphans_removed == 21 and forced.stamped and w.paths() == {"app.py"}
 
 
+def test_the_prune_cap_note_names_each_corpus_likely_cause(git_repo) -> None:
+    legacy = {f"legacy/m{i:02d}.py": py(f"m{i:02d}") for i in range(21)}
+    w = make_code_world(git_repo, {"app.py": APP, **legacy})
+    w.run("full")
+    w.commit({".gitignore": "legacy/\n"})
+
+    report = w.run("catch-up")
+
+    assert report.notes[-1] == (
+        "21 orphaned paths exceed the prune cap of 20: none deleted, nothing stamped "
+        "(files that left scope, after an ignore or exclude change? rerun with --force if they really are out)"
+    )
+
+    w = make_world(git_repo)
+    seed_cloud(w, 0, 21)
+
+    report = w.run("full")
+
+    assert report.notes[-1] == (  # the docs corpus's note, byte for byte as before the code corpus
+        "21 orphaned paths exceed the prune cap of 20: none deleted, nothing stamped "
+        "(a corpus of another repository? use force if these really are gone)"
+    )
+
+
 @pytest.mark.parametrize("ignore", ["src/.GitIgnore", "src/.sembleignore", ".gitignore"])
 def test_code_catch_up_rechecks_scope_when_an_ignore_file_changes(git_repo, ignore: str) -> None:
     w = make_code_world(git_repo, {"app.py": APP, "src/gen.py": py("gen"), "src/keep.py": py("keep")})

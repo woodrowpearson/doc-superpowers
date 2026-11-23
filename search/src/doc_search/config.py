@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pathspec import PathSpec
+
 from .transformer import PREFIX, TransformerSpec, UnknownTransformer, parse_model
 
 INERT_LINE = "doc-search: not enabled (no docs/search/config.json)"
@@ -288,10 +290,29 @@ def _str(value: Any, key: str, *, nullable: bool = False) -> Any:
     return value
 
 
+def compile_globs(patterns: tuple[str, ...], where: str) -> PathSpec:
+    """A gitignore-style matcher of `patterns`; ConfigError naming `where` for an invalid one. pathspec 1.x
+    names the factory `gitignore`; 0.x `gitwildmatch`."""
+    try:
+        try:
+            return PathSpec.from_lines("gitignore", patterns)
+        except KeyError:
+            return PathSpec.from_lines("gitwildmatch", patterns)
+    except (ValueError, re.error) as err:  # pathspec: a malformed pattern, or one that makes a bad regex (`[z-a]`)
+        raise ConfigError(f"{where} has an invalid pattern: {err}") from err
+
+
 def _str_list(value: Any, key: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
         raise ConfigError(f"{key} must be an array of non-empty strings")
     return tuple(value)
+
+
+def _globs(value: Any, key: str) -> tuple[str, ...]:
+    """A non-empty string list whose globs compile: an invalid one is a config error at load, not at each use."""
+    patterns = _str_list(value, key)
+    compile_globs(patterns, key)
+    return patterns
 
 
 def _int(value: Any, key: str, *, minimum: int, maximum: int | None = None) -> int:
@@ -431,6 +452,6 @@ def _cloud_code(value: Any, firestore: FirestoreCfg) -> CloudCodeCfg | None:
             )
     return CloudCodeCfg(
         collection=collection,
-        exclude=_str_list(merged["exclude"], "cloud.code.exclude"),
+        exclude=_globs(merged["exclude"], "cloud.code.exclude"),
         timeout_s=_seconds(merged["timeout_s"], "cloud.code.timeout_s"),
     )

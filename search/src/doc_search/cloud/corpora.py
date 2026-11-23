@@ -80,7 +80,7 @@ CODE_DENY: tuple[str, ...] = (
 # the lowercased name: on a case-insensitive file system semble reads a committed `.GitIgnore` too.
 IGNORE_FILES = (".gitignore", ".sembleignore")
 SYMLINK_MODE = "120000"
-MAX_LINK_HOPS = 32  # past this many links a path resolves to nothing, as ELOOP does (macOS's MAXSYMLINKS)
+MAX_LINK_HOPS = 32  # past this many links a checkout's path fails with ELOOP (macOS's MAXSYMLINKS): sealed here
 
 # semble's major.minor: pinned `>=0.7,<0.8`, so a patch never changes it. Raised by hand (`semble-0.7.r2`) only
 # when the boundary pins in the tests show a lock bump moved the cuts.
@@ -215,8 +215,8 @@ def _denied(path: str) -> bool:
 
 
 class _Escapes(Exception):
-    """A symlinked ignore file points outside the repository (or at an absolute path): HEAD cannot say what it
-    holds."""
+    """HEAD cannot say what a symlinked ignore file holds: it points outside the repository (or at an absolute
+    path), into a `.git` directory, or down a chain past MAX_LINK_HOPS."""
 
 
 _Entry = tuple[str, str, str]  # (mode, type, oid) of one path in HEAD's tree
@@ -225,10 +225,11 @@ _Entry = tuple[str, str, str]  # (mode, type, oid) of one path in HEAD's tree
 def _follow(top: Path, entries: dict[str, _Entry], link: str) -> str | None:
     """The oid of the regular blob that the symlink at `link` ends at inside HEAD's tree, resolved as the file
     system resolves it in a checkout; None where `Path.is_file()` would be False there (a target missing, a
-    directory, a submodule, a path through a file, a chain past MAX_LINK_HOPS).
+    directory, a submodule, a path through a file).
 
-    Raises _Escapes for a target that is absolute or climbs out of the repository: a checkout would read a file
-    HEAD does not hold.
+    Raises _Escapes for a target that is absolute, climbs out of the repository or passes through a `.git`
+    component (`.git/info/exclude`: a checkout would read a file HEAD does not hold, and never can), and for a
+    chain past MAX_LINK_HOPS (a loop, which a checkout reads as no rules or not at all).
     """
     hops = 0
     resolved: list[str] = []  # the components walked so far, every one a directory of HEAD's tree
@@ -242,12 +243,14 @@ def _follow(top: Path, entries: dict[str, _Entry], link: str) -> str | None:
                 raise _Escapes(link)
             resolved.pop()
             continue
+        if part.lower() == ".git":  # git never commits one, but a checkout has one (a case-insensitive one too)
+            raise _Escapes(link)
         here = "/".join([*resolved, part])
         entry = entries.get(here)
         if entry is not None and entry[0] == SYMLINK_MODE:
             hops += 1
             if hops > MAX_LINK_HOPS:
-                return None
+                raise _Escapes(link)
             target = git_bytes(top, "cat-file", "blob", entry[2]).decode("utf-8", errors="surrogateescape")
             if target.startswith("/"):
                 raise _Escapes(link)
@@ -266,9 +269,10 @@ def _head_ignores(top: Path) -> tuple[dict[str, GitIgnoreSpec], frozenset[str]]:
 
     A symlinked ignore file is read through its link, inside HEAD's tree; one that resolves to nothing gives no
     rules, as `Path.is_file()` is False for it in a checkout. A directory is sealed (it and everything under it
-    out of scope) when one of its ignore files points outside the repository, or when it holds two names that
-    differ only in case (`.gitignore` and `.GitIgnore`: which one a case-insensitive checkout holds is
-    unknowable). Sealing fails closed: the cloud then holds less than the local index, never more.
+    out of scope) when one of its ignore files points outside the repository or into a `.git` directory, or
+    down a chain past MAX_LINK_HOPS, or when it holds two names that differ only in case (`.gitignore` and
+    `.GitIgnore`: which one a case-insensitive checkout holds is unknowable). Sealing fails closed: the cloud
+    then holds less than the local index, never more.
 
     A repository with no commit has no files, so no rules. A git failure is raised, never read as "no rules":
     that would widen what is sent.

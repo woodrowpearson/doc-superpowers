@@ -722,9 +722,13 @@ class CloudIndexer:
             report.orphans_pending = len(orphans)
             report.orphans_sample = orphans[:PENDING_SAMPLE]
             unstamped = "" if report.mode == "prune-orphans" else ", nothing stamped"
+            hint = (
+                "(files that left scope, after an ignore or exclude change? rerun with --force if they really are out)"
+                if self._corpus.purges_out_of_scope
+                else "(a corpus of another repository? use force if these really are gone)"
+            )
             report.notes.append(
-                f"{len(orphans)} orphaned paths exceed the prune cap of {int(cap)}: none deleted{unstamped} "
-                "(a corpus of another repository? use force if these really are gone)"
+                f"{len(orphans)} orphaned paths exceed the prune cap of {int(cap)}: none deleted{unstamped} {hint}"
             )
             return
         self._check_lease(db)

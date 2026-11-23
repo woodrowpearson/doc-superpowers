@@ -504,6 +504,15 @@ def test_cloud_code_exclude_must_be_a_string_list(tmp_path: Path, bad: object) -
     assert "cloud.code.exclude" in str(err.value)
 
 
+@pytest.mark.parametrize("env", [{}, {"DOC_SEARCH_CLOUD": "0"}])
+def test_cloud_code_exclude_globs_compile_at_load(tmp_path: Path, env: dict[str, str]) -> None:
+    # an invalid glob is the config's error, named, not a failed code cloud leg on every search
+    write_config(tmp_path, {"cloud": {"code": {"exclude": ["vendor/**", "[z-a].py"]}}})
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, env)
+    assert str(err.value).startswith("cloud.code.exclude has an invalid pattern: ")
+
+
 def test_cross_checks_run_with_cloud_off_by_env(tmp_path: Path) -> None:
     write_config(tmp_path, {"cloud": {"docs": False}})
     with pytest.raises(ConfigError):

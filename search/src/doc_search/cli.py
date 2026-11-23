@@ -374,8 +374,10 @@ def make_indexer(cfg: Config, top: Path, corpus: CloudCorpus | None = None) -> C
 
 def _cloud_names(cfg: Config, only: str | None) -> list[str] | str:
     """The corpora a run writes, docs first; a string is the usage line when `only` names one that is not on."""
-    if cfg.cloud is None:  # the indexer's own "cloud is not configured" answers
-        return ["docs"] if only in (None, "docs") else "doc-search: cloud code is not configured (set cloud.code)"
+    if cfg.cloud is None:  # the indexer's own "cloud is not configured" answers; cloud.code may be set but off here
+        if only in (None, "docs"):
+            return ["docs"]
+        return "doc-search: cloud code is not configured (set cloud.code; DOC_SEARCH_CLOUD=0 disables it)"
     names = (["docs"] if cfg.cloud.docs else []) + (["code"] if cfg.cloud.code is not None else [])
     if only is None:
         return names or ["docs"]

@@ -321,7 +321,6 @@ def test_code_corpus_parity_with_symlinked_ignores(git_repo, tmp_path: Path) -> 
             "tools/run.py": "r = 1\n",
             "dangling/kept.py": "k = 1\n",
             "dirlink/kept.py": "k = 1\n",
-            "loop/kept.py": "k = 1\n",
             "through/kept.py": "k = 1\n",
         },
     )
@@ -333,8 +332,6 @@ def test_code_corpus_parity_with_symlinked_ignores(git_repo, tmp_path: Path) -> 
     link(repo, "tools/.gitignore", "../conf/tools.ignore")
     link(repo, "dangling/.gitignore", "../nowhere.ignore")  # missing: no rules
     link(repo, "dirlink/.gitignore", "../shared")  # a directory: no rules
-    link(repo, "loop/.gitignore", "other")  # a loop: no rules (ELOOP)
-    link(repo, "loop/other", ".gitignore")
     link(repo, "through/.gitignore", "../a.py/x")  # through a file: no rules
     commit_all(repo, {}, "links")
     assert repo.git("status", "--porcelain", "--ignored") == ""
@@ -349,14 +346,14 @@ def test_code_corpus_parity_with_symlinked_ignores(git_repo, tmp_path: Path) -> 
         "tools/run.py",
         "dangling/kept.py",
         "dirlink/kept.py",
-        "loop/kept.py",
         "through/kept.py",
     }
 
 
 def test_code_corpus_seals_a_directory_whose_ignore_file_escapes(git_repo, tmp_path: Path) -> None:
-    """A link out of the repository (or to an absolute path) names a file HEAD does not hold: that directory and
-    everything under it are out of scope, so the cloud holds less than the local index, never more."""
+    """A link out of the repository (or to an absolute path, or into `.git`) names a file HEAD does not hold, and
+    a chain past MAX_LINK_HOPS (a loop) one HEAD cannot answer for: that directory and everything under it are
+    out of scope, so the cloud holds less than the local index, never more."""
     repo = git_repo()
     commit_all(
         repo,
@@ -366,12 +363,21 @@ def test_code_corpus_seals_a_directory_whose_ignore_file_escapes(git_repo, tmp_p
             "esc/deep/y.py": "y = 1\n",
             "abs/z.py": "z = 1\n",
             "back/w.py": "w = 1\n",
+            "gitdir/u.py": "u = 1\n",
+            "gitcase/t.py": "t = 1\n",
+            "gitback/s.py": "s = 1\n",
+            "loop/r.py": "r = 1\n",
             "other/v.py": "v = 1\n",
         },
     )
     link(repo, "esc/.gitignore", "../../outside.ignore")
     link(repo, "abs/.sembleignore", "/etc/hosts")
     link(repo, "back/.gitignore", f"../../{repo.root.name}/other/v.py")  # out and back in: still out
+    link(repo, "gitdir/.gitignore", "../.git/info/exclude")  # a checkout reads it; HEAD never holds it
+    link(repo, "gitcase/.gitignore", "../.GIT/info/exclude")  # the same file on a case-insensitive checkout
+    link(repo, "gitback/.sembleignore", "../.git/../other/v.py")  # through `.git` and back: still sealed
+    link(repo, "loop/.gitignore", "other")  # a loop: past MAX_LINK_HOPS (ELOOP in a checkout)
+    link(repo, "loop/other", ".gitignore")
     commit_all(repo, {}, "escaping links")
     corpus = CodeCloudCorpus(make_cfg(tmp_path), repo.root)
     assert scope(corpus, repo) == {"a.py", "other/v.py"}
