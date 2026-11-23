@@ -1,5 +1,21 @@
 # Release Notes
 
+## v3.20.0 (2026-11-22)
+
+This release gives `deprecate-entry` an inverse. Before, an index entry stayed `deprecated` for good once marked, even after its doc came back into use: an issue reopened after a retention job deprecated it, or a doc deprecated by mistake (#98). `update-index` keeps a deprecation on purpose. The only ways out were `remove-entry` + `add-entry`, which drops the entry's baseline and links, or a hand edit of the index. `undeprecate-entry` reverses the deprecation and keeps everything else.
+
+3.20.0 is not a security release: it raises no project's floor. A project that vendors `doc-tools.sh` picks the verb up with `install.sh install --ci` after the plugin update.
+
+### Added
+- **`doc-tools.sh undeprecate-entry [--clear-superseded-by] <doc_path>...`** removes the stored `status`, so `check-freshness` again judges the entry current or stale against its recorded baseline. `last_verified` and every other field are kept: undeprecating is not a baseline reset (`test_undeprecate_entry_lifts_a_deprecation`).
+  - `superseded_by` is kept unless `--clear-superseded-by` is given, and a `NOTE:` line says that it was kept. The flag sets `superseded_by` to null and clears the successor's `replaces` when that names the doc; a `replaces` that names another doc is left alone. A successor that is not indexed is no error (`test_undeprecate_entry_clear_superseded_by`).
+  - It works like the other per-path index writers. It takes the lock and writes atomically. A path not in the index is reported and skipped, the rest are applied, and the run exits 1. A doc whose file is gone can still be undeprecated, and `check-freshness` then reports it `missing` (`test_undeprecate_entry_reports_unknown_and_missing`). Usage errors, an unknown option and running outside a git repository exit 2 and write nothing. A run that changes nothing writes nothing.
+  - The merge driver needed no change. A per-field three-way merge already orders a status that holds only `deprecated` or nothing. An undeprecation on one branch and a re-verify on another both survive every merge and rebase order (`test-merge-driver.sh`, "undeprecate vs update-index").
+- The skill's *Index-write routing* gains the row for a deprecated doc back in use. `references/doc-spec.md` (the `status`, `replaces` and `superseded_by` rows, and the transitions), `docs/conventions.md` and the codebase guide name the verb.
+
+### Other
+- Verified locally, since GitHub Actions does not run on this account. `test-doc-tools.sh` passed 2098 of 2098 under bash 5. Under `/bin/bash` 3.2, the 4000-key `add-entry` timing budget missed while both suites ran at once, and passed when run alone. `test-merge-driver.sh` passed 962 of 962, and `check-ci.sh --fast` passed. The full `check-ci.sh` did not run.
+
 ## v3.19.2 (2026-11-22)
 
 This release makes doc-search recover from a first install that was cut short. Before, a client that gave up during the first `uv` sync of a new version could leave packages half-installed in the shared environment, and doc-search then failed at import on every start until someone reinstalled them by hand (#64). The launcher now finds those packages and reinstalls them before it starts the server.
