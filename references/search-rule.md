@@ -53,7 +53,7 @@ verdict; you are about to edit a file after one; you wrote "carry on" or "procee
 
 ### Local-only answers
 
-A search header's `local-only:` line names each cloud leg that did not answer, and why. Its results are
+A search header's `local-only:` label names each cloud leg that did not answer, and why. Its results are
 local only.
 
 | Reason | You are | Do |

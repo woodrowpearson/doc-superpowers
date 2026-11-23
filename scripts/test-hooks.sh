@@ -6282,8 +6282,9 @@ srl_run() {
   done
   [ "$#" -gt 0 ] && shift
   RUN_RC=0
-  RUN_OUT=$(env DOC_SUPERPOWERS_ROOT= CLAUDE_PLUGIN_CACHE= CODEX_HOME= PATH="$SRL_BIN:$REAL_PATH" ${envs[@]+"${envs[@]}"} \
-    /bin/sh "$SCRIPT_DIR/search/launch.sh" "$@" 2>&1) || RUN_RC=$?
+  # -u UV_OFFLINE: a maintainer's exported one must not change what the launcher does; a test passes its own
+  RUN_OUT=$(env -u UV_OFFLINE DOC_SUPERPOWERS_ROOT= CLAUDE_PLUGIN_CACHE= CODEX_HOME= PATH="$SRL_BIN:$REAL_PATH" \
+    ${envs[@]+"${envs[@]}"} /bin/sh "$SCRIPT_DIR/search/launch.sh" "$@" 2>&1) || RUN_RC=$?
 }
 
 # srl_seen <root> <bin> <verb> [VAR=value …]: run the launcher's <verb> (its
@@ -7758,8 +7759,10 @@ srg_run() {
   done
   [ "$#" -gt 0 ] && shift
   RUN_RC=0
-  RUN_OUT=$(env DOC_SUPERPOWERS_ROOT= CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= PATH="$SRL_BIN:$REAL_PATH" \
-    ${envs[@]+"${envs[@]}"} /bin/sh "$SCRIPT_DIR/search/launch.sh" "$@" <"$input" 2>"$SRG_TMP/err") || RUN_RC=$?
+  # -u UV_OFFLINE, as srl_run: the caller's shell never changes the result
+  RUN_OUT=$(env -u UV_OFFLINE DOC_SUPERPOWERS_ROOT= CLAUDE_PLUGIN_CACHE= CODEX_HOME= DOC_SEARCH_GATE= \
+    PATH="$SRL_BIN:$REAL_PATH" ${envs[@]+"${envs[@]}"} /bin/sh "$SCRIPT_DIR/search/launch.sh" "$@" <"$input" \
+    2>"$SRG_TMP/err") || RUN_RC=$?
   RUN_ERR=$(cat "$SRG_TMP/err")
 }
 
