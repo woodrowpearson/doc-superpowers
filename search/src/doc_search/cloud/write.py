@@ -39,10 +39,12 @@ One run, in this order (consumer's guarantees, carried over, plus the checks of 
     regular file) goes too.
  8. Orphans (`full`, `prune-orphans`): corpus paths git no longer knows; for the code corpus, every indexed
     path that is not a regular file in scope at HEAD. A code catch-up whose range changes an ignore file
-    (`.gitignore`, `.sembleignore`) or the search config runs this pass as well. More than max(20, 10% of the
-    corpus's paths) are not pruned without `force` (the corpus measured as it was before this run wrote
-    anything): that many means this is not the repository the corpus was built from. The run reports them
-    (`orphans_pending`) and is not stamped.
+    (`.gitignore`, `.sembleignore`) or the search config runs this pass as well, and writes the files the new
+    scope takes in. A symlinked ignore file whose target alone changes does not start it: the next `full`
+    corrects the corpus (`prune-orphans` drops what left scope). More than max(20, 10% of the corpus's paths)
+    are not pruned without `force` (the corpus measured as it was before this run wrote anything): that many
+    means this is not the repository the corpus was built from. The run reports them (`orphans_pending`) and
+    is not stamped.
  9. The stamp (`<meta>/index`, the code corpus's `<meta>/code-index`) is written only when no file failed and
     nothing is pending: it is the lower bound of the next catch-up, so stamping over a failure would drop that
     file from every later run's range.
@@ -386,6 +388,12 @@ class CloudIndexer:
             rescope = corpus.purges_out_of_scope and any(_moves_scope(path) for path in changed)
         # the corpus as it was before this run: the prune cap measures it, and the files written below are not in it
         indexed = self._indexed_paths(db) if plan.mode == "full" or rescope else set()
+        if rescope:
+            # scope moved both ways: files it now takes in are written (their own range may not touch them), and
+            # only a path the corpus holds has chunks to drop (no query per changed doc or config file)
+            queued = set(todo)
+            todo += sorted(p for p in tree.regular if p not in indexed and p not in queued and self._holds(tree, p))
+            left = [path for path in left if path in indexed]
 
         for path in todo:
             self._tick(db)
@@ -551,10 +559,11 @@ class CloudIndexer:
         corpus = self._corpus
         data = git_bytes(self._top, "cat-file", "blob", tree.regular[path])
         sha = hashlib.sha256(data).hexdigest()
+        identity = corpus.chunk_identity(self._embedder.id)
         if rewrite:
             # a rewrite trusts no stored sha; a corpus whose chunks name their chunker and embedder resumes one
             # that was cut short, skipping a file this run's rules already wrote
-            current = bool(corpus.chunk_identity()) and corpus.resumable_current(self._chunk0(db, path), sha)
+            current = bool(identity) and corpus.resumable_current(self._chunk0(db, path), sha, self._embedder.id)
         else:
             current = self._is_current(db, path, sha)
         if current:
@@ -593,13 +602,17 @@ class CloudIndexer:
         return None
 
     def _is_current(self, db: Any, path: str, sha: str) -> bool:
-        """True when the stored chunk 0 has this sha and the line range (consumer's chunks lack it: rewritten once)."""
+        """True when the stored chunk 0 has this sha and the line range (consumer's chunks lack it: rewritten once),
+        and names this run's chunker and embedder where the corpus records them (the code corpus's identity).
+        So vectors another embedder left behind (a rewrite cut short, then the config set back) are replaced."""
+        identity = self._corpus.chunk_identity(self._embedder.id)
         stored = self._chunk0(db, path)
         return (
             stored is not None
             and stored.get("fileSha256") == sha
             and _is_line(stored.get("startLine"))
             and _is_line(stored.get("endLine"))
+            and all(stored.get(key) == value for key, value in identity.items())
         )
 
     def _replace(self, db: Any, path: str, sha: str, chunks: list[CloudChunk], vectors: Any) -> None:
@@ -607,7 +620,7 @@ class CloudIndexer:
         firestore = import_module("google.cloud.firestore")
         vector_type = import_module("google.cloud.firestore_v1.vector").Vector
         collection = self._collection(db)
-        identity = self._corpus.chunk_identity()
+        identity = self._corpus.chunk_identity(self._embedder.id)  # the vectors' own embedder, as the stamp's
         keep = {chunk_id(path, chunk.ordinal) for chunk in chunks}
         ops: list[tuple[str, Any, dict[str, Any] | None]] = [
             ("delete", ref, None) for ref in self._refs(db, path) if ref.id not in keep

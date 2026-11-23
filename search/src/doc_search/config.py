@@ -394,6 +394,13 @@ def _cloud(value: Any, env_project: str | None) -> CloudCfg | None:
     docs = merged["docs"]
     if not isinstance(docs, bool):
         raise ConfigError("cloud.docs must be true or false")
+    firestore_cfg = FirestoreCfg(
+        project=_str(firestore["project"], "cloud.firestore.project", nullable=True) or env_project,
+        database=_str(firestore["database"], "cloud.firestore.database"),
+        collection=_str(firestore["collection"], "cloud.firestore.collection"),
+        meta_collection=_str(firestore["meta_collection"], "cloud.firestore.meta_collection"),
+        base_ref=_str(firestore["base_ref"], "cloud.firestore.base_ref", nullable=True),
+    )
     return CloudCfg(
         vertex=VertexCfg(
             project=_str(vertex["project"], "cloud.vertex.project", nullable=True) or env_project,
@@ -401,27 +408,29 @@ def _cloud(value: Any, env_project: str | None) -> CloudCfg | None:
             model=_str(vertex["model"], "cloud.vertex.model"),
             dimensions=_int(vertex["dimensions"], "cloud.vertex.dimensions", minimum=1),
         ),
-        firestore=FirestoreCfg(
-            project=_str(firestore["project"], "cloud.firestore.project", nullable=True) or env_project,
-            database=_str(firestore["database"], "cloud.firestore.database"),
-            collection=_str(firestore["collection"], "cloud.firestore.collection"),
-            meta_collection=_str(firestore["meta_collection"], "cloud.firestore.meta_collection"),
-            base_ref=_str(firestore["base_ref"], "cloud.firestore.base_ref", nullable=True),
-        ),
+        firestore=firestore_cfg,
         timeout_s=_seconds(merged["timeout_s"], "cloud.timeout_s"),
         docs=docs,
-        code=_cloud_code(merged["code"]),
+        code=_cloud_code(merged["code"], firestore_cfg),
     )
 
 
-def _cloud_code(value: Any) -> CloudCodeCfg | None:
+def _cloud_code(value: Any, firestore: FirestoreCfg) -> CloudCodeCfg | None:
     if value is None:
         return None
     if not isinstance(value, dict):
         raise ConfigError("cloud.code must be an object or null")
     merged = _merge(CLOUD_CODE_DEFAULTS, value)
+    collection = _str(merged["collection"], "cloud.code.collection")
+    # the code writer prunes every path it does not hold: sharing a collection would delete the docs' chunks
+    for other, key in ((firestore.collection, "collection"), (firestore.meta_collection, "meta_collection")):
+        if collection == other:
+            raise ConfigError(
+                f"cloud.code.collection must differ from cloud.firestore.{key} ({other!r}): "
+                "the code corpus needs a collection of its own"
+            )
     return CloudCodeCfg(
-        collection=_str(merged["collection"], "cloud.code.collection"),
+        collection=collection,
         exclude=_str_list(merged["exclude"], "cloud.code.exclude"),
         timeout_s=_seconds(merged["timeout_s"], "cloud.code.timeout_s"),
     )

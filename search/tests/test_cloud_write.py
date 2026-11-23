@@ -8,6 +8,7 @@ cloud extra.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -1502,3 +1503,64 @@ def test_docs_keep_a_doc_that_left_scope(git_repo) -> None:
         report = w.run(mode)
         assert report.orphans_removed == 0 and report.files_deleted == 0
         assert "docs/old/legacy.md" in w.paths(), f"{mode}: an out-of-scope doc HEAD still holds keeps its chunks"
+
+
+def test_code_catch_up_writes_files_that_enter_scope(git_repo) -> None:
+    w = make_code_world(git_repo, {"app.py": APP, "legacy/a.py": py("a")})
+    w.commit({".gitignore": "legacy/\n# keep\n"})  # legacy/a.py stays tracked, but out of scope
+    w.run("full")
+    assert w.paths() == {"app.py"}
+
+    w.commit({".gitignore": "# keep\n"})  # the ignore line goes: a.py is in scope again, its own range untouched
+    report = w.run("catch-up")
+
+    assert w.paths() == {"app.py", "legacy/a.py"} and report.files_written == 1 and report.stamped
+    assert w.chunks("legacy/a.py")[0]["fileSha256"] == hashlib.sha256(py("a").encode()).hexdigest()
+
+
+def test_code_rescope_queries_only_indexed_paths_for_drops(git_repo, monkeypatch: pytest.MonkeyPatch) -> None:
+    w = make_code_world(git_repo, {"app.py": APP, "docs/guide.md": "# G\n"})
+    w.run("full")
+    w.commit({"docs/guide.md": "# G\n\nMore.\n", "notes.txt": "n\n", ".gitignore": "# nothing\n"})
+    purged: list[str] = []
+    real = CloudIndexer._drop_file
+
+    def spy(self: CloudIndexer, db: Any, path: str, report: IndexReport) -> None:
+        purged.append(path)
+        real(self, db, path, report)
+
+    monkeypatch.setattr(CloudIndexer, "_drop_file", spy)
+    report = w.run("catch-up")
+
+    assert purged == [], "none of the changed paths was ever in the code corpus"
+    assert report.stamped and w.paths() == {"app.py"}
+
+
+def test_code_chunks_name_the_embedder_used(git_repo) -> None:
+    w = make_code_world(git_repo, {"app.py": APP})
+    cfg = load_config(w.repo.root, {})
+    assert cfg is not None and cfg.cloud is not None
+    other = dataclasses.replace(cfg.cloud, vertex=dataclasses.replace(cfg.cloud.vertex, dimensions=256))
+    embedder = VertexEmbedder(other, client=FakeGenai(dims=256), sleep=no_sleep)
+    corpus = CodeCloudCorpus(cfg, w.repo.root)  # its config says 768
+    indexer = CloudIndexer(cfg, w.repo.root, embedder, client=w.fs, clock=w.clock, holder="a:1", corpus=corpus)
+
+    indexer.run("full")
+
+    assert embedder.id == OTHER_EMBEDDER
+    assert w.chunks("app.py")[0]["embedderId"] == OTHER_EMBEDDER == w.stamp()["embedder_id"]
+
+
+@pytest.mark.parametrize(("field", "value"), [("embedderId", OTHER_EMBEDDER), ("chunkerId", "semble-0.6")])
+def test_code_non_rewrite_replaces_chunks_of_another_identity(git_repo, field: str, value: str) -> None:
+    w = make_code_world(git_repo, FOUR)
+    w.run("full")
+    w.mark("a.py", **{field: value})  # what a rewrite cut short left, under this run's stamp
+    before = len(w.genai.calls)
+
+    report = w.run("full")  # not a rewrite: the stamp names this run's embedder and chunker
+
+    assert (report.files_written, report.files_skipped) == (1, 3)
+    new = [text for call in w.genai.calls[before:] for text in call.texts]
+    assert len(new) == 1 and "'a'" in new[0]
+    assert w.chunks("a.py")[0][field] == (EMBEDDER_ID if field == "embedderId" else CODE_CHUNKER_ID)

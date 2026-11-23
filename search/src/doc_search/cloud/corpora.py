@@ -120,9 +120,10 @@ class CloudCorpus(Protocol):
         """The fields a chunk document carries beyond the common ones."""
         ...
 
-    def chunk_identity(self) -> dict[str, Any]:
-        """The fields every chunk document carries that name the chunker and embedder that made it; empty when
-        the corpus's chunks name neither (then a rewrite cannot resume, and `resumable_current` is never asked)."""
+    def chunk_identity(self, embedder_id: str | None = None) -> dict[str, Any]:
+        """The fields every chunk document carries that name the chunker and the embedder that made it
+        (`embedder_id`, the one the writer uses; by default the one the config names); empty when the corpus's
+        chunks name neither (then a rewrite cannot resume, and `resumable_current` is never asked)."""
         ...
 
     def chunker_stamp(self) -> dict[str, Any]:
@@ -133,8 +134,9 @@ class CloudCorpus(Protocol):
         """Whether `stamp`'s chunks were cut as this corpus cuts them; if not, a catch-up is a full rewrite."""
         ...
 
-    def resumable_current(self, chunk0: Mapping[str, Any] | None, sha: str) -> bool:
-        """During a rewrite: whether the stored chunk 0 shows this file already rewritten by this run's rules."""
+    def resumable_current(self, chunk0: Mapping[str, Any] | None, sha: str, embedder_id: str | None = None) -> bool:
+        """During a rewrite: whether the stored chunk 0 shows this file already rewritten by this run's rules (its
+        chunker, and the embedder `embedder_id`, by default the one the config names)."""
         ...
 
 
@@ -190,7 +192,7 @@ class DocsCloudCorpus:
             "headingPath": list(chunk.heading_path),
         }
 
-    def chunk_identity(self) -> dict[str, Any]:
+    def chunk_identity(self, embedder_id: str | None = None) -> dict[str, Any]:
         return {}  # the docs documents are unchanged: no chunker or embedder named
 
     def chunker_stamp(self) -> dict[str, Any]:
@@ -202,7 +204,7 @@ class DocsCloudCorpus:
             return stamp.chunker_version == CHUNKER_VERSION
         return not stamp.embedder_id
 
-    def resumable_current(self, chunk0: Mapping[str, Any] | None, sha: str) -> bool:
+    def resumable_current(self, chunk0: Mapping[str, Any] | None, sha: str, embedder_id: str | None = None) -> bool:
         return False  # a docs chunk 0 names no chunker or embedder: a rewrite trusts no sha
 
 
@@ -326,9 +328,9 @@ class CodeCloudCorpus:
         self.collection = cloud.code.collection
         self._top = Path(top)
         self._docs = Corpus(self._top, cfg, DocIndex(self._top))
+        self._embedder_id = embedder_id(cloud.vertex)  # the config's; the writer passes the one it really uses
         self._exclude = _compile(cloud.code.exclude, "cloud.code.exclude")
         self._extensions = frozenset(get_extensions(content_types(cfg.code.content)))
-        self._embedder_id = embedder_id(cloud.vertex)
         # semble's walker skips its default directories first, with this matcher (`walk_files`)
         self._base = GitIgnoreSpec.from_lines(sorted(_DEFAULT_IGNORED_DIRS), backend="simple")
         self._lock = threading.Lock()
@@ -390,8 +392,8 @@ class CodeCloudCorpus:
     def fields(self, path: str, chunk: CloudChunk) -> dict[str, Any]:
         return {"language": detect_language(PurePosixPath(path)), "headingPath": []}
 
-    def chunk_identity(self) -> dict[str, Any]:
-        return {"chunkerId": CODE_CHUNKER_ID, "embedderId": self._embedder_id}
+    def chunk_identity(self, embedder_id: str | None = None) -> dict[str, Any]:
+        return {"chunkerId": CODE_CHUNKER_ID, "embedderId": embedder_id or self._embedder_id}
 
     # -- the stamp ---------------------------------------------------------------------------------
 
@@ -401,13 +403,13 @@ class CodeCloudCorpus:
     def chunker_matches(self, stamp: CorpusStamp) -> bool:
         return stamp.chunker_id == CODE_CHUNKER_ID
 
-    def resumable_current(self, chunk0: Mapping[str, Any] | None, sha: str) -> bool:
+    def resumable_current(self, chunk0: Mapping[str, Any] | None, sha: str, embedder_id: str | None = None) -> bool:
         """A rewrite cut short resumes: chunk 0 already has this sha, this chunker and this embedder."""
         return (
             chunk0 is not None
             and chunk0.get("fileSha256") == sha
             and chunk0.get("chunkerId") == CODE_CHUNKER_ID
-            and chunk0.get("embedderId") == self._embedder_id
+            and chunk0.get("embedderId") == (embedder_id or self._embedder_id)
         )
 
 

@@ -455,6 +455,24 @@ def test_cloud_code_needs_the_code_leg(tmp_path: Path) -> None:
     assert "cloud.code" in str(err.value)
 
 
+@pytest.mark.parametrize(
+    ("firestore", "collection", "key"),
+    [
+        ({}, "doc_chunks", "collection"),
+        ({}, "corpus_meta", "meta_collection"),
+        ({"collection": "docs_v2"}, "docs_v2", "collection"),
+        ({"meta_collection": "meta_v2"}, "meta_v2", "meta_collection"),
+    ],
+)
+def test_cloud_code_collection_is_its_own(tmp_path: Path, firestore: dict, collection: str, key: str) -> None:
+    # the code writer prunes every path it does not hold: a shared collection would lose the docs' chunks
+    write_config(tmp_path, {"cloud": {"firestore": firestore, "code": {"collection": collection}}})
+    with pytest.raises(ConfigError) as err:
+        load_config(tmp_path, {})
+    assert str(err.value).startswith("cloud.code.collection must differ from cloud.firestore." + key)
+    assert repr(collection) in str(err.value)
+
+
 def test_cloud_code_unknown_key(tmp_path: Path) -> None:
     write_config(tmp_path, {"cloud": {"code": {"colection": "x"}}})
     with pytest.raises(ConfigError) as err:
