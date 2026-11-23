@@ -13,6 +13,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -679,6 +680,174 @@ def test_cloud_index_flags_need_cloud_and_exclude_each_other(repo, run, stub: St
     ):
         assert run(*argv).code == 3, argv
     assert stub.calls == []
+
+
+BOTH = {"cloud": {**CLOUD, "code": {}}}
+
+
+@dataclass
+class CorpusStub:
+    """One indexer per corpus name, made by the `make_indexer` seam; `made` records who was asked for."""
+
+    by_name: dict[str, StubIndexer] = field(default_factory=dict)
+    made: list[str] = field(default_factory=list)
+
+    def __call__(self, cfg, top, corpus=None):
+        name = corpus.name if corpus is not None else "docs"
+        self.made.append(name)
+        return self.by_name.setdefault(name, StubIndexer())
+
+
+@pytest.fixture
+def both(repo, tiny_model: str, monkeypatch: pytest.MonkeyPatch):
+    repo.write(CONFIG_REL, json.dumps({"docs": {"model": tiny_model}, "code": {"model": tiny_model}, **BOTH}))
+    repo.commit("both corpora")
+    stubs = CorpusStub()
+    monkeypatch.setattr(cli, "make_indexer", stubs)
+    return stubs
+
+
+def _held() -> LeaseHeld:
+    return LeaseHeld("host-a:1", datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+
+def test_cloud_index_runs_docs_then_code(both: CorpusStub, run) -> None:
+    both.by_name["docs"] = StubIndexer(IndexReport("full", files_written=2, stamped=True, stamp="a" * 40))
+    both.by_name["code"] = StubIndexer(IndexReport("full", files_written=5, stamped=True, stamp="b" * 40))
+
+    done = run("index", "--cloud", "--full")
+
+    assert done.code == 0 and done.err == ""
+    lines = done.out.splitlines()
+    assert all(line.startswith(("docs: ", "code: ")) for line in lines)
+    assert lines.index("docs: mode: full") < lines.index("code: mode: full")
+    assert "docs: files: 2 written, 0 skipped, 0 deleted" in lines and "code: stamped: yes (" + "b" * 40 + ")" in lines
+    assert both.made == ["docs", "code"]
+
+
+def test_cloud_index_corpus_code_only(both: CorpusStub, run) -> None:
+    done = run("index", "--cloud", "--corpus", "code")
+
+    assert done.code == 0 and done.err == ""
+    assert done.out.startswith("mode: catch-up\n")  # no prefix: one corpus run
+    assert both.made == ["code"]
+
+
+def test_cloud_index_corpus_docs_only(both: CorpusStub, run) -> None:
+    done = run("index", "--cloud", "--corpus", "docs")
+
+    assert done.code == 0 and done.out.startswith("mode: catch-up\n")
+    assert both.made == ["docs"]
+
+
+def test_cloud_index_code_alone_when_docs_is_off(repo, tiny_model: str, monkeypatch, run) -> None:
+    cloud = {**CLOUD, "docs": False, "code": {}}
+    repo.write(CONFIG_REL, json.dumps({"docs": {"model": tiny_model}, "code": {"model": tiny_model}, "cloud": cloud}))
+    repo.commit("code only")
+    stubs = CorpusStub()
+    monkeypatch.setattr(cli, "make_indexer", stubs)
+
+    done = run("index", "--cloud")
+
+    assert done.code == 0 and done.out.startswith("mode: catch-up\n")
+    assert stubs.made == ["code"]
+
+
+def test_cloud_index_exit_is_the_worst(both: CorpusStub, run) -> None:
+    both.by_name["code"] = StubIndexer(IndexReport("full", files_failed={"a.py": "boom"}))
+
+    done = run("index", "--cloud")
+
+    assert done.code == 1
+    assert "code: failed: a.py: boom" in done.out.splitlines()
+
+
+def test_cloud_index_error_lines_end_with_the_corpus(both: CorpusStub, run) -> None:
+    both.by_name["docs"] = StubIndexer(raises=BaseRefError("HEAD is not on main"))
+    both.by_name["code"] = StubIndexer(raises=RuntimeError("quota"))
+
+    done = run("index", "--cloud")
+
+    assert done.code == 2
+    err = done.err.splitlines()
+    assert err[0] == "doc-search: HEAD is not on main (docs)"
+    assert err[1].startswith("doc-search: index failed: ") and err[1].endswith(" (code)")
+
+
+def test_cloud_index_lease_refusal_never_outranks_a_failure(both: CorpusStub, run) -> None:
+    both.by_name["docs"] = StubIndexer(IndexReport("full", files_failed={"a.md": "boom"}))
+    both.by_name["code"] = StubIndexer(raises=_held())
+
+    done = run("index", "--cloud")
+
+    assert done.code == 1
+    assert re.search(r"^doc-search: the corpus lease is held by .* \(code\)$", done.err, re.M)
+
+
+def test_cloud_index_only_lease_refusals_exit_2(both: CorpusStub, run) -> None:
+    both.by_name["code"] = StubIndexer(raises=_held())
+
+    done = run("index", "--cloud")
+
+    assert done.code == 2 and done.out.startswith("docs: mode: catch-up")
+    assert re.search(r"^doc-search: the corpus lease is held by .* \(code\)$", done.err, re.M)
+
+
+def test_cloud_index_corpus_needs_cloud(repo, stub: StubIndexer, run) -> None:
+    assert run("index", "--corpus", "code").code == 3
+    assert stub.calls == []
+
+
+def test_cloud_index_corpus_code_unconfigured(repo, tiny_model: str, monkeypatch, run, stub: StubIndexer) -> None:
+    repo.write(CONFIG_REL, json.dumps({"docs": {"model": tiny_model}, "code": {"model": tiny_model}, "cloud": CLOUD}))
+    repo.commit("docs only")
+
+    done = run("index", "--cloud", "--corpus", "code")
+
+    assert (done.code, done.out) == (2, "")
+    assert done.err == "doc-search: cloud code is not configured (set cloud.code)\n"
+    assert stub.calls == []
+
+
+def test_cloud_index_pre_320_config_is_todays_output(repo, tiny_model: str, run, stub: StubIndexer) -> None:
+    """Recorded from the code before the code corpus existed: a driver greps `^stamped: yes` and the lease line."""
+    repo.write(CONFIG_REL, json.dumps({"docs": {"model": tiny_model}, "code": {"model": tiny_model}, "cloud": CLOUD}))
+    repo.commit("pre-3.21 cloud config")
+    stub.report = IndexReport(
+        "full",
+        files_written=4,
+        files_skipped=7,
+        files_deleted=1,
+        chunks_written=19,
+        orphans_removed=2,
+        stamped=True,
+        stamp="0123456789abcdef0123456789abcdef01234567",
+        notes=["corpus was empty"],
+    )
+    written = run("index", "--cloud", "--full")
+    stub.report = IndexReport("catch-up", stamped=False, notes=["corpus is at HEAD"])
+    noop = run("index", "--cloud")
+    stub.raises = _held()
+    refused = run("index", "--cloud")
+
+    assert (written.out, written.err, written.code) == (
+        "mode: full\nfiles: 4 written, 7 skipped, 1 deleted\nchunks written: 19\n"
+        "orphans: 2 removed, 0 pending\nstamped: yes (0123456789abcdef0123456789abcdef01234567)\n"
+        "note: corpus was empty\n",
+        "",
+        0,
+    )
+    assert (noop.out, noop.err, noop.code) == (
+        "mode: catch-up\nfiles: 0 written, 0 skipped, 0 deleted\nchunks written: 0\n"
+        "orphans: 0 removed, 0 pending\nstamped: no\nnote: corpus is at HEAD\n",
+        "",
+        0,
+    )
+    assert (refused.out, refused.err, refused.code) == (
+        "",
+        "doc-search: the corpus lease is held by host-a:1 until 2026-01-01T00:00:00+00:00\n",
+        2,
+    )
 
 
 def test_cloud_index_report(repo, run, stub: StubIndexer) -> None:

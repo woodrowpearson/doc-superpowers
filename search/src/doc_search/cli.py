@@ -27,7 +27,7 @@ import sys
 import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -36,6 +36,7 @@ from semble.utils import resolve_model_name
 from .check import CLIENTS, Verdict, assess, mcp_line, outside
 from .cloud import CloudUnavailable, describe
 from .cloud.vertex import VertexEmbedder
+from .cloud.corpora import CloudCorpus, corpora_for
 from .cloud.write import BaseRefError, CloudIndexer, CorpusRefused, IndexReport, LeaseHeld, LeaseLost
 from .config import CONFIG_REL, DEFAULTS, INERT_LINE, Config, ConfigError, load_config
 from .corpus import Corpus
@@ -105,7 +106,10 @@ def _build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argumen
     verb("init", "Write docs/search/config.json (the defaults) when it is absent; never overwrites.")
 
     index = verb("index", "Build both semble indexes for this worktree; with --cloud, write the cloud corpus.")
-    index.add_argument("--cloud", action="store_true", help="write the cloud corpus (needs the cloud object)")
+    index.add_argument("--cloud", action="store_true", help="write the cloud corpora (needs the cloud object)")
+    index.add_argument(
+        "--corpus", choices=("docs", "code"), help="with --cloud, write this corpus alone (default: each configured)"
+    )
     modes = index.add_mutually_exclusive_group()
     modes.add_argument(
         "--catch-up",
@@ -180,8 +184,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser, subs = _build_parser()
     try:
         args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
-        if args.verb == "index" and not args.cloud and (args.mode or args.allow_off_base or args.force):
-            subs["index"].error("--catch-up, --full, --prune-orphans, --allow-off-base and --force need --cloud")
+        if args.verb == "index" and not args.cloud and (args.mode or args.allow_off_base or args.force or args.corpus):
+            subs["index"].error(
+                "--catch-up, --full, --prune-orphans, --allow-off-base, --force and --corpus need --cloud"
+            )
     except SystemExit as stop:
         return stop.code if isinstance(stop.code, int) else (EXIT_USAGE if stop.code else 0)
     try:
@@ -355,33 +361,88 @@ def _index_local(rt: Any) -> int:
     return EXIT_COULD_NOT_RUN if failed else 0
 
 
-def make_indexer(cfg: Config, top: Path) -> CloudIndexer:
-    """The cloud indexer for `top`. The seam the tests replace: it is the only place the network is reached from."""
+def make_indexer(cfg: Config, top: Path, corpus: CloudCorpus | None = None) -> CloudIndexer:
+    """The cloud indexer for `top` (the docs corpus when `corpus` is None). The seam the tests replace: it is the
+    only place the network is reached from."""
     if cfg.cloud is None:
         raise CloudUnavailable(
             "cloud is not configured (set the cloud object in docs/search/config.json; DOC_SEARCH_CLOUD=0 disables it)"
         )
-    return CloudIndexer(cfg, top, VertexEmbedder(cfg.cloud))
+    return CloudIndexer(cfg, top, VertexEmbedder(cfg.cloud), corpus=corpus)
 
 
-def _index_cloud(rt: Any, args: argparse.Namespace) -> int:
+def _cloud_names(cfg: Config, only: str | None) -> list[str] | str:
+    """The corpora a run writes, docs first; a string is the usage line when `only` names one that is not on."""
+    if cfg.cloud is None:  # the indexer's own "cloud is not configured" answers
+        return ["docs"] if only in (None, "docs") else "doc-search: cloud code is not configured (set cloud.code)"
+    names = (["docs"] if cfg.cloud.docs else []) + (["code"] if cfg.cloud.code is not None else [])
+    if only is None:
+        return names or ["docs"]
+    if only not in names:
+        return (
+            "doc-search: cloud code is not configured (set cloud.code)"
+            if only == "code"
+            else "doc-search: cloud docs is off (cloud.docs is false)"
+        )
+    return [only]
+
+
+@dataclass
+class _CorpusRun:
+    out: str = ""  # the report, when there is one to print
+    err: str = ""  # the error line, when the run failed
+    code: int = 0
+    lease_refused: bool = False  # another host holds the lease: not a failure of this run
+
+
+def _run_corpus(rt: Any, args: argparse.Namespace, name: str) -> _CorpusRun:
     mode = args.mode or "catch-up"
     try:
-        report = make_indexer(rt.cfg, rt.repo.top).run(mode, allow_off_base=args.allow_off_base, force=args.force)
+        if name == "docs":
+            indexer = make_indexer(rt.cfg, rt.repo.top)  # the same two-argument call as before the code corpus
+        else:  # a corpus per run: the code corpus reads HEAD's ignore rules when it is built
+            indexer = make_indexer(rt.cfg, rt.repo.top, corpora_for(rt.cfg, rt.repo.top, "code")[0])
+        report = indexer.run(mode, allow_off_base=args.allow_off_base, force=args.force)
     except LeaseLost as err:
-        if err.report is not None:
-            print(_render_report(err.report))
-        return _fail(EXIT_COULD_NOT_RUN, f"doc-search: {err}")
-    except (BaseRefError, LeaseHeld, CorpusRefused) as err:
-        return _fail(EXIT_COULD_NOT_RUN, f"doc-search: {err}")
+        out = _render_report(err.report) if err.report is not None else ""
+        return _CorpusRun(out, " ".join(f"doc-search: {err}".split()), EXIT_COULD_NOT_RUN)
+    except LeaseHeld as err:
+        return _CorpusRun("", " ".join(f"doc-search: {err}".split()), EXIT_COULD_NOT_RUN, lease_refused=True)
+    except (BaseRefError, CorpusRefused) as err:
+        return _CorpusRun("", " ".join(f"doc-search: {err}".split()), EXIT_COULD_NOT_RUN)
     except CloudUnavailable as err:
-        return _fail(EXIT_COULD_NOT_RUN, f"doc-search: cloud unavailable: {err}")
+        return _CorpusRun("", " ".join(f"doc-search: cloud unavailable: {err}".split()), EXIT_COULD_NOT_RUN)
     except GitError:
         raise  # main() words it
     except Exception as err:  # noqa: BLE001 - a Firestore or Vertex failure is a line, not a traceback
-        return _fail(EXIT_COULD_NOT_RUN, f"doc-search: index failed: {describe(err)}")
-    print(_render_report(report))
-    return EXIT_FINDINGS if report.files_failed or report.orphans_pending else 0
+        return _CorpusRun("", " ".join(f"doc-search: index failed: {describe(err)}".split()), EXIT_COULD_NOT_RUN)
+    code = EXIT_FINDINGS if report.files_failed or report.orphans_pending else 0
+    return _CorpusRun(_render_report(report), "", code)
+
+
+def _index_cloud(rt: Any, args: argparse.Namespace) -> int:
+    names = _cloud_names(rt.cfg, args.corpus)
+    if isinstance(names, str):
+        return _fail(EXIT_COULD_NOT_RUN, names)
+    if len(names) == 1:  # one corpus: today's output, no prefix, no suffix
+        done = _run_corpus(rt, args, names[0])
+        if done.out:
+            print(done.out)
+        if done.err:
+            print(done.err, file=sys.stderr)
+        return done.code
+    runs: list[_CorpusRun] = []
+    for name in names:  # each corpus runs its whole sequence; one's failure never stops the other
+        done = _run_corpus(rt, args, name)
+        runs.append(done)
+        if done.out:
+            print("\n".join(f"{name}: {line}" for line in done.out.splitlines()))
+        if done.err:
+            print(f"{done.err} ({name})", file=sys.stderr)
+    failures = [r.code for r in runs if not r.lease_refused]
+    if any(failures):
+        return max(failures)
+    return EXIT_COULD_NOT_RUN if any(r.lease_refused for r in runs) else 0
 
 
 def _render_report(report: IndexReport) -> str:
