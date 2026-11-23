@@ -213,6 +213,27 @@ assert_ways_same_docs "deprecate vs update-index"
 teardown
 
 echo ""
+echo "--- undeprecate vs update-index (GH #98) ---"
+base_repo
+dt "$T1" deprecate-entry --superseded-by docs/b.md docs/a.md
+commit_all "deprecate a"
+git checkout -q -b A
+dt "$T2" undeprecate-entry --clear-superseded-by docs/a.md
+commit_all "A: undeprecate a"
+git checkout -q -b B main
+echo "// a changed" > src/a.js
+git add -A && git commit -qm "B: code"
+dt "$T3" update-index docs/a.md
+commit_all "B: re-verify a"
+run_ways
+assert_ways '.docs["docs/a.md"] | has("status")' "false" "the undeprecation survives the re-verify"
+assert_ways '.docs["docs/a.md"].superseded_by' "null" "the cleared superseded_by survives"
+assert_ways '.docs["docs/b.md"].replaces' "null" "the successor's cleared replaces survives"
+assert_ways '.docs["docs/a.md"].last_verified' "$T3" "the re-verification survives the undeprecation"
+assert_ways_same_docs "undeprecate vs update-index"
+teardown
+
+echo ""
 echo "--- move-entry repoint (+ set-code-refs) vs add-entry ---"
 base_repo
 dt "$T2" deprecate-entry --superseded-by docs/b.md docs/a.md
